@@ -46,6 +46,12 @@ Observed on the user's unit, 2026-10-17:
   Device Inquiry byte 3 = id − 1 (`0F` here). **App must match ports by the prefix
   `Launchpad MK2`, and treat `PID_1069` as "bootloader — run the updater".**
 - Verified: RGB SysEx `0B` lit pads 11/18/81/88 red/green/blue/yellow as expected.
+- Verified input (Session layout): bottom-left pad `90 0B 7F`, top-right pad
+  `90 58 7F`, top side button (Volume) `90 59 7F`, Session button `B0 6C 7F`, pad
+  row 4 col 4 `90 2C 7F`. **Release is Note On velocity 0** (`90 nn 00`), not `80`;
+  CC buttons release with value 0. Press velocity always `7F`.
+  Top row CC order: 104 ▲, 105 ▼, 106 ◀, 107 ▶, 108 Session, 109 User 1,
+  110 User 2, 111 Mixer.
 
 - SysEx header: `F0 00 20 29 02 18`.
 - Select Session layout on connect: `F0 00 20 29 02 18 22 00 F7`.
