@@ -13,6 +13,13 @@ End-to-end latency target: under 10 ms with ASIO.
 This document covers **Part 1** only. Later parts are listed in section 14 so the
 architecture leaves room for them.
 
+Part 1 is delivered in three implementation plans, each producing working software:
+- **1A** — core library (`lpd-core`: Launchpad protocol, audio engine, kit files),
+  `lp-probe`, and a headless CLI player (play a set from the Launchpad, no UI).
+- **1B** — Tauri + Svelte app: router, light modes, hot-plug, drag and drop, editor,
+  autosave, settings/latency display.
+- **1C** — Launch Control XL mixer, other MIDI devices, MIDI learn.
+
 ## 2. Hardware and protocol
 
 ### 2.1 Step 0: verify the protocol on the real units
@@ -107,7 +114,7 @@ A pad hit never passes through the UI.
 | `router` | Owns the current set state. Turns input events into audio commands and light state; handles bank switch, mixer controls, learn mode; pushes UI updates. |
 | `audio` | Real-time engine on its own thread (`cpal`). Voices, per-pad playback params, choke, 8-channel mixer, master. Commands in / voice events out via lock-free SPSC queues (`rtrb`). No allocation, no locks in the callback. |
 | `instrument` | `Instrument` trait; `DrumKit` is the only implementation in Part 1. Each instrument feeds one mixer channel set. Exists so Part 4 can add `SoundFont` without touching the engine. |
-| `kit` | Set/bank/pad data model, JSON load/save, sample import (copy into set folder), decode (`symphonia`), resample to device rate (`rubato`). |
+| `kit` | Set/bank/pad data model, JSON load/save, sample import (copy into set folder), decode (`symphonia`). No separate resampling step: a voice plays at rate ratio = sample rate / output rate × pitch factor with 4-point Hermite interpolation, which handles sample-rate conversion and pitch together. |
 | `lights` | ~60 Hz painter: from pad colours + light modes + voice state + time, compute all 81 Launchpad LEDs and LCXL button LEDs; diff against last sent frame; send only changes. |
 
 ### 3.2 Threads
@@ -117,8 +124,9 @@ A pad hit never passes through the UI.
   events at ~30 Hz.
 - Audio callback thread: consumes commands, renders, pushes voice start/end events.
 - Lights: a 60 Hz tick on the router thread (no separate thread).
-- Kit loading (decode/resample) on a worker thread; finished sample buffers handed to the
-  audio engine as `Arc<[f32]>` swaps, never decoded in the callback.
+- Kit loading (decode) on a worker thread; decoded samples are shared with the audio
+  engine as `Arc<Sample>`, never decoded in the callback. The kit keeps a strong
+  reference so the audio thread never frees sample memory.
 
 ## 4. Data model and files
 
@@ -192,8 +200,8 @@ Empty pads are omitted from `pads`. `mixGroup` defaults to the pad's row (`y`).
 - **Humanize:** per hit, random gain offset uniformly in ±`humanizeDb/2`; 0 = off.
 - **Mixer:** voice → mix group (volume, pan, low-pass filter, mute/solo) → master.
   Solo on any group mutes all non-solo groups. Low-pass is one biquad per group per
-  channel; 20 000 Hz = bypassed. Master stage: master gain then a `tanh` soft clipper,
-  so output never exceeds full scale.
+  channel; 20 000 Hz = bypassed. Master stage: master gain then a soft clipper that is
+  linear up to ±0.8 with a `tanh` knee above, so output never exceeds full scale.
 - **Banks:** Launchpad side buttons 1–8 select the active bank (button lit). Sounding
   voices continue across bank switches.
 - **Top row:** `Mixer` button (CC 111) = stop all voices (5 ms fade). Others unused in
@@ -206,7 +214,9 @@ Per bank, three independent toggles:
 
 - **Flash:** on hit, pad goes white then fades back to its colour over 150 ms.
 - **Play-state:** while the pad's voice is sounding, pad shows its colour at full
-  brightness; idle pads show their colour at ~35 % brightness.
+  brightness; idle pads show their colour at ~35 % brightness. "Sounding" = per-pad
+  counter of engine `VoiceStarted` / `VoiceEnded` events is above zero (a restart briefly
+  has two voices).
 - **Ripple:** on hit, a ring expands from the pad at ~1 pad per 40 ms, lightening pads
   it passes, for 4 rings.
 
@@ -300,8 +310,9 @@ zero dropouts.
 
 - Rust stable (to install), Node 26 (present).
 - Tauri 2, Svelte 5 + TypeScript, Vite.
-- Crates: `midir`, `cpal` (feature `asio`), `rtrb`, `symphonia`, `rubato`, `serde`,
-  `serde_json`, `assert_no_alloc` (dev/debug), `tracing`.
+- Crates: `midir`, `cpal` (feature `asio`), `rtrb`, `symphonia`, `serde`, `serde_json`,
+  `anyhow`; dev: `assert_no_alloc`, `hound`, `tempfile`.
+- Windows build needs Visual Studio 2022 Build Tools (C++ workload) for the MSVC linker.
 - ASIO build needs the Steinberg ASIO SDK (free download, not redistributed) and
   LLVM/clang. WASAPI build needs neither; ASIO is a cargo feature so the app builds
   without it.
@@ -312,8 +323,11 @@ zero dropouts.
 ```
 launchpad-drummer/
   docs/                      specs, plans, verified protocol tables
+  Cargo.toml                 Rust workspace
+  crates/lpd-core/           devices, audio, kit (no I/O to hardware or sound card)
+  crates/lpd-cli/            headless player (plan 1A)
   tools/lp-probe/            Step 0 CLI (Rust)
-  src-tauri/                 Rust app (modules from 3.1)
+  src-tauri/                 Tauri app: midi_io, router, lights (plan 1B), uses lpd-core
   src/                       Svelte UI
   starter-sets/              (later) example sets
 ```
