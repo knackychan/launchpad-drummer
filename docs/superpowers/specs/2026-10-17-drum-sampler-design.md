@@ -249,6 +249,10 @@ LCXL: mute buttons lit amber when muted, solo buttons lit green when soloed.
 
 - **Grid view:** 8×8 mirror of the Launchpad with live LED colours; click = play.
   Computer-keyboard fallback for the bottom 4 rows: `1–8`, `Q–I`, `A–K`, `Z–,`.
+- **Keys plate** (added 2026-10-17, UI spec §4.6): 88-key mirror of the Keystation 49
+  under the grid and mixer. The keys play their own synth / keys layer (SoundFont presets:
+  piano, e-piano, organ, synth pad / lead / bass), not the pads; learned notes still play
+  their pad. Pitch and mod wheels.
 - **Pad editor** (selected pad): sample name + waveform with draggable trim handles,
   colour picker, volume, pitch, mode, choke group, mix group, Learn button.
 - **Drag and drop:**
@@ -362,8 +366,14 @@ combo effects on the grid; UI mirrors it larger.
 (SoundFont `.sf2`), each device on its own mixer channel (same 8 channels the LCXL
 already controls), plus a looper/recorder to stack parts.
 
+**Sequencer (loop builder; part number to be decided).** Added 2026-10-17: a step
+sequencer (one lane per pad, 16/32 steps, BPM, swing, accents) under the keys plate on the
+Play screen, drawn in the mockup (`2026-10-17-ui-design.md` §4.7). Whether it ships in
+Part 1 or later is still open. Likely overlaps the Part 4 looper/recorder, so design them
+together.
+
 Order: Part 1 first (everything depends on its engine and light painter). Order of
-Parts 2–4 to be decided after Part 1.
+Parts 2–4 and the sequencer to be decided after Part 1.
 
 ## 15. Risks and open items
 
