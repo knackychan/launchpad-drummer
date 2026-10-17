@@ -32,12 +32,20 @@ this spec gets updated.
 4. Send each LED command type and ask the user to confirm the visible result (y/n).
 5. Write the protocol table document.
 
-### 2.2 Launchpad MK2 (USB `VID_1235 PID_1069` observed on user's unit)
+### 2.2 Launchpad MK2
 
-Observed 2026-10-17: enumerates with Microsoft class driver (`usbaudio`, no Novation
-driver needed); WinMM ports `IN 0: Launchpad MK2`, `OUT 1: Launchpad MK2`. Note On ch1
-to notes 11/18/81/88 with palette velocities sent without error (visual result to be
-confirmed by user).
+Observed on the user's unit, 2026-10-17:
+
+- Microsoft class driver (`usbaudio`); no Novation driver needed.
+- Unit was stuck in **bootloader** (`PID_1069`, port name `Launchpad MK2`, fixed LED
+  pattern, LED commands ignored, no pad input). Fixed by running Novation's
+  `launchpad-mk2-updater.exe`. Device Inquiry version bytes: bootloader `00 01 06 02`,
+  application after update `00 01 07 01`.
+- Normal mode: `PID_0078`, port name **`Launchpad MK2 16`**. The MK2 has a device ID
+  1–16; PID = `0x0068 + id` and port name = `Launchpad MK2` + (` <id>` when id ≠ 1).
+  Device Inquiry byte 3 = id − 1 (`0F` here). **App must match ports by the prefix
+  `Launchpad MK2`, and treat `PID_1069` as "bootloader — run the updater".**
+- Verified: RGB SysEx `0B` lit pads 11/18/81/88 red/green/blue/yellow as expected.
 
 - SysEx header: `F0 00 20 29 02 18`.
 - Select Session layout on connect: `F0 00 20 29 02 18 22 00 F7`.
