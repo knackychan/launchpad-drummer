@@ -32,7 +32,12 @@ this spec gets updated.
 4. Send each LED command type and ask the user to confirm the visible result (y/n).
 5. Write the protocol table document.
 
-### 2.2 Launchpad MK2 (expected, USB `VID_1235 PID_0069`)
+### 2.2 Launchpad MK2 (USB `VID_1235 PID_1069` observed on user's unit)
+
+Observed 2026-10-17: enumerates with Microsoft class driver (`usbaudio`, no Novation
+driver needed); WinMM ports `IN 0: Launchpad MK2`, `OUT 1: Launchpad MK2`. Note On ch1
+to notes 11/18/81/88 with palette velocities sent without error (visual result to be
+confirmed by user).
 
 - SysEx header: `F0 00 20 29 02 18`.
 - Select Session layout on connect: `F0 00 20 29 02 18 22 00 F7`.
@@ -334,9 +339,8 @@ Parts 2–4 to be decided after Part 1.
 
 ## 15. Risks and open items
 
-- **Launchpad currently fails USB enumeration** on this PC (`Device Descriptor Request
-  Failed`, Code 43, port 6). Must be fixed (cable/port) before Step 0. Launch Control XL
-  not yet connected.
+- Launchpad USB enumeration failure (Code 43) resolved by replug on 2026-10-17.
+  Launch Control XL not yet connected.
 - Expected protocol values (2.2, 2.3) are unverified until `lp-probe` runs.
 - `cpal` ASIO setup on Windows is the most likely build friction; WASAPI fallback keeps
   the project unblocked.
