@@ -76,3 +76,48 @@ fn import_copies_into_samples_with_collision_suffix() {
         b"RIFF"
     );
 }
+
+fn snapshot(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let mut files: Vec<_> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| {
+            let p = e.unwrap().path();
+            (
+                p.file_name().unwrap().to_string_lossy().into_owned(),
+                fs::read(&p).unwrap(),
+            )
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+#[test]
+fn new_set_guard_accepts_fresh_and_empty_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    ensure_new_set_dir(dir.path()).unwrap();
+    ensure_new_set_dir(&dir.path().join("not-created-yet")).unwrap();
+}
+
+#[test]
+fn new_set_guard_rejects_every_existing_kit_artifact() {
+    for name in [SET_FILE, BACKUP_FILE, BROKEN_FILE, "set.json.tmp"] {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(name), b"{ not json").unwrap();
+        let before = snapshot(dir.path());
+        let err = ensure_new_set_dir(dir.path()).unwrap_err().to_string();
+        assert!(err.contains(name), "{err}");
+        assert!(err.contains("Open"), "{err}");
+        assert_eq!(snapshot(dir.path()), before, "{name} must be untouched");
+    }
+}
+
+#[test]
+fn new_set_guard_rejects_a_valid_kit_without_touching_it() {
+    let dir = tempfile::tempdir().unwrap();
+    save(dir.path(), &set_named("Mine")).unwrap();
+    save(dir.path(), &set_named("Mine 2")).unwrap();
+    let before = snapshot(dir.path());
+    assert!(ensure_new_set_dir(dir.path()).is_err());
+    assert_eq!(snapshot(dir.path()), before);
+}

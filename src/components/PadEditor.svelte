@@ -1,19 +1,22 @@
 <script lang="ts">
   // Pad editor (UI spec 4.3), shown in the Play side drawer.
   import Knob from './Knob.svelte';
-  import { GROUP_COLORS, LAUNCHPAD_PALETTE, groupLegend, padLabel } from '../lib/model.ts';
+  import { LAUNCHPAD_PALETTE, groupLegend, padLabel } from '../lib/model.ts';
   import type { Group, Pad, PadMode, SamplePeaks } from '../lib/model.ts';
   import { ledToCss } from '../lib/led.ts';
-  import { fmtDb, fmtSemis } from '../lib/mix.ts';
+  import { DB_FLOOR, fmtDb, fmtSemis } from '../lib/mix.ts';
 
-  let { x, y, pad, groups, peaks, onupdate, onremove, ontrigger, onrelease }: {
+  let { x, y, pad, groups, peaks, onupdate, onassign, onremove, ontrigger, onrelease }: {
     x: number;
     y: number;
     /** null = empty pad */
     pad: Pad | null;
     groups: Group[];
     peaks: SamplePeaks | null;
-    onupdate: (pad: Pad) => void;
+    /** `field` names the control being dragged so the backend can fold a drag into one undo step. */
+    onupdate: (pad: Pad, field?: string) => void;
+    /** Load and assign a sample (path relative to the set folder, or any file). Resolves false on failure. */
+    onassign: (x: number, y: number, path: string) => Promise<boolean>;
     onremove: (x: number, y: number) => void;
     ontrigger: (x: number, y: number) => void;
     onrelease: (x: number, y: number) => void;
@@ -24,7 +27,7 @@
   let pathDraft = $state('');
 
   function update<K extends keyof Pad>(key: K, value: Pad[K]) {
-    if (pad) onupdate({ ...pad, [key]: value });
+    if (pad) onupdate({ ...pad, [key]: value }, key);
   }
   const sameColor = (a: readonly number[], b: readonly number[]) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 
@@ -86,11 +89,12 @@
     const near = [pad.trimStartMs, pad.trimEndMs ?? len].some((v) => Math.abs((v / len) * r.width - px) < 8);
     canvas.style.cursor = near ? 'ew-resize' : 'pointer';
   }
-  function setSample(path: string) {
-    const sample = path.trim();
-    if (!sample) return;
-    if (pad) update('sample', sample);
-    else onupdate({ x, y, sample, color: [...GROUP_COLORS[y % 8]] as [number, number, number], volumeDb: 0, pitchSemitones: 0, trimStartMs: 0, trimEndMs: null, mode: 'oneShot', chokeGroup: null, mixGroup: y });
+  async function setSample(input: HTMLInputElement) {
+    const sample = input.value.trim();
+    if (!sample || sample === pad?.sample) return;
+    const ok = await onassign(x, y, sample);
+    // A rejected sample leaves the pad as it was; show that, not the rejected text.
+    if (!ok) { pathDraft = ''; input.value = pad?.sample ?? ''; }
   }
 </script>
 
@@ -114,13 +118,13 @@
       placeholder="samples/kick.wav"
       value={pad?.sample ?? pathDraft}
       oninput={(e) => { pathDraft = e.currentTarget.value; }}
-      onchange={(e) => setSample(e.currentTarget.value)}
+      onchange={(e) => void setSample(e.currentTarget)}
       onkeydown={(e) => e.stopPropagation()}
     />
   </div>
 
   {#if !pad}
-    <div class="empty-msg">Empty pad.<br />Type a sample path (relative to the set folder) and press Enter.</div>
+    <div class="empty-msg">Empty pad.<br />Type a sample path (relative to the set folder, or any file) and press Enter.</div>
   {:else}
     <div class="ed-sec">
       <div class="silk">SAMPLE · TRIM</div>
@@ -163,7 +167,7 @@
               fine={1}
               size={30}
               fmt={(v) => String(Math.round(v))}
-              onchange={(v) => { if (pad) { const color = [...pad.color] as [number, number, number]; color[ci] = Math.round(v); update('color', color); } }}
+              onchange={(v) => { if (pad) { const color = [...pad.color] as [number, number, number]; color[ci] = Math.round(v); onupdate({ ...pad, color }, 'colorChannel'); } }}
             />
           {/each}
         </div>
@@ -171,7 +175,7 @@
     </div>
 
     <div class="ed-row knobs">
-      <Knob label="VOLUME" value={pad.volumeDb} min={-60} max={6} def={0} step={0.5} fine={0.1} fmt={fmtDb} onchange={(v) => update('volumeDb', v)} />
+      <Knob label="VOLUME" value={pad.volumeDb} min={DB_FLOOR} max={6} def={0} step={0.5} fine={0.1} fmt={fmtDb} onchange={(v) => update('volumeDb', v)} />
       <Knob label="PITCH" value={pad.pitchSemitones} min={-24} max={24} def={0} step={1} fine={0.1} fmt={fmtSemis} onchange={(v) => update('pitchSemitones', v)} />
       <div class="ed-sec">
         <span class="silk">MODE</span>

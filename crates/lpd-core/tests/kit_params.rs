@@ -53,3 +53,26 @@ fn group_converts_to_group_params() {
         (0.5, -3.0, 2_000.0, true, false)
     );
 }
+
+#[test]
+fn fader_floor_is_silent_but_ordinary_db_maths_is_unchanged() {
+    use lpd_core::audio::{db_to_gain, fader_gain, FADER_FLOOR_DB};
+    assert_eq!(fader_gain(FADER_FLOOR_DB), 0.0);
+    assert_eq!(fader_gain(-90.0), 0.0);
+    assert_eq!(fader_gain(-59.9), db_to_gain(-59.9));
+    assert_eq!(fader_gain(0.0), 1.0);
+    assert!(
+        (db_to_gain(-60.0) - 0.001).abs() < 1e-6,
+        "humanize maths keeps the true curve"
+    );
+
+    let mut g = Set::new().mixer.groups.remove(0);
+    g.volume_db = -60.0;
+    assert_eq!(group_params(&g).gain, 0.0);
+    g.volume_db = -59.0;
+    assert!(group_params(&g).gain > 0.0);
+
+    let mut pad = Pad::new(0, 0, "s.wav", [0, 0, 0]);
+    pad.volume_db = -60.0;
+    assert_eq!(play_params(&pad, &one_second()).gain, 0.0);
+}

@@ -1,5 +1,5 @@
 use super::{Group, Pad, PadMode};
-use crate::audio::{db_to_gain, GroupParams, PlayParams, Sample, GROUPS};
+use crate::audio::{fader_gain, GroupParams, PlayParams, Sample, GROUPS};
 
 pub fn play_params(pad: &Pad, sample: &Sample) -> PlayParams {
     let frames = sample.frames();
@@ -11,7 +11,7 @@ pub fn play_params(pad: &Pad, sample: &Sample) -> PlayParams {
         .unwrap_or(frames)
         .clamp(start, frames);
     PlayParams {
-        gain: db_to_gain(pad.volume_db),
+        gain: fader_gain(pad.volume_db),
         pitch_semitones: pad.pitch_semitones,
         start_frame: start,
         end_frame: end,
@@ -23,7 +23,7 @@ pub fn play_params(pad: &Pad, sample: &Sample) -> PlayParams {
 
 pub fn group_params(g: &Group) -> GroupParams {
     GroupParams {
-        gain: db_to_gain(g.volume_db),
+        gain: fader_gain(g.volume_db),
         pan: g.pan,
         pitch_semitones: g.pitch_semitones,
         lowpass_hz: g.lowpass_hz,

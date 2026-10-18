@@ -3,13 +3,27 @@
 use lpd_core::devices::launchpad::{self as lp, LpEvent};
 use midir::{MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use serde::Serialize;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 const RECHECK: Duration = Duration::from_secs(2);
 
-pub struct FrameSender(Sender<Vec<u8>>);
+/// Latest game LED frame, replaced (never queued) by each new one.
+#[derive(Clone, Default)]
+pub struct FrameSender(Arc<Mutex<Option<Vec<u8>>>>);
+
+impl FrameSender {
+    fn take(&self) -> Option<Vec<u8>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
+    }
+}
+
+impl LedSink for MidiOutputConnection {
+    fn send(&mut self, message: &[u8]) -> Result<(), String> {
+        MidiOutputConnection::send(self, message).map_err(|e| e.to_string())
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DeviceStatus {
@@ -58,25 +72,30 @@ struct Connection {
     input_name: String,
     output_name: String,
     _input: MidiInputConnection<()>,
-    output: MidiOutputConnection,
 }
 
-use crate::state::AppState;
+use crate::lights::{LedOutput, LedSink};
+use crate::state::{AppState, InputMode};
 
 pub fn start(app: AppHandle, state: AppState) {
-    let (tx, rx) = mpsc::channel();
-    app.manage(FrameSender(tx));
-    std::thread::spawn(move || run(app, state, rx));
+    let slot = FrameSender::default();
+    app.manage(slot.clone());
+    std::thread::spawn(move || run(app, state, slot));
 }
 
 /// `frame` has 64 RGB triplets in visual order (top-left to bottom-right), channels 0..=63.
+/// Only a game that owns the pads may draw; frames arriving in sampler mode are dropped.
 #[tauri::command]
-pub fn send_led_frame(frame: Vec<[u8; 3]>, sender: State<'_, FrameSender>) -> Result<(), String> {
+pub fn send_led_frame(
+    frame: Vec<[u8; 3]>,
+    sender: State<'_, FrameSender>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     let message = rgb_message(&frame)?;
-    sender
-        .0
-        .send(message)
-        .map_err(|_| "Launchpad MIDI worker stopped".to_string())
+    if state.input_mode() == InputMode::Game {
+        *sender.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(message);
+    }
+    Ok(())
 }
 
 fn decode_pad(msg: &[u8]) -> Option<PadEvent> {
@@ -114,93 +133,81 @@ fn rgb_message(frame: &[[u8; 3]]) -> Result<Vec<u8>, String> {
     Ok(msgs.into_iter().next().expect("exactly one message"))
 }
 
-fn run(app: AppHandle, state: AppState, rx: Receiver<Vec<u8>>) {
+fn run(app: AppHandle, state: AppState, game_frames: FrameSender) {
     let mut connection: Option<Connection> = None;
+    let mut led: LedOutput<MidiOutputConnection> = LedOutput::default();
     let mut status = None;
-    let mut latest_frame = None;
     let mut next_check = Instant::now();
     let mut tick_counter: u32 = 0;
     let tick_interval = Duration::from_millis(16);
     loop {
         let now = Instant::now();
         if now >= next_check {
-            check_connection(
-                &app,
-                &state,
-                &mut connection,
-                &mut status,
-                latest_frame.as_deref(),
-            );
+            check_connection(&app, &state, &mut connection, &mut led, &mut status);
             next_check = now + RECHECK;
         }
 
-        let manual_override = rx.try_recv().ok();
+        state.maintain();
 
-        if let Ok(mut r) = state.router.lock() {
-            r.poll_audio_events();
-        }
+        let sent = match state.input_mode() {
+            InputMode::Game => match game_frames.take() {
+                Some(frame) => led.send_game(&state.painter, frame),
+                None => Ok(()),
+            },
+            InputMode::Sampler => {
+                led.clear_game();
+                game_frames.take();
+                let full_frame = state.paint_frame(now);
+                let sent = led.send_sampler(&state.painter, &full_frame);
 
-        if let Some(frame) = manual_override {
-            latest_frame = Some(frame.clone());
-            if let Some(device) = connection.as_mut() {
-                if let Err(error) = device.output.send(&frame) {
-                    eprintln!("Launchpad LED send failed: {error}");
-                    connection = None;
-                    report_status(&app, &mut status, DeviceStatus::Disconnected);
-                }
-            }
-        } else {
-            let full_frame = state.paint_frame(now);
-
-            if let Some(device) = connection.as_mut() {
-                let diff = if let Ok(mut p) = state.painter.lock() {
-                    p.diff(&full_frame)
-                } else {
-                    vec![]
-                };
-                if !diff.is_empty() {
-                    for msg in lp::rgb_messages(&diff) {
-                        if let Err(error) = device.output.send(&msg) {
-                            eprintln!("Launchpad LED send failed: {error}");
-                            connection = None;
-                            report_status(&app, &mut status, DeviceStatus::Disconnected);
-                            break;
+                tick_counter = tick_counter.wrapping_add(1);
+                if tick_counter % 2 == 0 {
+                    let mut screen_frame = [[0u8; 3]; 64];
+                    for &(led_id, color) in &full_frame {
+                        let row_1_based = led_id / 10;
+                        let col_1_based = led_id % 10;
+                        if (1..=8).contains(&row_1_based) && (1..=8).contains(&col_1_based) {
+                            let y = row_1_based - 1;
+                            let x = col_1_based - 1;
+                            let screen_idx = (7 - y as usize) * 8 + x as usize;
+                            screen_frame[screen_idx] = color;
                         }
                     }
+                    let _ = app.emit("launchpad-frame", screen_frame.to_vec());
                 }
+                sent
             }
-
-            tick_counter = tick_counter.wrapping_add(1);
-            if tick_counter % 2 == 0 {
-                let mut screen_frame = [[0u8; 3]; 64];
-                for &(led_id, color) in &full_frame {
-                    let row_1_based = led_id / 10;
-                    let col_1_based = led_id % 10;
-                    if (1..=8).contains(&row_1_based) && (1..=8).contains(&col_1_based) {
-                        let y = row_1_based - 1;
-                        let x = col_1_based - 1;
-                        let screen_idx = (7 - y as usize) * 8 + x as usize;
-                        screen_frame[screen_idx] = color;
-                    }
-                }
-                let _ = app.emit("launchpad-frame", screen_frame.to_vec());
-            }
+        };
+        if let Err(error) = sent {
+            eprintln!("Launchpad LED send failed: {error}");
+            connection = None;
+            report_status(&app, &mut status, DeviceStatus::Disconnected);
         }
 
         std::thread::sleep(tick_interval);
     }
 }
 
+/// Forget the device: no connection, and the painter must repaint from scratch next time.
+fn drop_device(
+    connection: &mut Option<Connection>,
+    led: &mut LedOutput<MidiOutputConnection>,
+    state: &AppState,
+) {
+    *connection = None;
+    led.disconnect(&state.painter);
+}
+
 fn check_connection(
     app: &AppHandle,
     state: &AppState,
     connection: &mut Option<Connection>,
+    led: &mut LedOutput<MidiOutputConnection>,
     status: &mut Option<DeviceStatus>,
-    latest_frame: Option<&[u8]>,
 ) {
     match bootloader_present() {
         Ok(true) => {
-            *connection = None;
+            drop_device(connection, led, state);
             report_status(app, status, DeviceStatus::Bootloader);
             return;
         }
@@ -215,7 +222,7 @@ fn check_connection(
     let input = match MidiInput::new("launchpad-drummer-in") {
         Ok(input) => input,
         Err(error) => {
-            *connection = None;
+            drop_device(connection, led, state);
             if *status != Some(DeviceStatus::Disconnected) {
                 eprintln!("Launchpad input scan failed: {error}");
             }
@@ -226,7 +233,7 @@ fn check_connection(
     let output = match MidiOutput::new("launchpad-drummer-out") {
         Ok(output) => output,
         Err(error) => {
-            *connection = None;
+            drop_device(connection, led, state);
             if *status != Some(DeviceStatus::Disconnected) {
                 eprintln!("Launchpad output scan failed: {error}");
             }
@@ -251,7 +258,7 @@ fn check_connection(
     let (Some((input_port, input_name)), Some((output_port, output_name))) =
         (input_port, output_port)
     else {
-        *connection = None;
+        drop_device(connection, led, state);
         report_status(app, status, DeviceStatus::Disconnected);
         return;
     };
@@ -262,7 +269,7 @@ fn check_connection(
         report_status(app, status, DeviceStatus::Connected);
         return;
     }
-    *connection = None;
+    drop_device(connection, led, state);
     let receiver = app.clone();
     let app_state = state.clone();
     let input_connection = match input.connect(
@@ -289,7 +296,7 @@ fn check_connection(
             return;
         }
     };
-    let mut output_connection = match output.connect(&output_port, "launchpad-drummer-out") {
+    let output_connection = match output.connect(&output_port, "launchpad-drummer-out") {
         Ok(output) => output,
         Err(error) => {
             if *status != Some(DeviceStatus::Busy) {
@@ -299,13 +306,17 @@ fn check_connection(
             return;
         }
     };
-    let all_off = lp::set_all(0);
-    if let Err(error) = output_connection
-        .send(&lp::SELECT_SESSION_LAYOUT)
-        .and_then(|_| output_connection.send(&all_off))
-        .and_then(|_| latest_frame.map_or(Ok(()), |frame| output_connection.send(frame)))
-    {
+    // A new device shows nothing: the painter repaints in full, and a game that owns the pads
+    // gets its last frame back.
+    let initialised = led
+        .connect(output_connection, &state.painter)
+        .and_then(|_| match state.input_mode() {
+            InputMode::Game => led.resend_game(&state.painter),
+            InputMode::Sampler => Ok(()),
+        });
+    if let Err(error) = initialised {
         eprintln!("Launchpad initialization failed: {error}");
+        drop_device(connection, led, state);
         report_status(app, status, DeviceStatus::Disconnected);
         return;
     }
@@ -313,7 +324,6 @@ fn check_connection(
         input_name,
         output_name,
         _input: input_connection,
-        output: output_connection,
     });
     report_status(app, status, DeviceStatus::Connected);
 }

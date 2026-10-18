@@ -1,5 +1,7 @@
 # Launchpad Drummer — Plan 1A continuation note
 
+> **Historical / superseded (2026-10-18).** Written during Plan 1A. Task 3 and the protocol report have since been implemented, and Plans 1B and 1C continue from `10835e4`. For current status read [the audit and remediation note](2026-10-18-code-audit-and-remediation.md).
+
 Date: 2026-10-18 (Asia/Taipei).
 Checkout: `D:\MY DOCS\MY TOOLS\LAUNCHBAND\launchpad-drummer`.
 Branch: `ui-sci-retro-skin`.

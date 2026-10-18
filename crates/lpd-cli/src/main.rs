@@ -2,7 +2,7 @@ mod audio_out;
 mod midi;
 mod player;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use lpd_core::audio::Command;
 use lpd_core::kit::{self, Pad, Set};
 use player::{Action, Player};
@@ -49,9 +49,7 @@ fn main() -> Result<()> {
 }
 
 fn new_set(dir: &Path, samples: &Path) -> Result<()> {
-    if dir.join(kit::SET_FILE).exists() {
-        bail!("{} already contains a set", dir.display());
-    }
+    kit::ensure_new_set_dir(dir)?;
     let mut files: Vec<PathBuf> = std::fs::read_dir(samples)
         .with_context(|| format!("read {}", samples.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))

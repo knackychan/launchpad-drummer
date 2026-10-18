@@ -158,6 +158,8 @@ Implemented. The reviewers check it against this text; later tasks rely on these
 
 ### Task 2: App config, startup decision, autosave, save status, log file, pickers
 
+> **Status 2026-10-18 (partial).** Done as part of audit finding 8: `saver.rs` (`Saver`, `SaveStatus`, 1 s debounce, 2 s retry), `AppState::touch` wired to it, the `save-status` event, `get_save_status`, and the shared manual/auto save path. Still to do: config, startup decision, log file, pickers, `new_set`/`open_set`/`OpenResult` and the `save_now` rename. See [the remediation note](2026-10-18-code-audit-and-remediation.md#implementation-record-2026-10-18).
+
 **Purpose.** The app must reopen the last set, save by itself, report save failures, and offer folder and file pickers. Today nothing is remembered between runs and saving is a manual key.
 
 **Files:**

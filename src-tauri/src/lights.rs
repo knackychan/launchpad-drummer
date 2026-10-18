@@ -4,8 +4,9 @@
 //! Ripple (expanding concentric rings), Missing sample red blink (500 ms cycle), and active bank side button.
 
 use lpd_core::devices::launchpad as lp;
-use lpd_core::kit::Set;
+use lpd_core::kit::{Bank, Set};
 use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 const FLASH_DURATION: Duration = Duration::from_millis(150);
@@ -23,10 +24,33 @@ struct PadHit {
     time: Instant,
 }
 
+/// The active bank, which of its samples are loaded and which pads sound, copied under one
+/// router lock so painting never touches the router.
+#[derive(Clone, Debug)]
+pub struct PaintSnapshot {
+    pub bank_index: usize,
+    pub bank: Bank,
+    pub loaded: HashSet<String>,
+    /// Index `y * 8 + x` of the active bank.
+    pub sounding: [bool; 64],
+}
+
+/// LEDs that differ from what the device was last told, tagged with the cache generation
+/// they were computed against.
+#[derive(Debug)]
+pub struct Diff {
+    pub leds: Vec<(u8, [u8; 3])>,
+    generation: u64,
+}
+
+/// Lock order: the painter is a leaf. Never hold it while taking another lock, and never take
+/// the router from inside a painter call.
 pub struct LightPainter {
     hits: Vec<PadHit>,
     start_time: Instant,
     last_frame: HashMap<u8, [u8; 3]>,
+    /// Bumped by `invalidate`; a `Diff` from an older generation must not update the cache.
+    generation: u64,
 }
 
 impl Default for LightPainter {
@@ -41,6 +65,7 @@ impl LightPainter {
             hits: Vec::new(),
             start_time: Instant::now(),
             last_frame: HashMap::new(),
+            generation: 0,
         }
     }
 
@@ -48,6 +73,17 @@ impl LightPainter {
         self.hits
             .retain(|h| time.saturating_duration_since(h.time) < Duration::from_millis(600));
         self.hits.push(PadHit { x, y, time });
+    }
+
+    /// Compute the full frame for `snap` (the active bank).
+    pub fn paint_snapshot(&mut self, snap: &PaintSnapshot, now: Instant) -> Vec<(u8, [u8; 3])> {
+        self.paint_bank(
+            &snap.bank,
+            snap.bank_index,
+            &snap.loaded,
+            &|x, y| snap.sounding[y as usize * 8 + x as usize],
+            now,
+        )
     }
 
     /// Compute full frame of (led_id, [r, g, b]) for 64 grid pads and 8 side buttons.
@@ -62,10 +98,26 @@ impl LightPainter {
     where
         F: Fn(usize, u8, u8) -> bool,
     {
-        let bank = match set.banks.get(active_bank) {
-            Some(b) => b,
-            None => return vec![],
+        let Some(bank) = set.banks.get(active_bank) else {
+            return vec![];
         };
+        self.paint_bank(
+            bank,
+            active_bank,
+            loaded_samples,
+            &|x, y| is_sounding(active_bank, x, y),
+            now,
+        )
+    }
+
+    fn paint_bank(
+        &mut self,
+        bank: &Bank,
+        active_bank: usize,
+        loaded_samples: &HashSet<String>,
+        is_sounding: &dyn Fn(u8, u8) -> bool,
+        now: Instant,
+    ) -> Vec<(u8, [u8; 3])> {
         let modes = bank.lights;
         let elapsed_ms = now.saturating_duration_since(self.start_time).as_millis();
         let blink_on = (elapsed_ms % BLINK_PERIOD_MS) < BLINK_HALF_PERIOD_MS;
@@ -85,7 +137,7 @@ impl LightPainter {
                                 OFF
                             }
                         } else {
-                            let sounding = is_sounding(active_bank, x, y);
+                            let sounding = is_sounding(x, y);
                             let mut base = pad.color;
                             if modes.play_state && !sounding {
                                 base = [
@@ -160,16 +212,143 @@ impl LightPainter {
         frame
     }
 
-    /// Compute diff containing only LEDs that changed since previous call.
-    pub fn diff(&mut self, full_frame: &[(u8, [u8; 3])]) -> Vec<(u8, [u8; 3])> {
-        let mut changes = Vec::new();
-        for &(id, rgb) in full_frame {
-            let prev = self.last_frame.get(&id).copied();
-            if prev != Some(rgb) {
-                self.last_frame.insert(id, rgb);
-                changes.push((id, rgb));
+    /// LEDs that changed since the last frame the device acknowledged. Does not update the cache;
+    /// call `mark_sent` once the output was delivered.
+    pub fn diff(&self, full_frame: &[(u8, [u8; 3])]) -> Diff {
+        let leds = full_frame
+            .iter()
+            .copied()
+            .filter(|(id, rgb)| self.last_frame.get(id) != Some(rgb))
+            .collect();
+        Diff {
+            leds,
+            generation: self.generation,
+        }
+    }
+
+    /// Record a delivered diff. Ignored when the cache was invalidated after the diff was taken.
+    pub fn mark_sent(&mut self, diff: &Diff) {
+        if diff.generation == self.generation {
+            self.last_frame.extend(diff.leds.iter().copied());
+        }
+    }
+
+    /// Forget what the device shows, so the next frame is sent in full. Call on connection loss,
+    /// reconnect, failed sends and whenever another owner has drawn on the device.
+    pub fn invalidate(&mut self) {
+        self.last_frame.clear();
+        self.generation += 1;
+    }
+}
+
+/// Where Launchpad output goes. Implemented for the MIDI port; tests use a fake.
+pub trait LedSink {
+    fn send(&mut self, message: &[u8]) -> Result<(), String>;
+}
+
+/// Output half of the Launchpad thread: owns the connected sink and keeps the painter's cache
+/// in step with what the device really shows. The painter lock is only taken briefly, never
+/// across a send (a stalled USB port must not block pad input).
+pub struct LedOutput<S: LedSink> {
+    sink: Option<S>,
+    /// Latest game frame (full SysEx); resent after a reconnect while a game owns the pads.
+    game_frame: Option<Vec<u8>>,
+}
+
+impl<S: LedSink> Default for LedOutput<S> {
+    fn default() -> Self {
+        Self {
+            sink: None,
+            game_frame: None,
+        }
+    }
+}
+
+fn leaf(painter: &Mutex<LightPainter>) -> MutexGuard<'_, LightPainter> {
+    painter.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl<S: LedSink> LedOutput<S> {
+    pub fn is_connected(&self) -> bool {
+        self.sink.is_some()
+    }
+
+    /// Initialise a freshly connected device. Its LEDs are all off afterwards, so the painter is
+    /// invalidated and the current owner repaints in full on its next frame.
+    pub fn connect(&mut self, mut sink: S, painter: &Mutex<LightPainter>) -> Result<(), String> {
+        leaf(painter).invalidate();
+        sink.send(&lp::SELECT_SESSION_LAYOUT)?;
+        sink.send(&lp::set_all(0))?;
+        self.sink = Some(sink);
+        Ok(())
+    }
+
+    pub fn disconnect(&mut self, painter: &Mutex<LightPainter>) {
+        self.sink = None;
+        leaf(painter).invalidate();
+    }
+
+    /// Send what changed of the sampler frame. `Err` means the device was lost (already
+    /// disconnected and invalidated). Without a device nothing is sent or remembered.
+    pub fn send_sampler(
+        &mut self,
+        painter: &Mutex<LightPainter>,
+        frame: &[(u8, [u8; 3])],
+    ) -> Result<(), String> {
+        if self.sink.is_none() {
+            return Ok(());
+        }
+        let diff = leaf(painter).diff(frame);
+        let mut failure = None;
+        if let Some(sink) = self.sink.as_mut() {
+            for message in lp::rgb_messages(&diff.leds) {
+                if let Err(error) = sink.send(&message) {
+                    failure = Some(error);
+                    break;
+                }
             }
         }
-        changes
+        match failure {
+            Some(error) => {
+                self.disconnect(painter);
+                Err(error)
+            }
+            None => {
+                leaf(painter).mark_sent(&diff);
+                Ok(())
+            }
+        }
+    }
+
+    /// Show a game frame (a complete RGB SysEx message). The painter cache no longer describes
+    /// the device afterwards, so it is invalidated.
+    pub fn send_game(
+        &mut self,
+        painter: &Mutex<LightPainter>,
+        message: Vec<u8>,
+    ) -> Result<(), String> {
+        leaf(painter).invalidate();
+        let result = match self.sink.as_mut() {
+            Some(sink) => sink.send(&message),
+            None => Ok(()),
+        };
+        self.game_frame = Some(message);
+        if result.is_err() {
+            self.disconnect(painter);
+        }
+        result
+    }
+
+    /// Repeat the last game frame (after a reconnect while a game owns the pads).
+    pub fn resend_game(&mut self, painter: &Mutex<LightPainter>) -> Result<(), String> {
+        match self.game_frame.clone() {
+            Some(message) => self.send_game(painter, message),
+            None => Ok(()),
+        }
+    }
+
+    /// A game released the pads: forget its frame.
+    pub fn clear_game(&mut self) {
+        self.game_frame = None;
     }
 }

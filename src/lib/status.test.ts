@@ -1,0 +1,46 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import type { AudioStatus } from './model.ts';
+import { audioLabel, currentNotice, IDLE_SAVE, padEditKey, saveBadge } from './status.ts';
+import type { NoticeInputs } from './status.ts';
+
+const running: AudioStatus = { state: 'running', deviceName: 'Speakers', sampleRate: 48000, bufferSize: 128, channels: 2 };
+const base: NoticeInputs = { tauri: true, deviceState: 'connected', save: IDLE_SAVE, audio: running, toast: null };
+
+test('a failed save is a visible error with its reason, and outranks device status', () => {
+  const n = currentNotice({ ...base, save: { state: 'failed', reason: 'disk is full' } });
+  assert.equal(n.cls, 'error');
+  assert.match(n.text, /disk is full/);
+  assert.deepEqual(saveBadge({ state: 'failed', reason: 'x' }), { cls: 'error', text: 'SAVE FAILED' });
+});
+
+test('dirty and saved states have badges; idle has none', () => {
+  assert.equal(saveBadge({ state: 'pending', reason: null })?.text, 'UNSAVED');
+  assert.equal(saveBadge({ state: 'saved', reason: null })?.text, 'SAVED');
+  assert.equal(saveBadge(IDLE_SAVE), null);
+});
+
+test('priority: action error, then save failure, then audio error, then Launchpad', () => {
+  const failed = { state: 'failed', reason: 'r' } as const;
+  const dead = { ...running, state: 'error' };
+  assert.match(currentNotice({ ...base, toast: 'Set exists', save: failed, audio: dead }).text, /Set exists/);
+  assert.match(currentNotice({ ...base, save: failed, audio: dead }).text, /Not saved/);
+  assert.match(currentNotice({ ...base, audio: dead }).text, /Audio output stopped/);
+  assert.equal(currentNotice(base).text, 'Launchpad MK2 connected');
+  assert.equal(currentNotice({ ...base, deviceState: 'busy' }).cls, 'warn');
+  assert.match(currentNotice({ ...base, tauri: false, deviceState: 'disconnected' }).text, /Browser preview/);
+});
+
+test('audio label reports running, stopped and error', () => {
+  assert.equal(audioLabel(running), 'Speakers · 128 · 48.0 kHz');
+  assert.equal(audioLabel({ ...running, state: 'error' }), 'AUDIO ERROR');
+  assert.equal(audioLabel(null), 'AUDIO STOPPED');
+});
+
+test('only continuous pad controls get an undo-coalescing key', () => {
+  assert.equal(padEditKey(0, 2, 3, 'volumeDb'), 'pad:0:2:3:volumeDb');
+  assert.equal(padEditKey(5, 0, 7, 'trimEndMs'), 'pad:5:0:7:trimEndMs');
+  for (const discrete of ['mode', 'chokeGroup', 'mixGroup', 'color', 'sample', undefined]) {
+    assert.equal(padEditKey(0, 0, 0, discrete), null);
+  }
+});

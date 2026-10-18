@@ -241,3 +241,33 @@ fn group_lowpass_is_applied() {
     let wet_rms = rms(&left(&render(&mut wet, 4800))[480..]);
     assert!(wet_rms < dry_rms * 0.1, "dry {dry_rms} wet {wet_rms}");
 }
+
+#[test]
+fn faders_at_the_floor_render_exact_silence() {
+    use lpd_core::kit::{group_params, Set};
+    let sample = constant(4_800, 0.5);
+    let mut set = Set::new();
+    let sound = |e: &mut Engine| {
+        trigger(e, 1, &sample, |_| {});
+        render(e, 480)
+    };
+
+    // Group fader at the floor.
+    let (mut e, _rx) = Engine::new(SR);
+    set.mixer.groups[0].volume_db = -60.0;
+    e.handle(Command::SetGroup {
+        group: 0,
+        params: group_params(&set.mixer.groups[0]),
+    });
+    assert!(sound(&mut e).iter().all(|s| *s == 0.0));
+
+    // Master fader at the floor.
+    let (mut e, _rx) = Engine::new(SR);
+    e.handle(Command::SetMasterGain(lpd_core::audio::fader_gain(-60.0)));
+    assert!(sound(&mut e).iter().all(|s| *s == 0.0));
+
+    // Just above the floor still sounds.
+    let (mut e, _rx) = Engine::new(SR);
+    e.handle(Command::SetMasterGain(lpd_core::audio::fader_gain(-40.0)));
+    assert!(sound(&mut e).iter().any(|s| *s != 0.0));
+}

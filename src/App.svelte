@@ -15,10 +15,12 @@
   import type { PadInput, Rgb } from './lib/led.ts';
   import { CRT_FACTORS, readDisplay, saveDisplay } from './lib/display.ts';
   import type { CrtLevel } from './lib/display.ts';
-  import { createEmptySet, createPreviewSet, GROUP_COLORS, padLabel } from './lib/model.ts';
+  import { createDefaultPad, createEmptySet, createPreviewSet, GROUP_COLORS, padLabel } from './lib/model.ts';
   import type { AudioStatus, Group, LightModes, Pad, SamplePeaks, SetModel } from './lib/model.ts';
   import { solvePlayLayout } from './lib/layout.ts';
   import { hitAmount, hitGroup, runActivity } from './lib/activity.ts';
+  import { audioLabel, currentNotice, IDLE_SAVE, padEditKey, saveBadge } from './lib/status.ts';
+  import type { SaveStatus } from './lib/status.ts';
 
   const tauri = typeof window !== 'undefined' ? window.__TAURI__ : undefined;
   const invoke = <T = unknown>(cmd: string, args?: Record<string, unknown>) =>
@@ -39,6 +41,10 @@
   let activeBank = $state(0);
   let setName = $state(tauri ? 'DEFAULT SET' : 'PREVIEW KIT');
   let audioStatus = $state<AudioStatus | null>(null);
+  let saveStatus = $state<SaveStatus>(IDLE_SAVE);
+  let toast = $state<string | null>(null);
+  let toastTimer = 0;
+  let assignSeq = 0;
 
   let drawer = $state<'editor' | null>(null);
   let drawerPinned = $state(true);
@@ -71,17 +77,20 @@
     return frame;
   });
 
-  const notice = $derived(
-    deviceState === 'connected' ? { cls: 'ok', text: 'Launchpad MK2 connected' }
-      : deviceState === 'busy' ? { cls: 'warn', text: 'Launchpad port busy — close other MIDI apps' }
-        : deviceState === 'bootloader' ? { cls: 'error', text: 'Launchpad bootloader — run updater' }
-          : { cls: 'info', text: tauri ? 'Launchpad not connected — on-screen pads available' : 'Browser preview — demo kit, no audio engine' },
-  );
-  const lampClass = (state: string) => ({ connected: 'ok', running: 'ok', busy: 'warn', bootloader: 'error', stopped: 'error' } as Record<string, string>)[state] ?? '';
+  const notice = $derived(currentNotice({ tauri: !!tauri, deviceState, save: saveStatus, audio: audioStatus, toast }));
+  const saveState = $derived(saveBadge(saveStatus));
+  const lampClass = (state: string) => ({ connected: 'ok', running: 'ok', busy: 'warn', bootloader: 'error', stopped: 'error', error: 'error' } as Record<string, string>)[state] ?? '';
 
   function logMidi(text: string) {
     midiLog = [{ time: new Date().toLocaleTimeString(), text }, ...midiLog].slice(0, 40);
   }
+  /** A message about something the player just did, shown in the notice LCD for a while. */
+  function showToast(text: string) {
+    toast = text;
+    clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(() => { toast = null; }, 12000);
+  }
+  const errorText = (e: unknown) => String(e instanceof Error ? e.message : e);
 
   function sendFrame(frame: readonly (readonly [number, number, number])[]) {
     void invoke('send_led_frame', { frame }).catch(() => {});
@@ -90,14 +99,16 @@
   async function loadInitialState() {
     if (!tauri) return;
     try {
-      const [set, b, status] = await Promise.all([
+      const [set, b, status, save] = await Promise.all([
         invoke<SetModel>('get_current_set'),
         invoke<number>('get_current_bank'),
         invoke<AudioStatus>('get_audio_status'),
+        invoke<SaveStatus>('get_save_status'),
       ]);
       currentSet = set;
       activeBank = b;
       audioStatus = status;
+      saveStatus = save;
     } catch (err) {
       console.warn('Failed to load initial state:', err);
     }
@@ -127,8 +138,13 @@
         leds = event.payload.map(([r, g, b]) => [r, g, b] as const);
         frameSeen = true;
       }).then((fn) => unlisten.push(fn));
+      void api.listen<SaveStatus>('save-status', (event) => { saveStatus = event.payload; })
+        .then((fn) => unlisten.push(fn));
+      void api.listen<AudioStatus>('audio-status', (event) => { audioStatus = event.payload; })
+        .then((fn) => unlisten.push(fn));
     }
     return () => {
+      clearTimeout(toastTimer);
       stopActivity();
       document.removeEventListener('fullscreenchange', onFullscreen);
       unlisten.forEach((fn) => fn());
@@ -204,11 +220,28 @@
     bank.humanizeDb = humanizeDb;
     void invoke('update_bank_humanize', { bank: activeBank, humanizeDb });
   }
-  function updatePad(pad: Pad) {
+  function updatePad(pad: Pad, field?: string) {
     const i = bank.pads.findIndex((p) => p.x === pad.x && p.y === pad.y);
     if (i >= 0) bank.pads[i] = pad;
     else bank.pads.push(pad);
-    void invoke('update_pad', { bank: activeBank, pad });
+    void invoke('update_pad', { bank: activeBank, pad, key: padEditKey(activeBank, pad.x, pad.y, field) });
+  }
+  /** Decode the sample on the backend, then take the set it returns. Resolves false when rejected. */
+  async function assignSample(x: number, y: number, path: string): Promise<boolean> {
+    if (!tauri) {
+      const existing = bank.pads.find((p) => p.x === x && p.y === y);
+      updatePad(existing ? { ...existing, sample: path } : { ...createDefaultPad(x, y), sample: path, color: [...GROUP_COLORS[y % 8]] as [number, number, number] });
+      return true;
+    }
+    const seq = ++assignSeq;
+    try {
+      const set = await invoke<SetModel>('assign_sample', { bank: activeBank, x, y, path, defaultColor: GROUP_COLORS[y % 8] });
+      if (seq === assignSeq) currentSet = set;
+      return true;
+    } catch (e) {
+      if (seq === assignSeq) showToast(`Sample not assigned — ${errorText(e)}`);
+      return false;
+    }
   }
   function removePad(x: number, y: number) {
     bank.pads = bank.pads.filter((p) => !(p.x === x && p.y === y));
@@ -239,8 +272,12 @@
       try {
         currentSet = await invoke<SetModel>(isNew ? 'new_set_dir' : 'load_set_dir', { dir });
         setName = dir.split(/[\\/]/).pop() || dir;
+        selected = null;
+        peaks = null;
+        toast = null;
+        void invoke<number>('get_current_bank').then((b) => { activeBank = b; });
       } catch (e) {
-        window.alert(`Error ${isNew ? 'creating' : 'loading'} set: ${e}`);
+        showToast(`Couldn't ${isNew ? 'create' : 'open'} set — ${errorText(e)}`);
       }
     }
   }
@@ -249,13 +286,22 @@
       await invoke('save_set_dir');
       logMidi('Set saved successfully');
     } catch (e) {
-      console.warn('Save set info:', e);
+      // The backend also emits save-status; this makes the failure visible without waiting for it.
+      saveStatus = { state: 'failed', reason: errorText(e) };
+      logMidi(`Save failed: ${errorText(e)}`);
     }
   }
 
+  /** Games own the Launchpad pads and LEDs; every other screen leaves them to the sampler. */
   function setMode(next: typeof mode) {
+    const was = mode;
     mode = next;
     if (next !== 'games') exitGameFull();
+    if ((was === 'games') !== (next === 'games')) {
+      void invoke<number>('set_input_mode', { mode: next === 'games' ? 'game' : 'sampler' })
+        .then((b) => { if (typeof b === 'number') activeBank = b; })
+        .catch((e) => showToast(`Launchpad mode not switched — ${errorText(e)}`));
+    }
   }
   function enterGameFull() {
     gameFull = true;
@@ -361,6 +407,7 @@
                 groups={currentSet.mixer.groups}
                 {peaks}
                 onupdate={updatePad}
+                onassign={assignSample}
                 onremove={removePad}
                 ontrigger={(x, y) => void invoke('trigger_pad', { x, y })}
                 onrelease={(x, y) => void invoke('release_pad', { x, y })}
@@ -406,7 +453,7 @@
         </div>
       {:else}
         <div class="setup-scroll">
-          <SetupDisplay level={crt} status={deviceState} events={midiLog} reconnect={() => sendFrame(leds)} onchange={setCrt} />
+          <SetupDisplay level={crt} status={deviceState} events={midiLog} reconnect={() => void invoke('refresh_leds').catch(() => {})} onchange={setCrt} />
         </div>
       {/if}
     </main>
@@ -421,12 +468,9 @@
       <button class="device-status" onclick={() => setMode('setup')} aria-label="AUDIO: {audioStatus?.state ?? 'stopped'}. Open Setup">
         <span class="lamp {lampClass(audioStatus?.state ?? 'stopped')}"></span><span class="silk">AUDIO</span>
       </button>
-      <span class="lcd lcd-dim">
-        {audioStatus?.state === 'running'
-          ? `${audioStatus.deviceName} · ${audioStatus.bufferSize ?? 'auto'} · ${(audioStatus.sampleRate / 1000).toFixed(1)} kHz`
-          : 'AUDIO STOPPED'}
-      </span>
+      <span class="lcd lcd-dim" class:audio-error={audioStatus?.state === 'error'}>{audioLabel(audioStatus)}</span>
       <span class="lcd lcd-dim status-path">{setName}</span>
+      {#if saveState}<span class="lcd save-state {saveState.cls}" role="status">{saveState.text}</span>{/if}
       <button class="key small" onclick={saveSet} title="Save current set">SAVE</button>
     </footer>
   </div>

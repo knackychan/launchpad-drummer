@@ -4,7 +4,7 @@
   // The orbit radar follows pad-hit activity; scope, spectrum and meters stay in STANDBY until the
   // engine streams master levels to the UI.
   import { onMount } from 'svelte';
-  import { energy } from '../lib/activity.ts';
+  import { energy, isResting, onActivity } from '../lib/activity.ts';
   import { GROUP_COLORS } from '../lib/model.ts';
   import { ledToCss } from '../lib/led.ts';
 
@@ -146,30 +146,61 @@
     [0, 1].forEach((ch) => { for (let q = 0; q < N; q++) { g.fillStyle = 'rgba(65,200,255,.07)'; g.fillRect(2 + ch * (cw + 2), H - (q + 1) * (H / N), cw, H / N - 2); } });
   }
 
+  // Nothing here runs on a timer of its own. A panel is drawn when it appears, when its size
+  // changes and, for the orbit, while pad activity is decaying. The standby panels (scope, spectrum,
+  // meters) are static until the engine streams levels; a live feed will redraw them at the feed
+  // rate, not at the display's refresh rate.
+  const painters: Record<string, (g: CanvasRenderingContext2D, W: number, H: number) => void> = {
+    scope: drawScope, spec: drawSpec, orbit: drawOrbit, vu: drawVu, mini: drawMini,
+  };
+  const pending = new Set<string>();
+  let flushRaf = 0;
+  function redraw(id: string) {
+    const c = canvases[id];
+    const r = fit(c);
+    if (r) { painters[id](...r); present(c); }
+  }
+  function flush() {
+    flushRaf = 0;
+    const ids = [...pending];
+    pending.clear();
+    ids.forEach(redraw);
+  }
+  function schedule(id: string) {
+    pending.add(id);
+    if (!flushRaf) flushRaf = requestAnimationFrame(flush);
+  }
+  /** Draws the canvas once it has a size, and again whenever its size changes. */
+  function watch(node: HTMLCanvasElement, id: string) {
+    const observer = new ResizeObserver(() => schedule(id));
+    observer.observe(node);
+    return { destroy() { observer.disconnect(); pending.delete(id); } };
+  }
+
+  let orbitAt = 0;
+  function orbitTick() {
+    if (mini) return;
+    const now = performance.now();
+    // While decaying: at most ~30 fps (4 fps with reduced motion); the final, resting frame always draws.
+    if (isResting() || now - orbitAt >= (reduced() ? 250 : 33)) { orbitAt = now; schedule('orbit'); }
+  }
+
   onMount(() => {
     const t0 = performance.now();
-    let raf = 0, last = 0;
-    const frame = (t: number) => {
-      raf = requestAnimationFrame(frame);
-      if (reduced() && t - last < 250) return;
-      last = t;
-      let r;
-      if (mini) { if ((r = fit(canvases.mini))) { drawMini(...r); present(canvases.mini); } return; }
-      const sec = (t - t0) / 1000;
+    const tick = () => {
+      if (mini || document.hidden) return;
+      const sec = (performance.now() - t0) / 1000;
       clock = `T+${String(Math.floor(sec / 60)).padStart(2, '0')}:${(sec % 60).toFixed(1).padStart(4, '0')}`;
-      if ((r = fit(canvases.scope))) { drawScope(...r); present(canvases.scope); }
-      if ((r = fit(canvases.spec))) { drawSpec(...r); present(canvases.spec); }
-      if ((r = fit(canvases.orbit))) { drawOrbit(...r); present(canvases.orbit); }
-      if ((r = fit(canvases.vu))) { drawVu(...r); present(canvases.vu); }
     };
-    raf = requestAnimationFrame(frame);
-    return () => cancelAnimationFrame(raf);
+    const timer = setInterval(tick, reduced() ? 1000 : 100);
+    const stopActivity = onActivity(orbitTick);
+    return () => { clearInterval(timer); stopActivity(); cancelAnimationFrame(flushRaf); };
   });
 </script>
 
 {#if mini}
   <button type="button" class="tele plate mini" data-label="SIG" title="Telemetry folded: click to open" onclick={() => onfold(false)}>
-    <div class="tm-g screen"><canvas bind:this={canvases.mini}></canvas></div>
+    <div class="tm-g screen"><canvas bind:this={canvases.mini} use:watch={'mini'}></canvas></div>
   </button>
 {:else}
   <aside class="tele plate" data-label="TELEMETRY" aria-hidden="true">
@@ -182,7 +213,7 @@
     {#each [['scope', 'OSCILLOSCOPE', '— ms/div'], ['spec', 'SPECTRUM', '—'], ['orbit', 'ORBIT', 'IDLE · NO SEQ'], ['vu', 'MASTER L / R', 'PK −∞']] as [id, label, read]}
       <section class="tm {id}">
         <div class="tm-h"><span class="silk">{label}</span><span class="lcd">{read}</span></div>
-        <div class="tm-g screen"><canvas bind:this={canvases[id]}></canvas></div>
+        <div class="tm-g screen"><canvas bind:this={canvases[id]} use:watch={id}></canvas></div>
       </section>
     {/each}
   </aside>

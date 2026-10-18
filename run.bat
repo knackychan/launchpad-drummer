@@ -113,17 +113,29 @@ if %errorlevel% neq 0 (
 exit /b %errorlevel%
 
 :RUN_CLI
+:: `shift` does not change %*, so collect everything after the routing token one argument at a
+:: time. %1 keeps its quotes (paths with spaces). Delayed expansion is off so "!" survives.
+setlocal disabledelayedexpansion
+set "CLI_ARGS="
 shift
+:CLI_COLLECT
+if "%~1"=="" goto CLI_RUN
+set CLI_ARGS=%CLI_ARGS% %1
+shift
+goto CLI_COLLECT
+
+:CLI_RUN
 echo.
 echo [3/4] Launching Launchpad Drummer CLI Player...
 echo ====================================================
 echo.
-cargo run -p lpd-cli -- %*
-if %errorlevel% neq 0 (
+cargo run -p lpd-cli --%CLI_ARGS%
+set "CLI_RC=%errorlevel%"
+if not "%CLI_RC%"=="0" (
     echo.
     pause
 )
-exit /b %errorlevel%
+exit /b %CLI_RC%
 
 :RUN_PROBE
 echo.

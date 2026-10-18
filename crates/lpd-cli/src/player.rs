@@ -1,6 +1,6 @@
 //! Launchpad events → engine commands and LED frames. No I/O here.
 
-use lpd_core::audio::{db_to_gain, Command, Sample};
+use lpd_core::audio::{fader_gain, Command, Sample};
 use lpd_core::devices::launchpad::{self as lp, LpEvent};
 use lpd_core::kit::{self, Set};
 use std::collections::HashMap;
@@ -58,7 +58,7 @@ impl Player {
                 params: kit::group_params(g),
             })
             .collect();
-        cmds.push(Command::SetMasterGain(db_to_gain(self.set.mixer.master_db)));
+        cmds.push(Command::SetMasterGain(fader_gain(self.set.mixer.master_db)));
         cmds
     }
 

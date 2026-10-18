@@ -47,6 +47,26 @@ fn read_set(path: &Path) -> Result<Set> {
     Set::from_json(&s).with_context(|| format!("parse {}", path.display()))
 }
 
+/// Refuse to create a set where a kit, its backup or recovery files already are.
+/// Reads only; call before touching the folder or any active state.
+pub fn ensure_new_set_dir(dir: &Path) -> Result<()> {
+    for name in [SET_FILE, BACKUP_FILE, BROKEN_FILE, TMP_FILE] {
+        let path = dir.join(name);
+        // Anything but a clean "not found" (including unreadable) counts as occupied.
+        let free = matches!(
+            fs::symlink_metadata(&path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound
+        );
+        if !free {
+            anyhow::bail!(
+                "{} already contains a set ({name}). Use Open to load it, or pick a different folder.",
+                dir.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Atomic save: tmp file, rotate the previous set.json to set.json.bak, rename tmp.
 pub fn save(dir: &Path, set: &Set) -> Result<()> {
     fs::create_dir_all(dir)?;

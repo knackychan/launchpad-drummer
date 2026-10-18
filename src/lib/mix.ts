@@ -1,5 +1,7 @@
 // Fader law shared by the mixer and the telemetry: 0 dB sits at 75 % of the travel,
 // +6 dB at the top, a 40·log10 curve below 0 dB, −60 dB and under = −∞ at the bottom.
+// The backend treats any value at or below DB_FLOOR as exact silence (`lpd_core::audio::FADER_FLOOR_DB`):
+// keep the two equal.
 export const DB_FLOOR = -60;
 export const DB_CEIL = 6;
 

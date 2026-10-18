@@ -1,15 +1,24 @@
-//! Application state coordinating router, lights, kit manager, and audio status.
+//! Application state coordinating router, lights, kit manager, saver and audio status.
+//!
+//! Lock order (take in this order, never the reverse; release before slow work):
+//! `router` → `history` → `kit_manager` → `saver`. `painter`, `save_gate` and `assigns` are
+//! separate: `painter` and `assigns` are leaves (nothing is taken while holding them) and
+//! `save_gate` is taken first, only to order disk writes. No lock is held across disk I/O,
+//! sample decoding or MIDI output.
 
 use crate::audio::AudioStatus;
 use crate::lights::LightPainter;
-use crate::router::{mixer_audio_differs, Router};
-use crate::store::KitManager;
-use lpd_core::audio::{Command, Event};
+use crate::router::Router;
+use crate::saver::{SaveStatus, Saver};
+use crate::store::{prepare_sample, KitManager, LoadedKit};
+use lpd_core::audio::{Command, Event, Sample};
 use lpd_core::devices::launchpad::LpEvent;
-use lpd_core::kit::{History, Set};
+use lpd_core::kit::{self, History, Pad, Set};
 use rtrb::{Consumer, Producer};
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -27,6 +36,38 @@ pub struct HistoryState {
     pub can_redo: bool,
 }
 
+/// Who owns the Launchpad's pads and LEDs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputMode {
+    Sampler = 0,
+    Game = 1,
+}
+
+type Writer = Arc<dyn Fn(&Path, &Set) -> anyhow::Result<()> + Send + Sync>;
+
+#[derive(Default)]
+struct Assigns {
+    next: u64,
+    latest: HashMap<(usize, u8, u8), u64>,
+}
+
+/// A sample assignment in flight: what the request saw when it started.
+#[derive(Clone, Debug)]
+pub struct AssignTicket {
+    pub dir: PathBuf,
+    epoch: u64,
+    seq: u64,
+    bank: usize,
+    x: u8,
+    y: u8,
+}
+
+const STALE_SET: &str = "The set changed while the sample was loading; it was discarded.";
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub router: Arc<Mutex<Router>>,
@@ -35,10 +76,27 @@ pub struct AppState {
     pub audio_status: Arc<Mutex<AudioStatus>>,
     /// Undo/redo of kit edits; lock after `router`.
     pub history: Arc<Mutex<History>>,
+    saver: Arc<Mutex<Saver>>,
+    save_gate: Arc<Mutex<()>>,
+    writer: Writer,
+    /// Newest set-open request; an older one finishing later is discarded.
+    open_ticket: Arc<AtomicU64>,
+    assigns: Arc<Mutex<Assigns>>,
+    input_mode: Arc<AtomicU8>,
 }
 
 impl AppState {
     pub fn new(set: Set, audio_tx: Producer<Command>, audio_rx: Consumer<Event>) -> Self {
+        Self::with_writer(set, audio_tx, audio_rx, Arc::new(kit::save))
+    }
+
+    /// `writer` performs the actual disk save (replaced in tests to inject failures and delays).
+    pub fn with_writer(
+        set: Set,
+        audio_tx: Producer<Command>,
+        audio_rx: Consumer<Event>,
+        writer: Writer,
+    ) -> Self {
         let router = Router::new(set, Default::default(), audio_tx, audio_rx);
         let kit_manager = KitManager {
             dir: None,
@@ -57,6 +115,12 @@ impl AppState {
                 channels: 2,
             })),
             history: Arc::new(Mutex::new(History::new())),
+            saver: Arc::new(Mutex::new(Saver::new())),
+            save_gate: Arc::new(Mutex::new(())),
+            writer,
+            open_ticket: Arc::new(AtomicU64::new(0)),
+            assigns: Arc::new(Mutex::new(Assigns::default())),
+            input_mode: Arc::new(AtomicU8::new(InputMode::Sampler as u8)),
         }
     }
 
@@ -64,25 +128,39 @@ impl AppState {
     /// router's set, re-sends mixer commands when mixer values changed and marks the set dirty.
     /// An edit that leaves the set unchanged adds no undo step.
     pub fn edit<R>(&self, key: Option<&str>, f: impl FnOnce(&mut Set) -> R) -> R {
-        let mut r = self.router.lock().unwrap_or_else(PoisonError::into_inner);
-        let before = r.set().clone();
-        let out = f(r.set_mut());
-        if *r.set() != before {
-            self.history
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .record(&before, key, Instant::now());
-            if mixer_audio_differs(&before, r.set()) {
-                r.send_mixer();
-            }
-        }
+        self.edit_at(key, Instant::now(), f)
+    }
+
+    pub fn edit_at<R>(&self, key: Option<&str>, now: Instant, f: impl FnOnce(&mut Set) -> R) -> R {
+        let mut r = lock(&self.router);
+        let out = self.edit_in(&mut r, key, now, f);
         drop(r);
         self.touch();
         out
     }
 
-    /// Mark the set dirty for autosave (Task 2 hooks the saver here).
-    fn touch(&self) {}
+    fn edit_in<R>(
+        &self,
+        r: &mut Router,
+        key: Option<&str>,
+        now: Instant,
+        f: impl FnOnce(&mut Set) -> R,
+    ) -> R {
+        let before = r.set().clone();
+        let out = f(r.set_mut());
+        if *r.set() != before {
+            lock(&self.history).record(&before, key, now);
+            if crate::router::mixer_audio_differs(&before, r.set()) {
+                r.send_mixer();
+            }
+        }
+        out
+    }
+
+    /// The set changed: schedule an autosave.
+    fn touch(&self) {
+        lock(&self.saver).touch(Instant::now());
+    }
 
     pub fn undo(&self) -> Option<Set> {
         self.step_history(|h, current| h.undo(current))
@@ -93,9 +171,9 @@ impl AppState {
     }
 
     fn step_history(&self, step: impl FnOnce(&mut History, &Set) -> Option<Set>) -> Option<Set> {
-        let mut r = self.router.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut r = lock(&self.router);
         let set = {
-            let mut h = self.history.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut h = lock(&self.history);
             step(&mut h, r.set())?
         };
         r.install_set(set.clone());
@@ -105,119 +183,127 @@ impl AppState {
     }
 
     pub fn history_state(&self) -> HistoryState {
-        let h = self.history.lock().unwrap_or_else(PoisonError::into_inner);
+        let h = lock(&self.history);
         HistoryState {
             can_undo: h.can_undo(),
             can_redo: h.can_redo(),
         }
     }
 
-    fn clear_history(&self) {
-        self.history
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
-    }
-
     pub fn trigger_pad(&self, x: u8, y: u8) {
-        if let Ok(mut r) = self.router.lock() {
-            r.trigger_pad(x, y);
-            if let Ok(mut p) = self.painter.lock() {
-                p.on_pad_hit(x, y, Instant::now());
-            }
-        }
+        lock(&self.router).trigger_pad(x, y);
+        self.record_hit(x, y);
     }
 
     pub fn release_pad(&self, x: u8, y: u8) {
-        if let Ok(mut r) = self.router.lock() {
-            r.release_pad(x, y);
-        }
+        lock(&self.router).release_pad(x, y);
     }
 
     pub fn select_bank(&self, bank: usize) -> bool {
-        if let Ok(mut r) = self.router.lock() {
-            r.select_bank(bank)
-        } else {
-            false
-        }
+        lock(&self.router).select_bank(bank)
     }
 
     pub fn current_bank(&self) -> usize {
-        if let Ok(r) = self.router.lock() {
-            r.bank()
-        } else {
-            0
-        }
+        lock(&self.router).bank()
     }
 
     pub fn stop_all(&self) {
-        if let Ok(mut r) = self.router.lock() {
-            r.stop_all();
-        }
+        lock(&self.router).stop_all();
     }
 
+    /// Flash/ripple bookkeeping; the router lock is already released.
+    fn record_hit(&self, x: u8, y: u8) {
+        lock(&self.painter).on_pad_hit(x, y, Instant::now());
+    }
+
+    /// Hardware input. Ignored while a game owns the pads (decided under the router lock, so a
+    /// mode switch cannot interleave with a half-handled event).
     pub fn on_lp_event(&self, ev: LpEvent) {
-        if let Ok(mut r) = self.router.lock() {
-            if let LpEvent::PadDown { x, y } = ev {
-                if let Ok(mut p) = self.painter.lock() {
-                    p.on_pad_hit(x, y, Instant::now());
-                }
+        {
+            let mut r = lock(&self.router);
+            if self.input_mode() != InputMode::Sampler {
+                return;
             }
             r.on_lp_event(ev);
         }
+        if let LpEvent::PadDown { x, y } = ev {
+            self.record_hit(x, y);
+        }
     }
 
-    pub fn paint_frame(&self, now: Instant) -> Vec<(u8, [u8; 3])> {
-        let (set, bank, loaded_samples) = if let Ok(r) = self.router.lock() {
-            let loaded: HashSet<String> = r.samples().keys().cloned().collect();
-            (r.set().clone(), r.bank(), loaded)
+    pub fn input_mode(&self) -> InputMode {
+        if self.input_mode.load(Ordering::SeqCst) == InputMode::Game as u8 {
+            InputMode::Game
         } else {
-            return vec![];
-        };
-        let is_sounding = |b: usize, x: u8, y: u8| -> bool {
-            if let Ok(r) = self.router.lock() {
-                r.is_pad_sounding(b, x, y)
-            } else {
-                false
-            }
-        };
-        if let Ok(mut p) = self.painter.lock() {
-            p.paint(&set, bank, &loaded_samples, &is_sounding, now)
-        } else {
-            vec![]
+            InputMode::Sampler
         }
+    }
+
+    /// Hand the pads and LEDs to the sampler or a game. Entering a game releases every held
+    /// sampler pad first; either change forces a full repaint. Returns the sampler's bank.
+    pub fn set_input_mode(&self, mode: InputMode) -> usize {
+        let mut r = lock(&self.router);
+        let previous = self.input_mode.swap(mode as u8, Ordering::SeqCst);
+        if previous != mode as u8 && mode == InputMode::Game {
+            r.release_all_held();
+        }
+        let bank = r.bank();
+        drop(r);
+        if previous != mode as u8 {
+            lock(&self.painter).invalidate();
+        }
+        bank
+    }
+
+    /// Sampler frame for the active bank. The router lock is held only to copy a snapshot; the
+    /// painter works on the copy.
+    pub fn paint_frame(&self, now: Instant) -> Vec<(u8, [u8; 3])> {
+        let snapshot = lock(&self.router).paint_snapshot();
+        match snapshot {
+            Some(snap) => lock(&self.painter).paint_snapshot(&snap, now),
+            None => vec![],
+        }
+    }
+
+    /// Housekeeping from the device thread: voice events in, freed samples out. The samples are
+    /// dropped here, after the router lock is released, never on the audio thread.
+    pub fn maintain(&self) {
+        let reclaimed = {
+            let mut r = lock(&self.router);
+            r.poll_audio_events();
+            r.drain_reclaimable()
+        };
+        drop(reclaimed);
     }
 
     pub fn set_audio_status(&self, status: AudioStatus) {
-        if let Ok(mut stat) = self.audio_status.lock() {
-            *stat = status;
-        }
+        *lock(&self.audio_status) = status;
     }
 
     pub fn get_audio_status(&self) -> AudioStatus {
-        if let Ok(s) = self.audio_status.lock() {
-            s.clone()
+        lock(&self.audio_status).clone()
+    }
+
+    /// The output stream reported an error. Returns the new status the first time only, so a
+    /// burst of errors reaches the UI once.
+    pub fn audio_stream_failed(&self) -> Option<AudioStatus> {
+        let mut status = lock(&self.audio_status);
+        if status.state == "running" {
+            status.state = "error".into();
+            Some(status.clone())
         } else {
-            AudioStatus {
-                state: "unknown".into(),
-                device_name: "none".into(),
-                sample_rate: 48_000,
-                buffer_size: None,
-                channels: 2,
-            }
+            None
         }
     }
 
     pub fn get_current_set(&self) -> Set {
-        if let Ok(r) = self.router.lock() {
-            r.set().clone()
-        } else {
-            Set::new()
-        }
+        lock(&self.router).set().clone()
     }
 
-    pub fn update_pad(&self, bank: usize, pad: lpd_core::kit::Pad) {
-        self.edit(None, |set| {
+    /// Replace a pad's parameters. `key` names a continuous control (for example
+    /// `pad:0:2:3:volume`) so a drag is one undo step. Use `assign_sample` to change the sample.
+    pub fn update_pad(&self, bank: usize, pad: Pad, key: Option<&str>) {
+        self.edit(key, |set| {
             if let Some(b) = set.banks.get_mut(bank) {
                 b.set_pad(pad);
             }
@@ -234,32 +320,23 @@ impl AppState {
 
     /// A rename is an undoable kit edit; value changes (volume, pan, ...) are not (UI spec 7.3).
     pub fn update_group(&self, group: usize, g: lpd_core::kit::Group) {
-        let renamed = self
-            .router
-            .lock()
-            .ok()
-            .and_then(|r| {
-                r.set()
-                    .mixer
-                    .groups
-                    .get(group)
-                    .map(|old| old.name != g.name)
-            })
+        let renamed = lock(&self.router)
+            .set()
+            .mixer
+            .groups
+            .get(group)
+            .map(|old| old.name != g.name)
             .unwrap_or(false);
         if renamed {
             let name = g.name.clone();
             self.edit(None, |set| set.mixer.groups[group].name = name);
         }
-        if let Ok(mut r) = self.router.lock() {
-            r.update_group(group, g);
-        }
+        lock(&self.router).update_group(group, g);
         self.touch();
     }
 
     pub fn update_master_db(&self, master_db: f32) {
-        if let Ok(mut r) = self.router.lock() {
-            r.update_master_db(master_db);
-        }
+        lock(&self.router).update_master_db(master_db);
         self.touch();
     }
 
@@ -273,7 +350,8 @@ impl AppState {
 
     pub fn update_bank_humanize(&self, bank: usize, humanize_db: f32) {
         let humanize_db = humanize_db.clamp(0.0, 6.0);
-        self.edit(None, |set| {
+        let key = format!("bank:{bank}:humanize");
+        self.edit(Some(&key), |set| {
             if let Some(b) = set.banks.get_mut(bank) {
                 b.humanize_db = humanize_db;
             }
@@ -283,7 +361,7 @@ impl AppState {
     /// Peak envelope of a loaded sample for the editor waveform: `buckets` max-abs values
     /// over both channels. None when the sample is not loaded.
     pub fn sample_peaks(&self, path: &str, buckets: usize) -> Option<SamplePeaks> {
-        let sample = self.kit_manager.lock().ok()?.samples.get(path)?.clone();
+        let sample = lock(&self.kit_manager).samples.get(path)?.clone();
         let frames = sample.frames();
         let buckets = buckets.clamp(16, 2048);
         let mut peaks = vec![0.0f32; buckets];
@@ -312,61 +390,245 @@ impl AppState {
         });
     }
 
-    pub fn load_set_dir(&self, dir_str: &str) -> Result<Set, String> {
-        let dir = std::path::Path::new(dir_str);
-        let loaded = KitManager::load_from_dir(dir).map_err(|e| e.to_string())?;
-        if let Ok(mut km) = self.kit_manager.lock() {
-            km.dir = Some(loaded.dir.clone());
-            km.samples = loaded.samples.clone();
-            km.failed_samples = loaded.failed_samples.clone();
-        }
-        if let Ok(mut r) = self.router.lock() {
-            r.set_current_set(loaded.set.clone(), loaded.samples);
-        }
-        self.clear_history();
-        Ok(loaded.set)
+    // ---- opening and creating sets -------------------------------------------------------
+
+    /// Start an open/new request. Only the newest request may commit.
+    pub fn begin_open(&self) -> u64 {
+        self.open_ticket.fetch_add(1, Ordering::SeqCst) + 1
     }
 
-    pub fn new_set_dir(&self, dir_str: &str) -> Result<Set, String> {
-        let dir = std::path::Path::new(dir_str);
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        let set = Set::new();
-        lpd_core::kit::save(dir, &set).map_err(|e| e.to_string())?;
-        if let Ok(mut km) = self.kit_manager.lock() {
-            km.dir = Some(dir.to_path_buf());
-            km.samples.clear();
-            km.failed_samples.clear();
-        }
-        if let Ok(mut r) = self.router.lock() {
-            r.set_current_set(set.clone(), Default::default());
-        }
-        self.clear_history();
+    /// Load a set folder. Slow: call from a worker thread.
+    pub fn load_set_dir(&self, dir_str: &str) -> Result<Set, String> {
+        let ticket = self.begin_open();
+        let loaded = KitManager::load_from_dir(Path::new(dir_str)).map_err(|e| e.to_string())?;
+        self.finish_open(ticket, loaded)
+    }
+
+    /// Commit a loaded kit if no newer open/new request started meanwhile.
+    pub fn finish_open(&self, ticket: u64, loaded: LoadedKit) -> Result<Set, String> {
+        let set = loaded.set.clone();
+        self.install(
+            ticket,
+            loaded.set,
+            Some(loaded.dir),
+            loaded.samples,
+            loaded.failed_samples,
+        )?;
         Ok(set)
     }
 
-    pub fn save_set(&self) -> Result<(), String> {
-        let r = self
-            .router
-            .lock()
-            .map_err(|_| "failed to acquire router lock".to_string())?;
-        let km = self
-            .kit_manager
-            .lock()
-            .map_err(|_| "failed to acquire kit manager lock".to_string())?;
-        km.save(r.set()).map_err(|e| e.to_string())
+    /// Create an empty set in a folder that holds no kit. Nothing on disk or in memory changes
+    /// when the folder already holds one. Slow: call from a worker thread.
+    pub fn new_set_dir(&self, dir_str: &str) -> Result<Set, String> {
+        let ticket = self.begin_open();
+        let dir = Path::new(dir_str);
+        kit::ensure_new_set_dir(dir).map_err(|e| e.to_string())?;
+        let created_dir = !dir.exists();
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        let set = Set::new();
+        kit::save(dir, &set).map_err(|e| e.to_string())?;
+        let installed = self.install(
+            ticket,
+            set.clone(),
+            Some(dir.to_path_buf()),
+            Default::default(),
+            vec![],
+        );
+        if let Err(reason) = installed {
+            // Not adopted: take back what this call created so a retry finds the folder free.
+            let _ = std::fs::remove_file(dir.join(kit::SET_FILE));
+            if created_dir {
+                let _ = std::fs::remove_dir(dir);
+            }
+            return Err(reason);
+        }
+        Ok(set)
     }
 
-    pub fn import_sample(&self, src: &str) -> Result<String, String> {
-        let src_path = std::path::Path::new(src);
-        let (rel_path, sample) = if let Ok(mut km) = self.kit_manager.lock() {
-            km.import_sample_file(src_path).map_err(|e| e.to_string())?
-        } else {
-            return Err("failed to acquire kit manager lock".into());
-        };
-        if let Ok(mut r) = self.router.lock() {
-            r.samples_mut().insert(rel_path.clone(), sample);
+    fn install(
+        &self,
+        ticket: u64,
+        set: Set,
+        dir: Option<PathBuf>,
+        samples: HashMap<String, Arc<Sample>>,
+        failed: Vec<(String, String)>,
+    ) -> Result<(), String> {
+        let mut r = lock(&self.router);
+        if self.open_ticket.load(Ordering::SeqCst) != ticket {
+            return Err("A newer open/new request replaced this one.".into());
         }
-        Ok(rel_path)
+        let cache = samples.clone();
+        if let Err(rejected) = r.replace_set(set, samples) {
+            drop(r);
+            return Err(rejected.reason);
+        }
+        lock(&self.history).clear();
+        {
+            let mut km = lock(&self.kit_manager);
+            let old = std::mem::replace(&mut km.samples, cache);
+            r.retire(old.into_values());
+            km.failed_samples = failed;
+            lock(&self.saver).reset(dir.is_some());
+            km.dir = dir;
+        }
+        drop(r);
+        *lock(&self.assigns) = Assigns::default();
+        Ok(())
+    }
+
+    // ---- saving --------------------------------------------------------------------------
+
+    /// Save now (the SAVE button). Shares the autosave path.
+    pub fn save_set(&self) -> Result<(), String> {
+        self.run_save(Instant::now())
+    }
+
+    /// Autosave: write when the debounce (or a failure retry) is due.
+    pub fn autosave_tick(&self, now: Instant) {
+        if lock(&self.saver).due(now) {
+            let _ = self.run_save(now);
+        }
+    }
+
+    /// Writes are serialised (they share temp and backup file names). The set, folder, set
+    /// identity and revision are captured together under brief locks; the write itself runs
+    /// with none held, and only that revision is acknowledged afterwards.
+    fn run_save(&self, now: Instant) -> Result<(), String> {
+        let _gate = lock(&self.save_gate);
+        let (set, dir, epoch, rev) = {
+            let r = lock(&self.router);
+            let km = lock(&self.kit_manager);
+            let saver = lock(&self.saver);
+            (r.set().clone(), km.dir.clone(), saver.epoch(), saver.rev())
+        };
+        let result = match &dir {
+            Some(dir) => (self.writer)(dir, &set)
+                .map_err(|e| format!("Couldn't save to {}: {e:#}", dir.display())),
+            None => Err("No set folder yet. Create or open a set first.".to_string()),
+        };
+        lock(&self.saver).finish(epoch, rev, result.clone(), now);
+        result
+    }
+
+    pub fn save_status(&self) -> SaveStatus {
+        lock(&self.saver).status().clone()
+    }
+
+    /// The save status if it changed since last asked (for the `save-status` event).
+    pub fn take_save_change(&self) -> Option<SaveStatus> {
+        lock(&self.saver).take_change()
+    }
+
+    // ---- samples -------------------------------------------------------------------------
+
+    /// Folder and set identity for a sample import.
+    fn sample_target(&self) -> Result<(PathBuf, u64), String> {
+        let km = lock(&self.kit_manager);
+        let saver = lock(&self.saver);
+        match km.dir.clone() {
+            Some(dir) => Ok((dir, saver.epoch())),
+            None => Err("No set folder yet. Create or open a set first.".into()),
+        }
+    }
+
+    /// Put a prepared sample into both caches, if the set it was prepared for is still open.
+    fn commit_sample(
+        &self,
+        r: &mut Router,
+        epoch: u64,
+        path: &str,
+        sample: Arc<Sample>,
+    ) -> Result<(), String> {
+        let mut km = lock(&self.kit_manager);
+        if lock(&self.saver).epoch() != epoch {
+            return Err(STALE_SET.into());
+        }
+        r.install_sample(path.to_string(), sample.clone());
+        if let Some(old) = km.samples.insert(path.to_string(), sample) {
+            r.retire([old]);
+        }
+        km.failed_samples.retain(|(p, _)| p != path);
+        Ok(())
+    }
+
+    /// Copy `src` into the set folder and load it, without assigning it to a pad. Slow.
+    pub fn import_sample(&self, src: &str) -> Result<String, String> {
+        let (dir, epoch) = self.sample_target()?;
+        let (rel, sample) = prepare_sample(&dir, src).map_err(|e| format!("{e:#}"))?;
+        let mut r = lock(&self.router);
+        self.commit_sample(&mut r, epoch, &rel, sample)?;
+        Ok(rel)
+    }
+
+    /// Start a sample assignment to one pad: remembers the set and request it belongs to.
+    pub fn begin_assign(&self, bank: usize, x: u8, y: u8) -> Result<AssignTicket, String> {
+        if bank >= kit::BANKS || x > 7 || y > 7 {
+            return Err("That pad does not exist.".into());
+        }
+        let (dir, epoch) = self.sample_target()?;
+        let mut assigns = lock(&self.assigns);
+        assigns.next += 1;
+        let seq = assigns.next;
+        assigns.latest.insert((bank, x, y), seq);
+        Ok(AssignTicket {
+            dir,
+            epoch,
+            seq,
+            bank,
+            x,
+            y,
+        })
+    }
+
+    /// Install a decoded sample and set it on its pad as one undoable edit. Rejected when the set
+    /// changed or a newer assignment to the same pad started. Returns the authoritative set.
+    pub fn finish_assign(
+        &self,
+        ticket: &AssignTicket,
+        rel: &str,
+        sample: Arc<Sample>,
+        default_color: Option<[u8; 3]>,
+    ) -> Result<Set, String> {
+        let mut r = lock(&self.router);
+        if lock(&self.saver).epoch() != ticket.epoch {
+            return Err(STALE_SET.into());
+        }
+        let newest = lock(&self.assigns)
+            .latest
+            .get(&(ticket.bank, ticket.x, ticket.y))
+            .copied();
+        if newest != Some(ticket.seq) {
+            return Err("A newer sample was assigned to this pad meanwhile.".into());
+        }
+        self.commit_sample(&mut r, ticket.epoch, rel, sample)?;
+        let (bank, x, y) = (ticket.bank, ticket.x, ticket.y);
+        let rel = rel.to_string();
+        self.edit_in(&mut r, None, Instant::now(), |set| {
+            let b = &mut set.banks[bank];
+            match b.pads.iter_mut().find(|p| p.x == x && p.y == y) {
+                Some(pad) => pad.sample = rel,
+                None => b.set_pad(Pad::new(x, y, rel, default_color.unwrap_or([63, 63, 63]))),
+            }
+        });
+        let set = r.set().clone();
+        drop(r);
+        self.touch();
+        Ok(set)
+    }
+
+    /// Assign a sample to a pad: a set-relative path, or any file (copied into the set first).
+    /// A failure leaves the pad as it was. Slow: call from a worker thread.
+    pub fn assign_sample(
+        &self,
+        bank: usize,
+        x: u8,
+        y: u8,
+        input: &str,
+        default_color: Option<[u8; 3]>,
+    ) -> Result<Set, String> {
+        let ticket = self.begin_assign(bank, x, y)?;
+        let (rel, sample) = prepare_sample(&ticket.dir, input).map_err(|e| format!("{e:#}"))?;
+        self.finish_assign(&ticket, &rel, sample, default_color)
     }
 }
 
@@ -404,7 +666,7 @@ mod tests {
     #[test]
     fn update_pad_command_is_undoable() {
         let (state, _rx) = app();
-        state.update_pad(3, Pad::new(0, 0, "samples/a.wav", [1, 2, 3]));
+        state.update_pad(3, Pad::new(0, 0, "samples/a.wav", [1, 2, 3]), None);
         assert!(state.get_current_set().banks[3].pad(0, 0).is_some());
         state.undo().unwrap();
         assert!(state.get_current_set().banks[3].pad(0, 0).is_none());

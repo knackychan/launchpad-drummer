@@ -1,7 +1,19 @@
 use crate::audio::AudioStatus;
-use crate::state::{AppState, HistoryState, SamplePeaks};
+use crate::saver::SaveStatus;
+use crate::state::{AppState, HistoryState, InputMode, SamplePeaks};
 use lpd_core::kit::{Group, LightModes, Pad, Set};
 use tauri::State;
+
+/// Run slow work (disk, decoding) off the command thread and off the UI.
+async fn worker<T: Send + 'static>(
+    state: &State<'_, AppState>,
+    job: impl FnOnce(AppState) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || job(state))
+        .await
+        .map_err(|e| e.to_string())?
+}
 
 #[tauri::command]
 pub(crate) fn get_audio_status(state: State<'_, AppState>) -> AudioStatus {
@@ -34,23 +46,29 @@ pub(crate) fn get_current_set(state: State<'_, AppState>) -> Set {
 }
 
 #[tauri::command]
-pub(crate) fn load_set_dir(dir: String, state: State<'_, AppState>) -> Result<Set, String> {
-    state.load_set_dir(&dir)
+pub(crate) async fn load_set_dir(dir: String, state: State<'_, AppState>) -> Result<Set, String> {
+    worker(&state, move |s| s.load_set_dir(&dir)).await
 }
 
 #[tauri::command]
-pub(crate) fn new_set_dir(dir: String, state: State<'_, AppState>) -> Result<Set, String> {
-    state.new_set_dir(&dir)
+pub(crate) async fn new_set_dir(dir: String, state: State<'_, AppState>) -> Result<Set, String> {
+    worker(&state, move |s| s.new_set_dir(&dir)).await
 }
 
 #[tauri::command]
-pub(crate) fn save_set_dir(state: State<'_, AppState>) -> Result<(), String> {
-    state.save_set()
+pub(crate) async fn save_set_dir(state: State<'_, AppState>) -> Result<(), String> {
+    worker(&state, |s| s.save_set()).await
 }
 
 #[tauri::command]
-pub(crate) fn update_pad(bank: usize, pad: Pad, state: State<'_, AppState>) {
-    state.update_pad(bank, pad);
+pub(crate) fn get_save_status(state: State<'_, AppState>) -> SaveStatus {
+    state.save_status()
+}
+
+/// `key` names a continuous control (`pad:<bank>:<x>:<y>:<field>`) so a drag is one undo step.
+#[tauri::command]
+pub(crate) fn update_pad(bank: usize, pad: Pad, key: Option<String>, state: State<'_, AppState>) {
+    state.update_pad(bank, pad, key.as_deref());
 }
 
 #[tauri::command]
@@ -84,8 +102,28 @@ pub(crate) fn stop_all(state: State<'_, AppState>) {
 }
 
 #[tauri::command]
-pub(crate) fn import_sample(src: String, state: State<'_, AppState>) -> Result<String, String> {
-    state.import_sample(&src)
+pub(crate) async fn import_sample(
+    src: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    worker(&state, move |s| s.import_sample(&src)).await
+}
+
+/// Decode a sample (set-relative path, or any file, which is copied into the set first) and
+/// assign it to a pad. Returns the updated set.
+#[tauri::command]
+pub(crate) async fn assign_sample(
+    bank: usize,
+    x: u8,
+    y: u8,
+    path: String,
+    default_color: Option<[u8; 3]>,
+    state: State<'_, AppState>,
+) -> Result<Set, String> {
+    worker(&state, move |s| {
+        s.assign_sample(bank, x, y, &path, default_color)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -115,4 +153,25 @@ pub(crate) fn redo(state: State<'_, AppState>) -> Option<Set> {
 #[tauri::command]
 pub(crate) fn history_state(state: State<'_, AppState>) -> HistoryState {
     state.history_state()
+}
+
+/// `"sampler"` or `"game"`: who owns the Launchpad pads and LEDs. Returns the sampler's bank.
+#[tauri::command]
+pub(crate) fn set_input_mode(mode: String, state: State<'_, AppState>) -> Result<usize, String> {
+    let mode = match mode.as_str() {
+        "sampler" => InputMode::Sampler,
+        "game" => InputMode::Game,
+        other => return Err(format!("unknown input mode {other:?}")),
+    };
+    Ok(state.set_input_mode(mode))
+}
+
+/// Repaint every Launchpad LED on the next frame.
+#[tauri::command]
+pub(crate) fn refresh_leds(state: State<'_, AppState>) {
+    state
+        .painter
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .invalidate();
 }

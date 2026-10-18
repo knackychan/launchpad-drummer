@@ -1,6 +1,7 @@
 //! Router: single owner of set state, bank selection, and high-priority MIDI-to-audio dispatch.
 
-use lpd_core::audio::{db_to_gain, Command, Event, Sample};
+use crate::lights::PaintSnapshot;
+use lpd_core::audio::{db_to_gain, fader_gain, Command, Event, Sample};
 use lpd_core::devices::launchpad::LpEvent;
 use lpd_core::kit::{self, Set};
 use rtrb::{Consumer, Producer};
@@ -10,9 +11,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const TOP_MIXER: u8 = 7;
 
+/// A refused set replacement: nothing changed and the inputs are handed back.
+#[derive(Debug)]
+pub struct Rejected {
+    pub reason: String,
+    pub set: Set,
+    pub samples: HashMap<String, Arc<Sample>>,
+}
+
 pub struct Router {
     set: Set,
     samples: HashMap<String, Arc<Sample>>,
+    /// Samples no longer reachable from the caches. The audio thread may still hold the last
+    /// strong reference, so they are freed here, off the audio thread, once nothing else does.
+    retired: Vec<Arc<Sample>>,
     bank: usize,
     /// Held pads by pad id (bank * 64 + y * 8 + x).
     held: HashSet<u16>,
@@ -34,6 +46,7 @@ impl Router {
         Self {
             set,
             samples,
+            retired: Vec::new(),
             bank: 0,
             held: HashSet::new(),
             voice_counts: HashMap::new(),
@@ -74,8 +87,34 @@ impl Router {
         &self.samples
     }
 
-    pub fn samples_mut(&mut self) -> &mut HashMap<String, Arc<Sample>> {
-        &mut self.samples
+    /// Put a decoded sample into the active cache; the entry it replaces is retired.
+    pub fn install_sample(&mut self, path: String, sample: Arc<Sample>) {
+        if let Some(old) = self.samples.insert(path, sample) {
+            self.retire([old]);
+        }
+    }
+
+    /// Keep `samples` alive until the audio side lets go of them (see `drain_reclaimable`).
+    pub fn retire(&mut self, samples: impl IntoIterator<Item = Arc<Sample>>) {
+        for s in samples {
+            if !self.retired.iter().any(|r| Arc::ptr_eq(r, &s)) {
+                self.retired.push(s);
+            }
+        }
+    }
+
+    /// Retired samples nothing else references. The caller drops them after releasing the router
+    /// lock; the strong count can only fall (the audio thread never clones), so 1 is final.
+    pub fn drain_reclaimable(&mut self) -> Vec<Arc<Sample>> {
+        let (free, keep) = std::mem::take(&mut self.retired)
+            .into_iter()
+            .partition(|s| Arc::strong_count(s) == 1);
+        self.retired = keep;
+        free
+    }
+
+    pub fn retired_count(&self) -> usize {
+        self.retired.len()
     }
 
     pub fn update_group(&mut self, group: usize, g: kit::Group) {
@@ -93,7 +132,7 @@ impl Router {
         self.set.mixer.master_db = master_db;
         let _ = self
             .audio_tx
-            .push(Command::SetMasterGain(db_to_gain(master_db)));
+            .push(Command::SetMasterGain(fader_gain(master_db)));
     }
 
     pub fn pad_id(bank: usize, x: u8, y: u8) -> u16 {
@@ -124,12 +163,61 @@ impl Router {
         }
     }
 
-    pub fn set_current_set(&mut self, set: Set, samples: HashMap<String, Arc<Sample>>) {
+    /// Swap in another set. Nothing changes unless the audio queue has room for the whole
+    /// transition, so the stop below cannot be lost. Voices of the old set fade out (StopAll is
+    /// queued ahead of any trigger for the new set); their samples are retired, never freed here.
+    /// Voice counters stay as they are so in-flight start/end events remain balanced.
+    pub fn replace_set(
+        &mut self,
+        set: Set,
+        samples: HashMap<String, Arc<Sample>>,
+    ) -> Result<(), Box<Rejected>> {
+        let needed = 1 + set.mixer.groups.len() + 1;
+        if self.audio_tx.slots() < needed {
+            return Err(Box::new(Rejected {
+                reason: "The audio engine is busy. Try again in a moment.".into(),
+                set,
+                samples,
+            }));
+        }
+        let _ = self.audio_tx.push(Command::StopAll);
         Self::send_mixer_commands(&set, &mut self.audio_tx);
-        self.set = set;
-        self.samples = samples;
         self.held.clear();
-        self.voice_counts.clear();
+        self.set = set;
+        let old = std::mem::replace(&mut self.samples, samples);
+        self.retire(old.into_values());
+        Ok(())
+    }
+
+    /// Release every held pad (input ownership is changing).
+    pub fn release_all_held(&mut self) {
+        let ids: Vec<u16> = self.held.iter().copied().collect();
+        for id in ids {
+            self.release_id(id);
+        }
+    }
+
+    /// Everything the light painter needs for the active bank, copied under one lock.
+    pub fn paint_snapshot(&self) -> Option<PaintSnapshot> {
+        let bank = self.set.banks.get(self.bank)?.clone();
+        let loaded = bank
+            .pads
+            .iter()
+            .filter(|p| self.samples.contains_key(&p.sample))
+            .map(|p| p.sample.clone())
+            .collect();
+        let mut sounding = [false; 64];
+        for y in 0..8u8 {
+            for x in 0..8u8 {
+                sounding[y as usize * 8 + x as usize] = self.is_pad_sounding(self.bank, x, y);
+            }
+        }
+        Some(PaintSnapshot {
+            bank_index: self.bank,
+            bank,
+            loaded,
+            sounding,
+        })
     }
 
     /// Replace the set but keep samples, holds and voice tracking (undo/redo). Mixer
@@ -154,7 +242,7 @@ impl Router {
                 params: kit::group_params(g),
             });
         }
-        let _ = tx.push(Command::SetMasterGain(db_to_gain(set.mixer.master_db)));
+        let _ = tx.push(Command::SetMasterGain(fader_gain(set.mixer.master_db)));
     }
 
     pub fn select_bank(&mut self, bank: usize) -> bool {

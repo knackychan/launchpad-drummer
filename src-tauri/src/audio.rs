@@ -5,6 +5,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use lpd_core::audio::{host, Command, Engine, Event};
 use rtrb::{Consumer, Producer, RingBuffer};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -16,8 +18,39 @@ pub struct AudioStatus {
     pub channels: u16,
 }
 
+/// Failure flag of one output stream. The stream's error callback only sets it (no allocation,
+/// logging or I/O); the audio owner polls it. A replaced stream gets a new flag, so a late error
+/// from the old stream cannot affect the new one.
+#[derive(Default)]
+pub struct StreamHealth(AtomicBool);
+
+impl StreamHealth {
+    pub fn report_failure(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    /// True once per failure burst.
+    pub fn take_failure(&self) -> bool {
+        self.0.swap(false, Ordering::AcqRel)
+    }
+}
+
+/// Move a reported stream failure into the application status. Returns the new status when the
+/// UI should be told (the first failure only).
+pub fn poll_stream_health(
+    health: &StreamHealth,
+    state: &crate::state::AppState,
+) -> Option<AudioStatus> {
+    if health.take_failure() {
+        state.audio_stream_failed()
+    } else {
+        None
+    }
+}
+
 pub struct AudioSystem {
     pub stream: cpal::Stream,
+    pub health: Arc<StreamHealth>,
     pub commands: Producer<Command>,
     pub events: Consumer<Event>,
     pub status: AudioStatus,
@@ -43,10 +76,11 @@ pub fn start(asio: bool, buffer_frames: Option<u32>) -> Result<AudioSystem> {
     let sample_rate = config.sample_rate.0;
     let (engine, events) = Engine::new(sample_rate);
     let (commands, rx) = RingBuffer::new(1024);
+    let health = Arc::new(StreamHealth::default());
     let stream = match format {
-        cpal::SampleFormat::F32 => build::<f32>(&device, &config, engine, rx)?,
-        cpal::SampleFormat::I32 => build::<i32>(&device, &config, engine, rx)?,
-        cpal::SampleFormat::I16 => build::<i16>(&device, &config, engine, rx)?,
+        cpal::SampleFormat::F32 => build::<f32>(&device, &config, engine, rx, health.clone())?,
+        cpal::SampleFormat::I32 => build::<i32>(&device, &config, engine, rx, health.clone())?,
+        cpal::SampleFormat::I16 => build::<i16>(&device, &config, engine, rx, health.clone())?,
         other => bail!("unsupported device sample format {other:?}"),
     };
     stream.play()?;
@@ -56,6 +90,7 @@ pub fn start(asio: bool, buffer_frames: Option<u32>) -> Result<AudioSystem> {
     };
     Ok(AudioSystem {
         stream,
+        health,
         commands,
         events,
         status: AudioStatus {
@@ -73,6 +108,7 @@ fn build<T>(
     config: &cpal::StreamConfig,
     mut engine: Engine,
     mut rx: Consumer<Command>,
+    health: Arc<StreamHealth>,
 ) -> Result<cpal::Stream>
 where
     T: cpal::SizedSample + cpal::FromSample<f32>,
@@ -91,7 +127,7 @@ where
                 }
             }
         },
-        |err| eprintln!("audio stream error: {err}"),
+        move |_| health.report_failure(),
         None,
     )?;
     Ok(stream)

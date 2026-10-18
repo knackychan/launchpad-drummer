@@ -37,7 +37,7 @@ fn test_app_state_integration_and_commands() {
         choke_group: Some(1),
         mix_group: 2,
     };
-    state.update_pad(3, pad.clone());
+    state.update_pad(3, pad.clone(), None);
     let current_set = state.get_current_set();
     let retrieved_pad = current_set.banks[3].pad(2, 2).expect("pad found");
     assert_eq!(retrieved_pad.sample, "samples/snare.wav");
