@@ -4,8 +4,9 @@ use lpd_core::audio::{db_to_gain, Command, Event, Sample};
 use lpd_core::devices::launchpad::LpEvent;
 use lpd_core::kit::{self, Set};
 use rtrb::{Consumer, Producer};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const TOP_MIXER: u8 = 7;
 
@@ -13,10 +14,13 @@ pub struct Router {
     set: Set,
     samples: HashMap<String, Arc<Sample>>,
     bank: usize,
-    held: HashMap<(u8, u8), u16>,
+    /// Held pads by pad id (bank * 64 + y * 8 + x).
+    held: HashSet<u16>,
     voice_counts: HashMap<u16, usize>,
     audio_tx: Producer<Command>,
     audio_rx: Consumer<Event>,
+    /// xorshift32 state for humanize; never 0.
+    rng: u32,
 }
 
 impl Router {
@@ -31,11 +35,27 @@ impl Router {
             set,
             samples,
             bank: 0,
-            held: HashMap::new(),
+            held: HashSet::new(),
             voice_counts: HashMap::new(),
             audio_tx,
             audio_rx,
+            rng: time_seed(),
         }
+    }
+
+    /// Fix the humanize random sequence (tests).
+    pub fn set_seed(&mut self, seed: u32) {
+        self.rng = seed.max(1);
+    }
+
+    /// Uniform in [-1, 1).
+    fn next_unit(&mut self) -> f32 {
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng = x;
+        (x >> 8) as f32 / (1u32 << 23) as f32 - 1.0
     }
 
     pub fn bank(&self) -> usize {
@@ -76,38 +96,6 @@ impl Router {
             .push(Command::SetMasterGain(db_to_gain(master_db)));
     }
 
-    pub fn update_pad(&mut self, bank: usize, pad: kit::Pad) {
-        if bank < self.set.banks.len() {
-            self.set.banks[bank].set_pad(pad);
-        }
-    }
-
-    pub fn remove_pad(&mut self, bank: usize, x: u8, y: u8) {
-        if bank < self.set.banks.len() {
-            self.set.banks[bank]
-                .pads
-                .retain(|p| !(p.x == x && p.y == y));
-        }
-    }
-
-    pub fn update_bank_lights(&mut self, bank: usize, lights: kit::LightModes) {
-        if bank < self.set.banks.len() {
-            self.set.banks[bank].lights = lights;
-        }
-    }
-
-    pub fn update_bank_humanize(&mut self, bank: usize, humanize_db: f32) {
-        if bank < self.set.banks.len() {
-            self.set.banks[bank].humanize_db = humanize_db;
-        }
-    }
-
-    pub fn rename_bank(&mut self, bank: usize, name: String) {
-        if bank < self.set.banks.len() {
-            self.set.banks[bank].name = name;
-        }
-    }
-
     pub fn pad_id(bank: usize, x: u8, y: u8) -> u16 {
         (bank * 64 + y as usize * 8 + x as usize) as u16
     }
@@ -144,6 +132,21 @@ impl Router {
         self.voice_counts.clear();
     }
 
+    /// Replace the set but keep samples, holds and voice tracking (undo/redo). Mixer
+    /// commands are re-sent only when the mixer changed.
+    pub fn install_set(&mut self, set: Set) {
+        let mixer_changed = mixer_audio_differs(&self.set, &set);
+        self.set = set;
+        if mixer_changed {
+            self.send_mixer();
+        }
+    }
+
+    /// Push every group and the master gain to the engine.
+    pub fn send_mixer(&mut self) {
+        Self::send_mixer_commands(&self.set, &mut self.audio_tx);
+    }
+
     fn send_mixer_commands(set: &Set, tx: &mut Producer<Command>) {
         for (i, g) in set.mixer.groups.iter().enumerate() {
             let _ = tx.push(Command::SetGroup {
@@ -167,25 +170,60 @@ impl Router {
         let _ = self.audio_tx.push(Command::StopAll);
     }
 
+    /// Current bank, full velocity.
     pub fn trigger_pad(&mut self, x: u8, y: u8) {
-        let Some(pad) = self.set.banks[self.bank].pad(x, y) else {
+        self.trigger_pad_in(self.bank, x, y, 1.0);
+    }
+
+    /// The one trigger path: pad gain × `velocity_gain` × bank humanize (±humanize_db/2).
+    pub fn trigger_pad_in(&mut self, bank: usize, x: u8, y: u8, velocity_gain: f32) {
+        let Some(b) = self.set.banks.get(bank) else {
+            return;
+        };
+        let humanize_db = b.humanize_db;
+        let Some(pad) = b.pad(x, y) else {
             return;
         };
         let Some(sample) = self.samples.get(&pad.sample) else {
             return;
         };
-        let id = Self::pad_id(self.bank, x, y);
-        self.held.insert((x, y), id);
-        let params = kit::play_params(pad, sample);
+        let mut params = kit::play_params(pad, sample);
+        let sample = sample.clone();
+        let mut gain = velocity_gain;
+        if humanize_db > 0.0 {
+            gain *= db_to_gain(self.next_unit() * humanize_db / 2.0);
+        }
+        params.gain *= gain;
+        let id = Self::pad_id(bank, x, y);
+        self.held.insert(id);
         let _ = self.audio_tx.push(Command::Trigger {
             pad: id,
-            sample: sample.clone(),
+            sample,
             params,
         });
     }
 
+    /// Release (x, y) of the current bank; if that is not held (bank switched while
+    /// holding), release the pad held at (x, y) in another bank.
     pub fn release_pad(&mut self, x: u8, y: u8) {
-        if let Some(id) = self.held.remove(&(x, y)) {
+        let current = Self::pad_id(self.bank, x, y);
+        let id = if self.held.contains(&current) {
+            Some(current)
+        } else {
+            let pos = Self::pad_id(0, x, y);
+            self.held.iter().copied().find(|id| id % 64 == pos)
+        };
+        if let Some(id) = id {
+            self.release_id(id);
+        }
+    }
+
+    pub fn release_pad_in(&mut self, bank: usize, x: u8, y: u8) {
+        self.release_id(Self::pad_id(bank, x, y));
+    }
+
+    fn release_id(&mut self, id: u16) {
+        if self.held.remove(&id) {
             let _ = self.audio_tx.push(Command::Release { pad: id });
         }
     }
@@ -202,5 +240,125 @@ impl Router {
             }
             _ => {}
         }
+    }
+}
+
+/// True when the sets differ in what the engine hears from the mixer (group names ignored).
+pub fn mixer_audio_differs(a: &Set, b: &Set) -> bool {
+    a.mixer.master_db != b.mixer.master_db
+        || a.mixer.groups.len() != b.mixer.groups.len()
+        || a.mixer
+            .groups
+            .iter()
+            .zip(&b.mixer.groups)
+            .any(|(x, y)| kit::group_params(x) != kit::group_params(y))
+}
+
+fn time_seed() -> u32 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() ^ d.as_secs() as u32)
+        .unwrap_or(0x9E37_79B9);
+    nanos.max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lpd_core::kit::Pad;
+    use rtrb::RingBuffer;
+
+    fn router_with_pad(humanize_db: f32, volume_db: f32) -> (Router, Consumer<Command>) {
+        let mut set = Set::new();
+        let mut pad = Pad::new(0, 0, "samples/a.wav", [63, 0, 0]);
+        pad.volume_db = volume_db;
+        set.banks[0].set_pad(pad.clone());
+        set.banks[0].humanize_db = humanize_db;
+        set.banks[1].set_pad(pad);
+        let mut samples = HashMap::new();
+        samples.insert(
+            "samples/a.wav".to_string(),
+            Arc::new(Sample {
+                rate: 48_000,
+                data: vec![0.5; 200],
+            }),
+        );
+        let (tx, mut cmd_rx) = RingBuffer::new(1024);
+        let (_evt_tx, evt_rx) = RingBuffer::new(16);
+        let router = Router::new(set, samples, tx, evt_rx);
+        while cmd_rx.pop().is_ok() {}
+        (router, cmd_rx)
+    }
+
+    fn trigger_gains(rx: &mut Consumer<Command>) -> Vec<f32> {
+        let mut gains = Vec::new();
+        while let Ok(cmd) = rx.pop() {
+            if let Command::Trigger { params, .. } = cmd {
+                gains.push(params.gain);
+            }
+        }
+        gains
+    }
+
+    #[test]
+    fn humanize_varies_gain_within_half_range() {
+        let (mut router, mut rx) = router_with_pad(6.0, 0.0);
+        router.set_seed(12345);
+        for _ in 0..10 {
+            router.trigger_pad(0, 0);
+        }
+        let gains = trigger_gains(&mut rx);
+        assert_eq!(gains.len(), 10);
+        let (lo, hi) = (db_to_gain(-3.0), db_to_gain(3.0));
+        assert!(gains.iter().all(|g| *g >= lo && *g <= hi), "{gains:?}");
+        assert!(gains.iter().any(|g| *g != gains[0]), "{gains:?}");
+    }
+
+    #[test]
+    fn no_humanize_gives_exact_pad_gain() {
+        let (mut router, mut rx) = router_with_pad(0.0, -6.0);
+        router.set_seed(7);
+        for _ in 0..5 {
+            router.trigger_pad(0, 0);
+        }
+        let gains = trigger_gains(&mut rx);
+        assert_eq!(gains.len(), 5);
+        assert!(gains.iter().all(|g| *g == db_to_gain(-6.0)), "{gains:?}");
+    }
+
+    #[test]
+    fn velocity_gain_scales_trigger() {
+        let (mut router, mut rx) = router_with_pad(0.0, 0.0);
+        router.trigger_pad_in(1, 0, 0, 0.5);
+        assert_eq!(trigger_gains(&mut rx), vec![0.5]);
+    }
+
+    #[test]
+    fn release_from_another_bank_uses_pad_id() {
+        let (mut router, mut rx) = router_with_pad(0.0, 0.0);
+        router.trigger_pad_in(1, 0, 0, 1.0);
+        router.release_pad_in(1, 0, 0);
+        let mut released = Vec::new();
+        while let Ok(cmd) = rx.pop() {
+            if let Command::Release { pad } = cmd {
+                released.push(pad);
+            }
+        }
+        assert_eq!(released, vec![Router::pad_id(1, 0, 0)]);
+    }
+
+    #[test]
+    fn release_after_bank_switch_still_releases_pressed_pad() {
+        let (mut router, mut rx) = router_with_pad(0.0, 0.0);
+        router.trigger_pad(0, 0);
+        router.select_bank(1);
+        router.release_pad(0, 0);
+        let mut released = Vec::new();
+        while let Ok(cmd) = rx.pop() {
+            if let Command::Release { pad } = cmd {
+                released.push(pad);
+            }
+        }
+        assert_eq!(released, vec![Router::pad_id(0, 0, 0)]);
     }
 }

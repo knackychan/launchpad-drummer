@@ -1,5 +1,5 @@
 use launchpad_drummer_lib::store::KitManager;
-use lpd_core::kit::Pad;
+use lpd_core::kit::{Pad, Set};
 use std::path::Path;
 
 fn write_test_wav(path: &Path) {
@@ -23,8 +23,9 @@ fn kit_manager_saves_and_loads_set() {
     km.set_dir(dir.path().to_path_buf());
     let mut pad = Pad::new(0, 0, "samples/kick.wav", [63, 0, 0]);
     pad.volume_db = -3.0;
-    km.set.banks[0].set_pad(pad);
-    km.save().expect("save ok");
+    let mut set = Set::new();
+    set.banks[0].set_pad(pad);
+    km.save(&set).expect("save ok");
 
     let loaded = KitManager::load_from_dir(dir.path()).expect("load ok");
     assert_eq!(loaded.set.banks[0].pads.len(), 1);

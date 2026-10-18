@@ -16,7 +16,6 @@ pub struct LoadedKit {
 }
 
 pub struct KitManager {
-    pub set: Set,
     pub dir: Option<PathBuf>,
     pub samples: HashMap<String, Arc<Sample>>,
     pub failed_samples: Vec<(String, String)>,
@@ -31,7 +30,6 @@ impl Default for KitManager {
 impl KitManager {
     pub fn new_default() -> Self {
         Self {
-            set: Set::new(),
             dir: None,
             samples: HashMap::new(),
             failed_samples: Vec::new(),
@@ -58,11 +56,12 @@ impl KitManager {
         })
     }
 
-    pub fn save(&self) -> Result<()> {
+    /// Save `set` (the router owns it) into the configured set directory.
+    pub fn save(&self, set: &Set) -> Result<()> {
         let Some(dir) = self.dir.as_ref() else {
             bail!("no set directory configured");
         };
-        kit::save(dir, &self.set)?;
+        kit::save(dir, set)?;
         Ok(())
     }
 

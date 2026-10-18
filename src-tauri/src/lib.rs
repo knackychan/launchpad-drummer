@@ -65,7 +65,10 @@ pub fn run() {
             commands::stop_all,
             commands::import_sample,
             commands::update_bank_humanize,
-            commands::sample_peaks
+            commands::sample_peaks,
+            commands::undo,
+            commands::redo,
+            commands::history_state
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Launchpad Drummer");

@@ -1,5 +1,5 @@
 use crate::audio::AudioStatus;
-use crate::state::{AppState, SamplePeaks};
+use crate::state::{AppState, HistoryState, SamplePeaks};
 use lpd_core::kit::{Group, LightModes, Pad, Set};
 use tauri::State;
 
@@ -100,4 +100,19 @@ pub(crate) fn sample_peaks(
     state: State<'_, AppState>,
 ) -> Option<SamplePeaks> {
     state.sample_peaks(&path, buckets)
+}
+
+#[tauri::command]
+pub(crate) fn undo(state: State<'_, AppState>) -> Option<Set> {
+    state.undo()
+}
+
+#[tauri::command]
+pub(crate) fn redo(state: State<'_, AppState>) -> Option<Set> {
+    state.redo()
+}
+
+#[tauri::command]
+pub(crate) fn history_state(state: State<'_, AppState>) -> HistoryState {
+    state.history_state()
 }
