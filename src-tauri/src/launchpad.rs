@@ -61,10 +61,12 @@ struct Connection {
     output: MidiOutputConnection,
 }
 
-pub fn start(app: AppHandle) {
+use crate::state::AppState;
+
+pub fn start(app: AppHandle, state: AppState) {
     let (tx, rx) = mpsc::channel();
     app.manage(FrameSender(tx));
-    std::thread::spawn(move || run(app, rx));
+    std::thread::spawn(move || run(app, state, rx));
 }
 
 /// `frame` has 64 RGB triplets in visual order (top-left to bottom-right), channels 0..=63.
@@ -112,36 +114,86 @@ fn rgb_message(frame: &[[u8; 3]]) -> Result<Vec<u8>, String> {
     Ok(msgs.into_iter().next().expect("exactly one message"))
 }
 
-fn run(app: AppHandle, rx: Receiver<Vec<u8>>) {
+fn run(app: AppHandle, state: AppState, rx: Receiver<Vec<u8>>) {
     let mut connection: Option<Connection> = None;
     let mut status = None;
     let mut latest_frame = None;
     let mut next_check = Instant::now();
+    let mut tick_counter: u32 = 0;
+    let tick_interval = Duration::from_millis(16);
     loop {
-        if Instant::now() >= next_check {
-            check_connection(&app, &mut connection, &mut status, latest_frame.as_deref());
-            next_check = Instant::now() + RECHECK;
+        let now = Instant::now();
+        if now >= next_check {
+            check_connection(
+                &app,
+                &state,
+                &mut connection,
+                &mut status,
+                latest_frame.as_deref(),
+            );
+            next_check = now + RECHECK;
         }
-        match rx.recv_timeout(next_check.saturating_duration_since(Instant::now())) {
-            Ok(frame) => {
-                latest_frame = Some(frame);
-                if let (Some(device), Some(frame)) = (connection.as_mut(), latest_frame.as_deref())
-                {
-                    if let Err(error) = device.output.send(frame) {
-                        eprintln!("Launchpad LED send failed: {error}");
-                        connection = None;
-                        report_status(&app, &mut status, DeviceStatus::Disconnected);
+
+        let manual_override = rx.try_recv().ok();
+
+        if let Ok(mut r) = state.router.lock() {
+            r.poll_audio_events();
+        }
+
+        if let Some(frame) = manual_override {
+            latest_frame = Some(frame.clone());
+            if let Some(device) = connection.as_mut() {
+                if let Err(error) = device.output.send(&frame) {
+                    eprintln!("Launchpad LED send failed: {error}");
+                    connection = None;
+                    report_status(&app, &mut status, DeviceStatus::Disconnected);
+                }
+            }
+        } else {
+            let full_frame = state.paint_frame(now);
+
+            if let Some(device) = connection.as_mut() {
+                let diff = if let Ok(mut p) = state.painter.lock() {
+                    p.diff(&full_frame)
+                } else {
+                    vec![]
+                };
+                if !diff.is_empty() {
+                    for msg in lp::rgb_messages(&diff) {
+                        if let Err(error) = device.output.send(&msg) {
+                            eprintln!("Launchpad LED send failed: {error}");
+                            connection = None;
+                            report_status(&app, &mut status, DeviceStatus::Disconnected);
+                            break;
+                        }
                     }
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+
+            tick_counter = tick_counter.wrapping_add(1);
+            if tick_counter % 2 == 0 {
+                let mut screen_frame = [[0u8; 3]; 64];
+                for &(led_id, color) in &full_frame {
+                    let row_1_based = led_id / 10;
+                    let col_1_based = led_id % 10;
+                    if (1..=8).contains(&row_1_based) && (1..=8).contains(&col_1_based) {
+                        let y = row_1_based - 1;
+                        let x = col_1_based - 1;
+                        let screen_idx = (7 - y as usize) * 8 + x as usize;
+                        screen_frame[screen_idx] = color;
+                    }
+                }
+                let _ = app.emit("launchpad-frame", screen_frame.to_vec());
+            }
         }
+
+        std::thread::sleep(tick_interval);
     }
 }
 
 fn check_connection(
     app: &AppHandle,
+    state: &AppState,
     connection: &mut Option<Connection>,
     status: &mut Option<DeviceStatus>,
     latest_frame: Option<&[u8]>,
@@ -212,10 +264,14 @@ fn check_connection(
     }
     *connection = None;
     let receiver = app.clone();
+    let app_state = state.clone();
     let input_connection = match input.connect(
         &input_port,
         "launchpad-drummer-in",
         move |_, msg, _| {
+            if let Some(ev) = lp::decode(msg) {
+                app_state.on_lp_event(ev);
+            }
             if let Some(pad) = decode_pad(msg) {
                 if let Err(error) = receiver.emit("launchpad-pad", pad) {
                     eprintln!("Launchpad pad event failed: {error}");

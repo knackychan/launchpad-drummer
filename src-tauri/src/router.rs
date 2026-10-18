@@ -54,6 +54,54 @@ impl Router {
         &self.samples
     }
 
+    pub fn samples_mut(&mut self) -> &mut HashMap<String, Arc<Sample>> {
+        &mut self.samples
+    }
+
+    pub fn update_group(&mut self, group: usize, g: kit::Group) {
+        if group < self.set.mixer.groups.len() {
+            let params = kit::group_params(&g);
+            self.set.mixer.groups[group] = g;
+            let _ = self.audio_tx.push(Command::SetGroup {
+                group: group as u8,
+                params,
+            });
+        }
+    }
+
+    pub fn update_master_db(&mut self, master_db: f32) {
+        self.set.mixer.master_db = master_db;
+        let _ = self
+            .audio_tx
+            .push(Command::SetMasterGain(db_to_gain(master_db)));
+    }
+
+    pub fn update_pad(&mut self, bank: usize, pad: kit::Pad) {
+        if bank < self.set.banks.len() {
+            self.set.banks[bank].set_pad(pad);
+        }
+    }
+
+    pub fn remove_pad(&mut self, bank: usize, x: u8, y: u8) {
+        if bank < self.set.banks.len() {
+            self.set.banks[bank]
+                .pads
+                .retain(|p| !(p.x == x && p.y == y));
+        }
+    }
+
+    pub fn update_bank_lights(&mut self, bank: usize, lights: kit::LightModes) {
+        if bank < self.set.banks.len() {
+            self.set.banks[bank].lights = lights;
+        }
+    }
+
+    pub fn rename_bank(&mut self, bank: usize, name: String) {
+        if bank < self.set.banks.len() {
+            self.set.banks[bank].name = name;
+        }
+    }
+
     pub fn pad_id(bank: usize, x: u8, y: u8) -> u16 {
         (bank * 64 + y as usize * 8 + x as usize) as u16
     }
