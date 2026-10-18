@@ -32,9 +32,9 @@ fn state_with_writer(
     );
     let tmp = tempfile::tempdir().unwrap();
     state
-        .new_set_dir(tmp.path().join("kit").to_str().unwrap())
+        .new_set(tmp.path().join("kit").to_str().unwrap())
         .unwrap();
-    // `new_set_dir` writes through lpd_core directly, not through the injected writer.
+    // `new_set` writes through lpd_core directly, not through the injected writer.
     (state, log, tmp)
 }
 
@@ -166,7 +166,7 @@ fn a_set_switch_during_a_save_writes_the_right_folder_and_stays_clean() {
     entered.recv_timeout(Duration::from_secs(5)).unwrap();
 
     let second = tmp.path().join("second");
-    state.new_set_dir(second.to_str().unwrap()).unwrap();
+    state.new_set(second.to_str().unwrap()).unwrap();
     release.send(()).unwrap();
     within(5, move || saving.join().unwrap().unwrap());
 
@@ -249,10 +249,7 @@ fn loading_keeps_the_active_set_when_the_folder_is_unreadable() {
     let tmp = tempfile::tempdir().unwrap();
     let r = rig(4096);
     r.state.rename_bank(0, "Mine".into());
-    let error = r
-        .state
-        .load_set_dir(tmp.path().to_str().unwrap())
-        .unwrap_err();
+    let error = r.state.open_set(tmp.path().to_str().unwrap()).unwrap_err();
     assert!(!error.is_empty());
     assert_eq!(r.state.get_current_set().banks[0].name, "Mine");
 }
@@ -268,7 +265,7 @@ fn opening_a_kit_loads_its_samples_and_reports_missing_ones() {
     lpd_core::kit::save(&dir, &set).unwrap();
     write_wav(&dir.join("samples/ok.wav"), 480);
 
-    r.state.load_set_dir(dir.to_str().unwrap()).unwrap();
+    r.state.open_set(dir.to_str().unwrap()).unwrap();
     assert!(r.state.sample_peaks("samples/ok.wav", 16).is_some());
     let km = r.state.kit_manager.lock().unwrap();
     assert_eq!(km.failed_samples.len(), 1);

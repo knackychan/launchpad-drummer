@@ -16,7 +16,7 @@
   import { CRT_FACTORS, readDisplay, saveDisplay } from './lib/display.ts';
   import type { CrtLevel } from './lib/display.ts';
   import { createDefaultPad, createEmptySet, createPreviewSet, GROUP_COLORS, padLabel } from './lib/model.ts';
-  import type { AudioStatus, Group, LightModes, Pad, SamplePeaks, SetModel } from './lib/model.ts';
+  import type { AudioStatus, Group, LightModes, OpenResult, Pad, SamplePeaks, SetModel } from './lib/model.ts';
   import { solvePlayLayout } from './lib/layout.ts';
   import { hitAmount, hitGroup, runActivity } from './lib/activity.ts';
   import { audioLabel, currentNotice, IDLE_SAVE, padEditKey, saveBadge } from './lib/status.ts';
@@ -270,8 +270,9 @@
       const dir = window.prompt(isNew ? 'New set folder path:' : 'Set folder path to load:');
       if (!dir) return;
       try {
-        currentSet = await invoke<SetModel>(isNew ? 'new_set_dir' : 'load_set_dir', { dir });
-        setName = dir.split(/[\\/]/).pop() || dir;
+        const opened = await invoke<OpenResult>(isNew ? 'new_set' : 'open_set', { dir });
+        currentSet = opened.set;
+        setName = opened.name;
         selected = null;
         peaks = null;
         toast = null;
@@ -283,7 +284,7 @@
   }
   async function saveSet() {
     try {
-      await invoke('save_set_dir');
+      await invoke('save_now');
       logMidi('Set saved successfully');
     } catch (e) {
       // The backend also emits save-status; this makes the failure visible without waiting for it.

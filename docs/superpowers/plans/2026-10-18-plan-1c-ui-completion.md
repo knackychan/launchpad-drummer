@@ -157,9 +157,9 @@ Implemented. The reviewers check it against this text; later tasks rely on these
 - Router: `trigger_pad_in(bank, x, y, velocity_gain)` is the only trigger path. Humanize = `gain × velocity_gain × db_to_gain(u × humanize_db / 2)`, `u` uniform in [−1, 1) from a xorshift32 (`set_seed` for tests). `release_pad_in`, `install_set`, `send_mixer`, `mixer_audio_differs`. Holds tracked by pad id.
 - `KitManager { dir, samples, failed_samples }` (no `save`: see D11).
 
-### Task 2: App config, startup decision, autosave, save status, log file, pickers
+### Task 2: App config, startup decision, autosave, save status, log file, pickers — DONE
 
-> **Status 2026-10-18 (partial).** Done as part of audit finding 8: `saver.rs` (`Saver`, `SaveStatus`, 1 s debounce, 2 s retry), `AppState::touch` wired to it, the `save-status` event, `get_save_status`, and the shared manual/auto save path. Still to do: config, startup decision, log file, pickers, `new_set`/`open_set`/`OpenResult` and the `save_now` rename. See [the remediation note](2026-10-18-code-audit-and-remediation.md#implementation-record-2026-10-18).
+> **Status 2026-10-18: DONE** (the saver part in audit commit `0ef8f5e`, the rest in the commit after `4479281`). The saver keeps the audit's shape (`reset`/`due`/`finish`/`take_change`, driven by `AppState::autosave_tick`/`run_save`) instead of the `tick(now, save)` contract below; behaviour 3 is implemented by that path, not by `km.save` (D11). `AppState::restore(config_path)` runs the startup decision in `setup()`; `new_set`/`open_set` keep the audit's guards (`ensure_new_set_dir`, request tickets, sample retirement, worker threads). `config` and `startup` are leaf locks; `config` is held across its own small file write (it must not share `save_gate`, or opening a set would wait for a set save in flight). Local times use `chrono` (added dependency). TS mirrors for `Startup`, `OpenResult`, `AppConfig`, `AudioPrefs`, `MissingPad`, `KeysStatus` are in `src/lib/model.ts` (0.4). See [the remediation note](2026-10-18-code-audit-and-remediation.md#implementation-record-2026-10-18) for the saver.
 
 **Purpose.** The app must reopen the last set, save by itself, report save failures, and offer folder and file pickers. Today nothing is remembered between runs and saving is a manual key.
 

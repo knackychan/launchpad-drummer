@@ -4,12 +4,16 @@
 //! `router` → `history` → `kit_manager` → `saver`. `painter`, `save_gate` and `assigns` are
 //! separate: `painter` and `assigns` are leaves (nothing is taken while holding them) and
 //! `save_gate` is taken first, only to order disk writes. No lock is held across disk I/O,
-//! sample decoding or MIDI output.
+//! sample decoding or MIDI output. `startup` and `config` are leaves too; the one exception
+//! to "no lock across disk I/O" is `config`, held while its own small file is written.
 
 use crate::audio::AudioStatus;
+use crate::config::{self, AppConfig};
 use crate::lights::LightPainter;
+use crate::logfile;
 use crate::router::Router;
 use crate::saver::{SaveStatus, Saver};
+use crate::startup::{self, Startup};
 use crate::store::{prepare_sample, KitManager, LoadedKit};
 use lpd_core::audio::{Command, Event, Sample};
 use lpd_core::devices::launchpad::LpEvent;
@@ -34,6 +38,43 @@ pub struct SamplePeaks {
 pub struct HistoryState {
     pub can_undo: bool,
     pub can_redo: bool,
+}
+
+/// A set that was just created or opened.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenResult {
+    pub set: Set,
+    pub path: String,
+    pub name: String,
+    pub from_backup: bool,
+    pub backup_saved_at: Option<String>,
+}
+
+/// A pad whose sample did not load.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MissingPad {
+    pub bank: usize,
+    pub x: u8,
+    pub y: u8,
+    pub sample: String,
+}
+
+/// Which engine plays the keys instrument.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeysStatus {
+    pub engine: String,
+    pub name: String,
+    pub error: Option<String>,
+}
+
+/// The app config and the file it lives in (none in tests until `restore`).
+#[derive(Default)]
+struct ConfigFile {
+    path: Option<PathBuf>,
+    config: AppConfig,
 }
 
 /// Who owns the Launchpad's pads and LEDs.
@@ -76,6 +117,9 @@ pub struct AppState {
     pub audio_status: Arc<Mutex<AudioStatus>>,
     /// Undo/redo of kit edits; lock after `router`.
     pub history: Arc<Mutex<History>>,
+    /// What the app opened at launch, or the set opened since.
+    pub startup: Arc<Mutex<Startup>>,
+    config: Arc<Mutex<ConfigFile>>,
     saver: Arc<Mutex<Saver>>,
     save_gate: Arc<Mutex<()>>,
     writer: Writer,
@@ -115,6 +159,8 @@ impl AppState {
                 channels: 2,
             })),
             history: Arc::new(Mutex::new(History::new())),
+            startup: Arc::new(Mutex::new(Startup::FirstRun)),
+            config: Arc::default(),
             saver: Arc::new(Mutex::new(Saver::new())),
             save_gate: Arc::new(Mutex::new(())),
             writer,
@@ -407,16 +453,60 @@ impl AppState {
         self.open_ticket.fetch_add(1, Ordering::SeqCst) + 1
     }
 
-    /// Load a set folder. Slow: call from a worker thread.
-    pub fn load_set_dir(&self, dir_str: &str) -> Result<Set, String> {
+    /// Launch: load the config at `config_path`, reopen its last set when possible and
+    /// remember the outcome for `get_startup`. Slow: loads samples.
+    pub fn restore(&self, config_path: PathBuf) -> Startup {
+        let loaded_config = config::load(&config_path);
+        let last = loaded_config.last_set.clone();
+        *lock(&self.config) = ConfigFile {
+            path: Some(config_path),
+            config: loaded_config,
+        };
+        let (decision, kit) =
+            startup::decide_startup(last.as_deref().map(Path::new), KitManager::load_from_dir);
+        let decision = match (decision, kit) {
+            (Startup::Loaded { path, name, .. }, Some(kit)) => {
+                let ticket = self.begin_open();
+                match self.finish_open(ticket, kit) {
+                    Ok(_) => self.get_startup(),
+                    Err(reason) => {
+                        logfile::log(format!("Startup: couldn't install {path}: {reason}"));
+                        Startup::Unreadable { path, name }
+                    }
+                }
+            }
+            (other, _) => other,
+        };
+        logfile::log(format!("Startup: {decision:?}"));
+        *lock(&self.startup) = decision.clone();
+        decision
+    }
+
+    pub fn get_startup(&self) -> Startup {
+        lock(&self.startup).clone()
+    }
+
+    /// Open a set folder. A failure changes nothing. Slow: call from a worker thread.
+    pub fn open_set(&self, dir_str: &str) -> Result<OpenResult, String> {
         let ticket = self.begin_open();
-        let loaded = KitManager::load_from_dir(Path::new(dir_str)).map_err(|e| e.to_string())?;
+        let dir = Path::new(dir_str);
+        let loaded = KitManager::load_from_dir(dir).map_err(|e| {
+            logfile::log(format!("Open {}: {e:#}", dir.display()));
+            format!(
+                "Couldn't open {} — set.json and backup are unreadable. Files left untouched.",
+                startup::set_name(dir)
+            )
+        })?;
         self.finish_open(ticket, loaded)
     }
 
     /// Commit a loaded kit if no newer open/new request started meanwhile.
-    pub fn finish_open(&self, ticket: u64, loaded: LoadedKit) -> Result<Set, String> {
+    pub fn finish_open(&self, ticket: u64, loaded: LoadedKit) -> Result<OpenResult, String> {
+        for (path, error) in &loaded.failed_samples {
+            logfile::log(format!("{path}: {error}"));
+        }
         let set = loaded.set.clone();
+        let dir = loaded.dir.clone();
         self.install(
             ticket,
             loaded.set,
@@ -424,12 +514,35 @@ impl AppState {
             loaded.samples,
             loaded.failed_samples,
         )?;
-        Ok(set)
+        Ok(self.adopt(&dir, set, loaded.from_backup))
+    }
+
+    /// A set is now open: it becomes the startup state and the last set in the config.
+    fn adopt(&self, dir: &Path, set: Set, from_backup: bool) -> OpenResult {
+        let result = OpenResult {
+            set,
+            path: dir.display().to_string(),
+            name: startup::set_name(dir),
+            from_backup,
+            backup_saved_at: startup::backup_time(dir),
+        };
+        *lock(&self.startup) = Startup::Loaded {
+            path: result.path.clone(),
+            name: result.name.clone(),
+            from_backup,
+            backup_saved_at: result.backup_saved_at.clone(),
+        };
+        let last = Some(result.path.clone());
+        if let Err(e) = self.update_config(|c| c.last_set = last) {
+            logfile::log(e);
+        }
+        logfile::log(format!("Opened set {}", result.path));
+        result
     }
 
     /// Create an empty set in a folder that holds no kit. Nothing on disk or in memory changes
     /// when the folder already holds one. Slow: call from a worker thread.
-    pub fn new_set_dir(&self, dir_str: &str) -> Result<Set, String> {
+    pub fn new_set(&self, dir_str: &str) -> Result<OpenResult, String> {
         let ticket = self.begin_open();
         let dir = Path::new(dir_str);
         kit::ensure_new_set_dir(dir).map_err(|e| e.to_string())?;
@@ -452,7 +565,68 @@ impl AppState {
             }
             return Err(reason);
         }
-        Ok(set)
+        Ok(self.adopt(dir, set, false))
+    }
+
+    // ---- app config ----------------------------------------------------------------------
+
+    pub fn get_config(&self) -> AppConfig {
+        lock(&self.config).config.clone()
+    }
+
+    /// Change the config and write it (when it has a file). The `config` leaf lock is held
+    /// across its own small write so writes land in order; nothing else waits on it (not
+    /// `save_gate`: opening a set must not wait for a set save in flight).
+    fn update_config(&self, f: impl FnOnce(&mut AppConfig)) -> Result<(), String> {
+        let mut c = lock(&self.config);
+        f(&mut c.config);
+        match &c.path {
+            Some(path) => config::save(path, &c.config)
+                .map_err(|e| format!("Couldn't save the app config: {e:#}")),
+            None => Ok(()),
+        }
+    }
+
+    pub fn set_library_dir(&self, dir: Option<String>) -> Result<(), String> {
+        self.update_config(|c| c.library_dir = dir)
+    }
+
+    /// Remembers the `.sf2` file. The keys instrument stays built-in until Task 15.
+    pub fn set_soundfont(&self, path: Option<String>) -> Result<KeysStatus, String> {
+        self.update_config(|c| c.soundfont = path)?;
+        Ok(KeysStatus {
+            engine: "builtin".into(),
+            name: "BUILT-IN".into(),
+            error: None,
+        })
+    }
+
+    /// Pads whose sample failed to load or is not loaded: bank, then top row first, then x.
+    pub fn missing_samples(&self) -> Vec<MissingPad> {
+        let r = lock(&self.router);
+        let km = lock(&self.kit_manager);
+        let mut missing: Vec<MissingPad> = r
+            .set()
+            .banks
+            .iter()
+            .enumerate()
+            .flat_map(|(bank, b)| b.pads.iter().map(move |p| (bank, p)))
+            .filter(|(_, p)| {
+                !p.sample.is_empty()
+                    && (km.failed_samples.iter().any(|(f, _)| *f == p.sample)
+                        || !r.samples().contains_key(&p.sample))
+            })
+            .map(|(bank, p)| MissingPad {
+                bank,
+                x: p.x,
+                y: p.y,
+                sample: p.sample.clone(),
+            })
+            .collect();
+        drop(km);
+        drop(r);
+        missing.sort_by_key(|m| (m.bank, std::cmp::Reverse(m.y), m.x));
+        missing
     }
 
     fn install(

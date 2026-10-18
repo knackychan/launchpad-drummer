@@ -93,14 +93,20 @@ fn test_app_state_integration_and_commands() {
     // Test saving and loading a set dir
     let temp = tempdir().unwrap();
     let set_dir = temp.path().join("test_set");
-    let created_set = state.new_set_dir(set_dir.to_str().unwrap()).unwrap();
-    assert_eq!(created_set.banks.len(), 8);
+    let created_set = state.new_set(set_dir.to_str().unwrap()).unwrap();
+    assert_eq!(created_set.set.banks.len(), 8);
 
     // Modify and save
     state.rename_bank(0, "Acoustic".into());
     state.save_set().unwrap();
 
     // Reload
-    let loaded = state.load_set_dir(set_dir.to_str().unwrap()).unwrap();
-    assert_eq!(loaded.banks[0].name, "Acoustic");
+    let loaded = state.open_set(set_dir.to_str().unwrap()).unwrap();
+    assert_eq!(loaded.set.banks[0].name, "Acoustic");
+    assert_eq!(loaded.name, "test_set");
+    assert!(!loaded.from_backup);
+    assert!(
+        loaded.backup_saved_at.is_some(),
+        "the save rotated a backup"
+    );
 }

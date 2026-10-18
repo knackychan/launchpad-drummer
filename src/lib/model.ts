@@ -63,6 +63,50 @@ export interface SamplePeaks {
   rate: number;
 }
 
+/** What the app opened at launch (`get_startup`). */
+export type Startup =
+  | { kind: 'loaded'; path: string; name: string; fromBackup: boolean; backupSavedAt: string | null }
+  | { kind: 'firstRun' }
+  | { kind: 'notFound'; path: string }
+  | { kind: 'unreadable'; path: string; name: string };
+
+/** A set that was just created or opened (`new_set` / `open_set`). */
+export interface OpenResult {
+  set: SetModel;
+  path: string;
+  name: string;
+  fromBackup: boolean;
+  backupSavedAt: string | null;
+}
+
+export interface AudioPrefs {
+  backend: string;
+  device: string | null;
+  bufferFrames: number | null;
+}
+
+/** Per-machine settings (`get_config`). */
+export interface AppConfig {
+  lastSet: string | null;
+  libraryDir: string | null;
+  soundfont: string | null;
+  audio: AudioPrefs;
+  midiRoles: Record<string, string>;
+}
+
+export interface MissingPad {
+  bank: number;
+  x: number;
+  y: number;
+  sample: string;
+}
+
+export interface KeysStatus {
+  engine: string;
+  name: string;
+  error: string | null;
+}
+
 export function createDefaultPad(x: number, y: number): Pad {
   return {
     x,

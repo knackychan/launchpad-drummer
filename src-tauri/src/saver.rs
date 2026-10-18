@@ -153,6 +153,19 @@ mod tests {
     }
 
     #[test]
+    fn single_touch_saves_once_after_one_second() {
+        let t0 = Instant::now();
+        let mut s = enabled();
+        s.touch(t0);
+        assert!(!s.due(at(t0, 900)));
+        assert!(s.due(at(t0, 1_100)));
+        let (epoch, rev) = (s.epoch(), s.rev());
+        s.finish(epoch, rev, Ok(()), at(t0, 1_100));
+        assert_eq!(s.status().state, SaveState::Saved);
+        assert!(!s.due(at(t0, 1_200)), "one save only");
+    }
+
+    #[test]
     fn debounces_and_saves_only_the_captured_revision() {
         let t0 = Instant::now();
         let mut s = enabled();

@@ -7,9 +7,7 @@ use lpd_core::audio::Command;
 
 fn open_kit(tmp: &std::path::Path) -> Rig {
     let r = rig(1024);
-    r.state
-        .new_set_dir(tmp.join("kit").to_str().unwrap())
-        .unwrap();
+    r.state.new_set(tmp.join("kit").to_str().unwrap()).unwrap();
     r
 }
 
@@ -167,7 +165,7 @@ fn a_result_for_a_replaced_set_is_rejected() {
 
     // The user opens another set while the worker decodes.
     r.state
-        .new_set_dir(tmp.path().join("second").to_str().unwrap())
+        .new_set(tmp.path().join("second").to_str().unwrap())
         .unwrap();
     let error = r
         .state

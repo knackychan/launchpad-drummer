@@ -135,7 +135,7 @@ fn opening_or_creating_a_set_clears_history() {
     let tmp = tempfile::tempdir().unwrap();
     let r = rig(4096);
     r.state
-        .new_set_dir(tmp.path().join("one").to_str().unwrap())
+        .new_set(tmp.path().join("one").to_str().unwrap())
         .unwrap();
     r.state.rename_bank(0, "A".into());
     r.state.rename_bank(0, "B".into());
@@ -144,7 +144,7 @@ fn opening_or_creating_a_set_clears_history() {
     assert!(h.can_undo && h.can_redo);
 
     r.state
-        .new_set_dir(tmp.path().join("two").to_str().unwrap())
+        .new_set(tmp.path().join("two").to_str().unwrap())
         .unwrap();
     let h = r.state.history_state();
     assert!(!h.can_undo && !h.can_redo, "new set: {h:?}");
@@ -153,7 +153,7 @@ fn opening_or_creating_a_set_clears_history() {
     r.state.rename_bank(0, "D".into());
     r.state.undo().unwrap();
     r.state
-        .load_set_dir(tmp.path().join("one").to_str().unwrap())
+        .open_set(tmp.path().join("one").to_str().unwrap())
         .unwrap();
     let h = r.state.history_state();
     assert!(!h.can_undo && !h.can_redo, "opened set: {h:?}");
@@ -164,7 +164,7 @@ fn undo_and_redo_mark_the_set_for_saving() {
     let tmp = tempfile::tempdir().unwrap();
     let r = rig(4096);
     r.state
-        .new_set_dir(tmp.path().join("kit").to_str().unwrap())
+        .new_set(tmp.path().join("kit").to_str().unwrap())
         .unwrap();
     r.state.rename_bank(0, "A".into());
     r.state.save_set().unwrap();

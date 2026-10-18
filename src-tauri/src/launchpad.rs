@@ -179,7 +179,7 @@ fn run(app: AppHandle, state: AppState, game_frames: FrameSender) {
             }
         };
         if let Err(error) = sent {
-            eprintln!("Launchpad LED send failed: {error}");
+            crate::logfile::log(format!("Launchpad LED send failed: {error}"));
             connection = None;
             report_status(&app, &mut status, DeviceStatus::Disconnected);
         }
@@ -213,7 +213,9 @@ fn check_connection(
         }
         Err(error) => {
             if *status != Some(DeviceStatus::Disconnected) {
-                eprintln!("Launchpad bootloader detection failed (CfgMgr32 code {error})");
+                crate::logfile::log(format!(
+                    "Launchpad bootloader detection failed (CfgMgr32 code {error})"
+                ));
             }
         }
         Ok(false) => {}
@@ -224,7 +226,7 @@ fn check_connection(
         Err(error) => {
             drop_device(connection, led, state);
             if *status != Some(DeviceStatus::Disconnected) {
-                eprintln!("Launchpad input scan failed: {error}");
+                crate::logfile::log(format!("Launchpad input scan failed: {error}"));
             }
             report_status(app, status, DeviceStatus::Disconnected);
             return;
@@ -235,7 +237,7 @@ fn check_connection(
         Err(error) => {
             drop_device(connection, led, state);
             if *status != Some(DeviceStatus::Disconnected) {
-                eprintln!("Launchpad output scan failed: {error}");
+                crate::logfile::log(format!("Launchpad output scan failed: {error}"));
             }
             report_status(app, status, DeviceStatus::Disconnected);
             return;
@@ -281,7 +283,7 @@ fn check_connection(
             }
             if let Some(pad) = decode_pad(msg) {
                 if let Err(error) = receiver.emit("launchpad-pad", pad) {
-                    eprintln!("Launchpad pad event failed: {error}");
+                    crate::logfile::log(format!("Launchpad pad event failed: {error}"));
                 }
             }
         },
@@ -290,7 +292,7 @@ fn check_connection(
         Ok(input) => input,
         Err(error) => {
             if *status != Some(DeviceStatus::Busy) {
-                eprintln!("Launchpad input connection failed: {error}");
+                crate::logfile::log(format!("Launchpad input connection failed: {error}"));
             }
             report_status(app, status, DeviceStatus::Busy);
             return;
@@ -300,7 +302,7 @@ fn check_connection(
         Ok(output) => output,
         Err(error) => {
             if *status != Some(DeviceStatus::Busy) {
-                eprintln!("Launchpad output connection failed: {error}");
+                crate::logfile::log(format!("Launchpad output connection failed: {error}"));
             }
             report_status(app, status, DeviceStatus::Busy);
             return;
@@ -315,7 +317,7 @@ fn check_connection(
             InputMode::Sampler => Ok(()),
         });
     if let Err(error) = initialised {
-        eprintln!("Launchpad initialization failed: {error}");
+        crate::logfile::log(format!("Launchpad initialization failed: {error}"));
         drop_device(connection, led, state);
         report_status(app, status, DeviceStatus::Disconnected);
         return;
@@ -330,12 +332,12 @@ fn check_connection(
 
 fn report_status(app: &AppHandle, previous: &mut Option<DeviceStatus>, current: DeviceStatus) {
     if *previous != Some(current) {
-        eprintln!("Launchpad: {}", current.payload().message);
+        crate::logfile::log(format!("Launchpad: {}", current.payload().message));
         *previous = Some(current);
     }
     // Repeat the current state quietly so a UI listener mounted after startup receives it.
     if let Err(error) = app.emit("launchpad-status", current.payload()) {
-        eprintln!("Launchpad status event failed: {error}");
+        crate::logfile::log(format!("Launchpad status event failed: {error}"));
     }
 }
 

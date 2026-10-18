@@ -1,8 +1,15 @@
 use crate::audio::AudioStatus;
+use crate::config::AppConfig;
 use crate::saver::SaveStatus;
-use crate::state::{AppState, HistoryState, InputMode, SamplePeaks};
+use crate::startup::Startup;
+use crate::state::{
+    AppState, HistoryState, InputMode, KeysStatus, MissingPad, OpenResult, SamplePeaks,
+};
 use lpd_core::kit::{Group, LightModes, Pad, Set};
-use tauri::State;
+use std::path::PathBuf;
+use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 
 /// Run slow work (disk, decoding) off the command thread and off the UI.
 async fn worker<T: Send + 'static>(
@@ -46,18 +53,152 @@ pub(crate) fn get_current_set(state: State<'_, AppState>) -> Set {
 }
 
 #[tauri::command]
-pub(crate) async fn load_set_dir(dir: String, state: State<'_, AppState>) -> Result<Set, String> {
-    worker(&state, move |s| s.load_set_dir(&dir)).await
+pub(crate) fn get_startup(state: State<'_, AppState>) -> Startup {
+    state.get_startup()
 }
 
 #[tauri::command]
-pub(crate) async fn new_set_dir(dir: String, state: State<'_, AppState>) -> Result<Set, String> {
-    worker(&state, move |s| s.new_set_dir(&dir)).await
+pub(crate) async fn new_set(dir: String, state: State<'_, AppState>) -> Result<OpenResult, String> {
+    worker(&state, move |s| s.new_set(&dir)).await
 }
 
 #[tauri::command]
-pub(crate) async fn save_set_dir(state: State<'_, AppState>) -> Result<(), String> {
-    worker(&state, |s| s.save_set()).await
+pub(crate) async fn open_set(
+    dir: String,
+    state: State<'_, AppState>,
+) -> Result<OpenResult, String> {
+    worker(&state, move |s| s.open_set(&dir)).await
+}
+
+/// Save immediately through the autosave path.
+#[tauri::command]
+pub(crate) async fn save_now(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let result = worker(&state, |s| s.save_set()).await;
+    if let Some(status) = state.take_save_change() {
+        let _ = app.emit("save-status", status);
+    }
+    result
+}
+
+#[tauri::command]
+pub(crate) fn missing_samples(state: State<'_, AppState>) -> Vec<MissingPad> {
+    state.missing_samples()
+}
+
+#[tauri::command]
+pub(crate) fn get_config(state: State<'_, AppState>) -> AppConfig {
+    state.get_config()
+}
+
+#[tauri::command]
+pub(crate) async fn set_library_dir(
+    dir: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    worker(&state, move |s| s.set_library_dir(dir)).await
+}
+
+#[tauri::command]
+pub(crate) async fn set_soundfont(
+    path: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<KeysStatus, String> {
+    worker(&state, move |s| s.set_soundfont(path)).await
+}
+
+#[tauri::command]
+pub(crate) async fn pick_folder(
+    title: String,
+    default_dir: Option<String>,
+    app: AppHandle,
+) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = app.dialog().file().set_title(title);
+        if let Some(dir) = default_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        picked(dialog.blocking_pick_folder())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+#[tauri::command]
+pub(crate) async fn pick_file(
+    title: String,
+    extensions: Vec<String>,
+    app: AppHandle,
+) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let name = if extensions == ["sf2"] {
+            "SoundFont"
+        } else {
+            "Audio"
+        };
+        let extensions: Vec<&str> = extensions.iter().map(String::as_str).collect();
+        let dialog = app
+            .dialog()
+            .file()
+            .set_title(title)
+            .add_filter(name, &extensions);
+        picked(dialog.blocking_pick_file())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+fn picked(path: Option<tauri_plugin_dialog::FilePath>) -> Option<String> {
+    path?
+        .into_path()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Show a file or folder in Explorer. Relative paths are inside the open set.
+#[tauri::command]
+pub(crate) fn reveal_path(
+    path: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut target = PathBuf::from(&path);
+    if target.is_relative() {
+        let dir = state
+            .kit_manager
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .dir
+            .clone();
+        if let Some(dir) = dir {
+            target = dir.join(target);
+        }
+    }
+    app.opener()
+        .reveal_item_in_dir(&target)
+        .map_err(|e| format!("Couldn't show {}: {e}", target.display()))
+}
+
+#[tauri::command]
+pub(crate) fn open_log_folder(app: AppHandle) -> Result<(), String> {
+    let dir = app.path().app_log_dir().map_err(|e| e.to_string())?;
+    let _ = std::fs::create_dir_all(&dir);
+    app.opener()
+        .open_path(dir.to_string_lossy(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+/// `<Documents>\Launchpad Drummer`, created if missing.
+#[tauri::command]
+pub(crate) fn default_sets_dir(app: AppHandle) -> Result<String, String> {
+    let dir = app
+        .path()
+        .document_dir()
+        .map_err(|e| e.to_string())?
+        .join("Launchpad Drummer");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().into_owned())
 }
 
 #[tauri::command]

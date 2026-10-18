@@ -85,7 +85,7 @@ fn bench_with_playing_pad(dir: &Path) -> (Bench, std::sync::Weak<lpd_core::audio
     let (tx, commands) = rtrb::RingBuffer::new(256);
     let state = AppState::new(lpd_core::kit::Set::new(), tx, events);
     let set_dir = dir.join("kit");
-    state.new_set_dir(set_dir.to_str().unwrap()).unwrap();
+    state.new_set(set_dir.to_str().unwrap()).unwrap();
     let wav = dir.join("long.wav");
     write_wav(&wav, 96_000);
     state
@@ -130,7 +130,7 @@ fn switching_sets_fades_old_sound_and_frees_samples_outside_rendering() {
 
     // Switch sets while the pad is held, then release the original pad.
     let other = tmp.path().join("other");
-    bench.state.new_set_dir(other.to_str().unwrap()).unwrap();
+    bench.state.new_set(other.to_str().unwrap()).unwrap();
     bench.state.release_pad(0, 0);
 
     // Render through the fade and long after. Neither allocation nor sample destruction may
@@ -161,7 +161,7 @@ fn a_sample_still_playing_is_not_freed_early() {
     bench.state.trigger_pad(0, 0);
     bench.render_blocks(1);
     let other = tmp.path().join("other");
-    bench.state.new_set_dir(other.to_str().unwrap()).unwrap();
+    bench.state.new_set(other.to_str().unwrap()).unwrap();
 
     // The stop has not been rendered yet: the voice still owns the sample.
     bench.state.maintain();
@@ -181,7 +181,7 @@ fn old_voice_events_cannot_leave_the_new_pad_sounding() {
     bench.state.trigger_pad(0, 0);
     bench.render_blocks(1); // VoiceStarted is in flight, not yet polled
     let other = tmp.path().join("other");
-    bench.state.new_set_dir(other.to_str().unwrap()).unwrap();
+    bench.state.new_set(other.to_str().unwrap()).unwrap();
     bench.render_blocks(4); // the stop fade ends the voice: VoiceEnded in flight too
     bench.state.maintain();
     assert!(
@@ -197,7 +197,7 @@ fn the_stop_is_queued_before_any_trigger_for_the_new_set() {
     let before = drain(&mut r.commands);
     assert!(!before.is_empty());
     let dir = tmp.path().join("kit");
-    r.state.new_set_dir(dir.to_str().unwrap()).unwrap();
+    r.state.new_set(dir.to_str().unwrap()).unwrap();
     let queued = drain(&mut r.commands);
     assert!(
         matches!(queued.first(), Some(Command::StopAll)),
@@ -212,7 +212,7 @@ fn a_full_command_queue_refuses_the_switch_and_keeps_the_old_set() {
     let mut r = rig(12);
     r.state.rename_bank(0, "Mine".into());
     let dir = tmp.path().join("new");
-    let error = r.state.new_set_dir(dir.to_str().unwrap()).unwrap_err();
+    let error = r.state.new_set(dir.to_str().unwrap()).unwrap_err();
     assert!(error.contains("busy"), "{error}");
     assert_eq!(r.state.get_current_set().banks[0].name, "Mine");
     assert!(
@@ -221,7 +221,7 @@ fn a_full_command_queue_refuses_the_switch_and_keeps_the_old_set() {
     );
 
     drain(&mut r.commands);
-    r.state.new_set_dir(dir.to_str().unwrap()).unwrap();
+    r.state.new_set(dir.to_str().unwrap()).unwrap();
     assert_eq!(r.state.get_current_set().banks[0].name, "Bank 1");
 }
 
@@ -253,7 +253,7 @@ fn creating_a_set_never_touches_an_existing_kit_or_the_active_set() {
         std::fs::write(dir.join(existing), b"precious bytes, maybe not even json").unwrap();
         let before = files(&dir);
 
-        let error = r.state.new_set_dir(dir.to_str().unwrap()).unwrap_err();
+        let error = r.state.new_set(dir.to_str().unwrap()).unwrap_err();
         assert!(error.contains(existing), "{error}");
         assert_eq!(files(&dir), before, "{existing}: folder untouched");
         assert_eq!(r.state.get_current_set().banks[0].name, "Active");
@@ -266,13 +266,13 @@ fn creating_a_set_in_a_valid_kit_folder_keeps_its_backup_chain() {
     let tmp = tempfile::tempdir().unwrap();
     let r = rig(256);
     let dir = tmp.path().join("kit");
-    r.state.new_set_dir(dir.to_str().unwrap()).unwrap();
+    r.state.new_set(dir.to_str().unwrap()).unwrap();
     r.state.rename_bank(0, "v1".into());
     r.state.save_set().unwrap();
     r.state.rename_bank(0, "v2".into());
     r.state.save_set().unwrap();
     let before = files(&dir);
-    assert!(r.state.new_set_dir(dir.to_str().unwrap()).is_err());
+    assert!(r.state.new_set(dir.to_str().unwrap()).is_err());
     assert_eq!(files(&dir), before);
     assert_eq!(r.state.get_current_set().banks[0].name, "v2");
 }
@@ -282,7 +282,7 @@ fn creating_a_set_in_a_fresh_folder_still_works() {
     let tmp = tempfile::tempdir().unwrap();
     let r = rig(256);
     let dir = tmp.path().join("a").join("b");
-    let set = r.state.new_set_dir(dir.to_str().unwrap()).unwrap();
+    let set = r.state.new_set(dir.to_str().unwrap()).unwrap().set;
     assert_eq!(set.banks.len(), 8);
     assert!(dir.join("set.json").exists());
 }

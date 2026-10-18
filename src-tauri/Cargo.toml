@@ -17,6 +17,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 lpd-core = { path = "../crates/lpd-core" }
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 midir = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
