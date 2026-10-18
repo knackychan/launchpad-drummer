@@ -31,7 +31,7 @@
   import type { SaveStatus } from './lib/status.ts';
 
   const tauri = isTauri;
-  const editCommands = new Set(['update_pad', 'assign_sample', 'remove_pad', 'update_group', 'rename_bank', 'update_bank_lights', 'update_bank_humanize']);
+  const editCommands = new Set(['update_pad', 'assign_sample', 'clear_pad', 'move_pad', 'drop_files', 'locate_sample', 'update_group', 'rename_bank', 'update_bank_lights', 'update_bank_humanize']);
   async function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     const result = await call<T>(cmd, args);
     if (editCommands.has(cmd)) refreshHistory();
@@ -299,8 +299,7 @@
     }
   }
   function removePad(x: number, y: number) {
-    bank.pads = bank.pads.filter((p) => !(p.x === x && p.y === y));
-    void invoke('remove_pad', { bank: activeBank, x, y });
+    void invoke<SetModel>('clear_pad', { bank: activeBank, x, y }).then(set => { if (set) currentSet = set; }).catch(e => showToast(errorText(e)));
   }
   function updateGroup(index: number, group: Group) {
     currentSet.mixer.groups[index] = group;

@@ -3,7 +3,7 @@ use crate::config::AppConfig;
 use crate::saver::SaveStatus;
 use crate::startup::Startup;
 use crate::state::{
-    AppState, HistoryState, InputMode, KeysStatus, MissingPad, OpenResult, SamplePeaks,
+    AppState, DropReport, HistoryState, InputMode, KeysStatus, MissingPad, OpenResult, SamplePeaks,
 };
 use lpd_core::kit::{Group, LightModes, Pad, Set};
 use std::path::PathBuf;
@@ -218,8 +218,44 @@ pub(crate) fn update_pad(bank: usize, pad: Pad, key: Option<String>, state: Stat
 }
 
 #[tauri::command]
-pub(crate) fn remove_pad(bank: usize, x: u8, y: u8, state: State<'_, AppState>) {
-    state.remove_pad(bank, x, y);
+pub(crate) fn clear_pad(bank: usize, x: u8, y: u8, state: State<'_, AppState>) -> Set {
+    state.clear_pad(bank, x, y)
+}
+
+#[tauri::command]
+pub(crate) fn move_pad(
+    from_bank: usize,
+    from_x: u8,
+    from_y: u8,
+    to_bank: usize,
+    to_x: u8,
+    to_y: u8,
+    copy: bool,
+    state: State<'_, AppState>,
+) -> Option<Set> {
+    state.move_pad((from_bank, from_x, from_y), (to_bank, to_x, to_y), copy)
+}
+
+#[tauri::command]
+pub(crate) async fn drop_files(
+    bank: usize,
+    x: u8,
+    y: u8,
+    paths: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<DropReport, String> {
+    worker(&state, move |s| s.drop_files(bank, x, y, paths)).await
+}
+
+#[tauri::command]
+pub(crate) async fn locate_sample(
+    bank: usize,
+    x: u8,
+    y: u8,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<Set, String> {
+    worker(&state, move |s| s.locate_sample(bank, x, y, &path)).await
 }
 
 #[tauri::command]

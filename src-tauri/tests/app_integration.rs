@@ -86,7 +86,7 @@ fn test_app_state_integration_and_commands() {
     assert!(matches!(cmd, Command::SetMasterGain(_)));
 
     // Test removing a pad
-    state.remove_pad(3, 2, 2);
+    state.clear_pad(3, 2, 2);
     let current_set = state.get_current_set();
     assert!(current_set.banks[3].pad(2, 2).is_none());
 

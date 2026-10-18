@@ -62,6 +62,15 @@ pub struct MissingPad {
     pub sample: String,
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropReport {
+    pub set: Set,
+    pub imported: usize,
+    pub leftover: usize,
+    pub rejected: usize,
+}
+
 /// Which engine plays the keys instrument.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -390,12 +399,135 @@ impl AppState {
         });
     }
 
-    pub fn remove_pad(&self, bank: usize, x: u8, y: u8) {
+    pub fn clear_pad(&self, bank: usize, x: u8, y: u8) -> Set {
         self.edit(None, |set| {
-            if let Some(b) = set.banks.get_mut(bank) {
-                b.pads.retain(|p| !(p.x == x && p.y == y));
+            kit::ops::clear_pad(set, bank, x, y);
+            set.clone()
+        })
+    }
+
+    pub fn move_pad(&self, from: (usize, u8, u8), to: (usize, u8, u8), copy: bool) -> Option<Set> {
+        self.edit(None, |set| {
+            kit::ops::move_pad(set, from, to, copy).map(|_| set.clone())
+        })
+    }
+
+    /// Decode outside locks, then publish the entire batch as one edit in the original set.
+    pub fn drop_files(
+        &self,
+        bank: usize,
+        x: u8,
+        y: u8,
+        paths: Vec<String>,
+    ) -> Result<DropReport, String> {
+        let (audio, rejected): (Vec<_>, Vec<_>) = paths
+            .into_iter()
+            .partition(|p| kit::ops::is_audio_path(Path::new(p)));
+        let mut rejected = rejected.len();
+        let (tickets, before) = {
+            let r = lock(&self.router);
+            let b = r.set().banks.get(bank).ok_or("That bank does not exist.")?;
+            if x > 7 || y > 7 {
+                return Err("That pad does not exist.".into());
+            }
+            let positions = kit::ops::drop_positions(b, x, y, audio.len());
+            let mut tickets = Vec::new();
+            let mut before = Vec::new();
+            for (x, y) in positions {
+                tickets.push(self.begin_assign(bank, x, y)?);
+                before.push(b.pad(x, y).cloned());
+            }
+            (tickets, before)
+        };
+        let leftover = audio.len() - tickets.len();
+        let mut prepared = Vec::new();
+        for (i, (ticket, path)) in tickets.iter().zip(audio).enumerate() {
+            match prepare_sample(&ticket.dir, &path) {
+                Ok((rel, sample)) => prepared.push((i, rel, sample)),
+                Err(e) => {
+                    rejected += 1;
+                    logfile::log(format!("{path}: {e:#}"));
+                }
+            }
+        }
+        let mut r = lock(&self.router);
+        for (i, _, _) in &prepared {
+            let t = &tickets[*i];
+            self.check_assignment(&r, t)?;
+            if r.set().banks[bank].pad(t.x, t.y) != before[*i].as_ref() {
+                return Err("A target pad changed while the samples were loading.".into());
+            }
+        }
+        let imported = prepared.len();
+        let mut assignments = Vec::new();
+        for (i, rel, sample) in prepared {
+            let t = &tickets[i];
+            self.commit_sample(&mut r, t.epoch, &rel, sample)?;
+            assignments.push((t.x, t.y, rel));
+        }
+        self.edit_in(&mut r, None, Instant::now(), |set| {
+            for (x, y, rel) in assignments {
+                kit::ops::assign_sample(&mut set.banks[bank], x, y, rel);
             }
         });
+        let set = r.set().clone();
+        drop(r);
+        if imported > 0 {
+            self.touch();
+        }
+        Ok(DropReport {
+            set,
+            imported,
+            leftover,
+            rejected,
+        })
+    }
+
+    fn check_assignment(&self, _r: &Router, ticket: &AssignTicket) -> Result<(), String> {
+        if lock(&self.saver).epoch() != ticket.epoch {
+            return Err(STALE_SET.into());
+        }
+        if lock(&self.assigns)
+            .latest
+            .get(&(ticket.bank, ticket.x, ticket.y))
+            != Some(&ticket.seq)
+        {
+            return Err("A newer sample was assigned to this pad meanwhile.".into());
+        }
+        Ok(())
+    }
+
+    pub fn locate_sample(&self, bank: usize, x: u8, y: u8, path: &str) -> Result<Set, String> {
+        let (ticket, before) = {
+            let r = lock(&self.router);
+            let before = r
+                .set()
+                .banks
+                .get(bank)
+                .and_then(|b| b.pad(x, y))
+                .cloned()
+                .ok_or("Pad is empty")?;
+            (self.begin_assign(bank, x, y)?, before)
+        };
+        let (rel, sample) = prepare_sample(&ticket.dir, path).map_err(|e| format!("{e:#}"))?;
+        let mut r = lock(&self.router);
+        self.check_assignment(&r, &ticket)?;
+        if r.set().banks[bank].pad(x, y) != Some(&before) {
+            return Err("The pad changed while the sample was loading.".into());
+        }
+        self.commit_sample(&mut r, ticket.epoch, &rel, sample)?;
+        self.edit_in(&mut r, None, Instant::now(), |set| {
+            let mut pad = before.clone();
+            pad.sample = rel;
+            set.banks[bank].set_pad(pad);
+        });
+        lock(&self.kit_manager)
+            .failed_samples
+            .retain(|(p, _)| p != &before.sample);
+        let set = r.set().clone();
+        drop(r);
+        self.touch();
+        Ok(set)
     }
 
     /// A rename is an undoable kit edit; value changes (volume, pan, ...) are not (UI spec 7.3).

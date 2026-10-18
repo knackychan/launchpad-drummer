@@ -374,7 +374,7 @@ Confirmations: `confirm(text, level = 'ok')` in `App.svelte` pushes `{ id: crypt
 **Do not:** redesign the top strip; bring back a SAVE key; open the drawer on a pad press; use `window.confirm/alert/prompt` anywhere.
 
 **Done when:**
-- [ ] Tests first → PASS.
+- [x] Tests first → PASS.
 - [x] Preview at 1280×720: Play renders; the notice LCD shows the idle preview text; undo/redo unlit; the set menu opens and closes with Esc; keyboard keys light pads; no console errors.
 - [x] Full verification + `npm run build`; commit `feat(ui): notices, set menu, power-on, undo keys and keyboard map`.
 
@@ -384,7 +384,7 @@ Task 3 verification (2026-10-19): helper tests failed for absent modules, then 4
 
 ## Phase B — Editing
 
-### Task 4: Kit operations backend (drops, move / swap / copy, clear, locate)
+### Task 4: Kit operations backend (drops, move / swap / copy, clear, locate) — DONE
 
 **Purpose.** The UI spec 5 rules, implemented once in Rust so every drop is one undo step.
 
@@ -441,7 +441,9 @@ pub struct DropReport { pub set: Set, pub imported: usize, pub leftover: usize, 
 
 **Do not:** build the drag UI here; handle learn bindings (Task 12 extends these ops); delete files on undo.
 
-**Done when:** [ ] tests first → PASS; [ ] commands registered, `remove_pad` gone; [ ] full verification; commit `feat(core): pad drop, move, swap, copy and clear operations`.
+**Done when:** [x] tests first → PASS; [x] commands registered, `remove_pad` gone; [x] full verification; commit `feat(core): pad drop, move, swap, copy and clear operations`.
+
+Task 4 verification (2026-10-19): 3 core operations tests and 2 state tests RED→GREEN; fmt clean, workspace tests passed, npm 36 passed, Svelte 0 errors/warnings, build passed. D11: imports use prepare_sample and edit_in with request/epoch checks; changed targets reject a stale batch. Moving preserves mix routing (the initial test expected the destination row incorrectly and was corrected).
 
 ### Task 5: Sample browser and audition
 

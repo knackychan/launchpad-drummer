@@ -102,6 +102,8 @@ export interface MissingPad {
   sample: string;
 }
 
+export interface DropReport { set: SetModel; imported: number; leftover: number; rejected: number }
+
 export interface KeysStatus {
   engine: string;
   name: string;

@@ -3,6 +3,7 @@
 mod decode;
 mod history;
 mod model;
+pub mod ops;
 mod params;
 mod store;
 
