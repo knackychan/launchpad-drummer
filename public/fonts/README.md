@@ -1,9 +1,10 @@
-The sandbox could not download the required OFL font assets. The CSS already references these local files; until they are supplied, it uses Bahnschrift / Segoe UI and Consolas fallbacks. Do not treat the browser screenshots as typography approval.
+# Bundled fonts
 
-Before the visual acceptance pass, bundle:
+Served locally; the app makes no runtime font requests.
 
-- `antonio-latin-wght-normal.woff2`: Antonio variable, normal, weights 100–700.
-- `share-tech-mono-latin-400-normal.woff2`: Share Tech Mono, normal, weight 400.
-- Each family's OFL license and copyright notice.
+| File | Family | Source | Licence |
+|---|---|---|---|
+| `antonio-latin-wght-normal.woff2` | Antonio variable, normal, weights 100–700 | `@fontsource-variable/antonio` 5.3.0 | `OFL-Antonio.txt` (SIL OFL 1.1) |
+| `share-tech-mono-latin-400-normal.woff2` | Share Tech Mono, normal, 400 | `@fontsource/share-tech-mono` 5.3.0 | `OFL-ShareTechMono.txt` (SIL OFL 1.1) |
 
-Sources: [Antonio](https://fontsource.org/fonts/antonio) and [Share Tech Mono](https://fontsource.org/fonts/share-tech-mono). Copy the binary files into this folder, without adding runtime network requests. Their font names, weights and filenames must match `src/styles/tokens.css`.
+Font names, weights and filenames must match `src/styles/tokens.css`.
