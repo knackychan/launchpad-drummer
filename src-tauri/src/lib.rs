@@ -2,6 +2,7 @@ pub mod audio;
 mod launchpad;
 pub mod lights;
 pub mod router;
+pub mod store;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
