@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "Launchpad Drummer console"
 edition = "2021"
 
+[features]
+asio = ["cpal/asio"]
+
 [lib]
 name = "launchpad_drummer_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -16,3 +19,7 @@ lpd-core = { path = "../crates/lpd-core" }
 tauri = { version = "2", features = [] }
 midir = "0.10"
 serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+cpal = { workspace = true }
+rtrb = { workspace = true }
+anyhow = { workspace = true }
