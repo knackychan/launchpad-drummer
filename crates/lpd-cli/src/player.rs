@@ -35,6 +35,7 @@ impl Player {
         }
     }
 
+    #[allow(dead_code)]
     pub fn bank(&self) -> usize {
         self.bank
     }
