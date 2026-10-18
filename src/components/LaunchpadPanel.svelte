@@ -9,9 +9,15 @@
 
   let {
     renaming = $bindable<number | null>(null),
+    ondragpad, dropTarget = null, dropTag = '', invalidDrop = false, hoverBank = null,
     leds, names, selected, banks, activeBank, oninput, onbank, onrename, onlight, onhumanize, onstop,
   }: {
     renaming?: number | null;
+    ondragpad?: (note: number, event: PointerEvent) => void;
+    dropTarget?: { x: number; y: number } | null;
+    dropTag?: string;
+    invalidDrop?: boolean;
+    hoverBank?: number | null;
     leds: readonly Rgb[];
     names: readonly string[];
     selected: number | null;
@@ -32,6 +38,11 @@
     ['ripple', 'RIPPLE', 'Expanding rings from the hit pad'],
   ];
   const bank = $derived(banks[activeBank]);
+  let root: HTMLDivElement;
+  let grid: PadGrid;
+  export function rects() { return grid?.rects() ?? []; }
+  export function consume(note: number) { grid?.consume(note); }
+  export function bankRects() { return [...root.querySelectorAll<HTMLElement>('[data-bank]')].map(el => ({ bank: Number(el.dataset.bank), rect: el.getBoundingClientRect() })); }
 
   function finishRename(index: number, input: HTMLInputElement, commit: boolean) {
     if (renaming !== index) return;
@@ -42,7 +53,7 @@
   function focusSelect(node: HTMLInputElement) { node.focus(); node.select(); }
 </script>
 
-<div class="lp plate" data-label="GRID · LAUNCHPAD MK2">
+<div bind:this={root} class="lp plate" data-label="GRID · LAUNCHPAD MK2">
   <div class="toprow">
     {#each TOP as glyph}
       <span class="key round dim" aria-hidden="true" title="Not used in Part 1">{glyph}</span>
@@ -51,11 +62,11 @@
   </div>
   <div></div><div></div>
 
-  <PadGrid {leds} {names} {selected} {oninput} />
+  <PadGrid bind:this={grid} {leds} {names} {selected} {oninput} {ondragpad} {dropTarget} tag={dropTag} invalid={invalidDrop} />
 
   <div class="side" role="group" aria-label="Banks">
     {#each banks as b, i}
-      <button type="button" class="key round" class:on={i === activeBank} aria-pressed={i === activeBank} aria-label="Bank {i + 1} {b.name}" onclick={() => onbank(i)}></button>
+      <button type="button" class="key round" data-bank={i} class:on={i === activeBank} class:drop={hoverBank === i} aria-pressed={i === activeBank} aria-label="Bank {i + 1} {b.name}" onclick={() => onbank(i)}></button>
     {/each}
   </div>
   <div class="scribs">
@@ -75,6 +86,8 @@
         <button
           type="button"
           class="scrib screen"
+          data-bank={i}
+          class:drop={hoverBank === i}
           class:active={i === activeBank}
           class:emptybank={!b.pads.length}
           title="{b.name} — double-click to rename (F2)"

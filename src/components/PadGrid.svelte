@@ -3,7 +3,11 @@
   import { ledToCss, padNote } from '../lib/led.ts';
   import type { PadInput, Rgb } from '../lib/led.ts';
 
-  let { leds, names = [], selected = null, oninput }: {
+  let { leds, names = [], selected = null, oninput, ondragpad, dropTarget = null, tag = '', invalid = false }: {
+    ondragpad?: (note: number, event: PointerEvent) => void;
+    dropTarget?: { x: number; y: number } | null;
+    tag?: string;
+    invalid?: boolean;
     leds: readonly Rgb[];
     /** Pad labels in frame order (top-left first); empty string = empty pad. */
     names?: readonly string[];
@@ -13,6 +17,8 @@
   let buttons: HTMLButtonElement[] = [];
   let focusIndex = $state(56);
   const held = new Set<number>();
+  export function rects() { return buttons.filter(Boolean).map(button => { const note = Number(button.dataset.note); return { x: note % 10 - 1, y: Math.floor(note / 10) - 1, rect: button.getBoundingClientRect() }; }); }
+  export function consume(note: number) { release(note); }
 
   function press(note: number) {
     if (held.has(note)) return;
@@ -41,6 +47,8 @@
       class:lit={rgb.some(v => v > 0)}
       class:empty={!names[index]}
       class:selected={selected === note}
+      class:drop={dropTarget?.x === col - 1 && dropTarget?.y === row - 1 && !invalid}
+      class:nodrop={dropTarget?.x === col - 1 && dropTarget?.y === row - 1 && invalid}
       style:--led={ledToCss(rgb)}
       data-note={note}
       aria-label="Row {row}, column {col}, {names[index] || 'empty'}"
@@ -52,6 +60,7 @@
         if (event.button !== 0) return;
         event.currentTarget.setPointerCapture(event.pointerId);
         press(note);
+        ondragpad?.(note, event);
       }}
       onpointerup={() => release(note)}
       onpointercancel={() => release(note)}
@@ -63,6 +72,8 @@
         if (event.key === 'Enter') { event.preventDefault(); release(note); }
       }}
       onblur={() => release(note)}
-    ><span class="glyph"></span>{#if names[index]}<span class="nm">{names[index]}</span>{/if}</button>
+    ><span class="glyph"></span>{#if names[index]}<span class="nm">{names[index]}</span>{/if}
+      {#if dropTarget?.x === col - 1 && dropTarget?.y === row - 1 && !invalid}<span class="tag">{tag}</span>{/if}
+    </button>
   {/each}
 </div>

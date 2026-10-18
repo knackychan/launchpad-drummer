@@ -15,6 +15,8 @@
   import SetMenu from './components/SetMenu.svelte';
   import PowerOn from './components/PowerOn.svelte';
   import SampleBrowser from './components/SampleBrowser.svelte';
+  import DragGhost from './components/DragGhost.svelte';
+  import { BANK_HOVER_MS, dropTag, hitTest, isAudioName, passedThreshold, physicalToCss, type DropTarget } from './lib/dnd.ts';
   import { invoke as call, listen, isTauri } from './lib/api.ts';
   import { activeNotices, type Confirmation, type Level, type Notice, type NoticeInputs } from './lib/notices.ts';
   import { middleTruncate } from './lib/format.ts';
@@ -78,6 +80,90 @@
   let bayW = $state(0);
   let bayH = $state(0);
   let peaks = $state<SamplePeaks | null>(null);
+  let launchpadPanel = $state<LaunchpadPanel>();
+  let padEditor = $state<PadEditor>();
+  type Drag = { source: 'pad' | 'files'; fromBank: number; fromX: number; fromY: number; paths: string[];
+    label: string; color: string; startX: number; startY: number; x: number; y: number; ctrl: boolean; active: boolean; external: boolean };
+  let drag = $state<Drag | null>(null);
+  let dropTarget = $state<DropTarget>(null);
+  let hoverBank = $state<number | null>(null);
+  let bankTimer = 0;
+  let suppressClick = false;
+  let padRects: ReturnType<LaunchpadPanel['rects']> = [];
+  let bankRects: ReturnType<LaunchpadPanel['bankRects']> = [];
+  const invalidDrop = $derived(drag?.source === 'files' && !drag.paths.some(isAudioName));
+  $effect(() => { if (drag?.active) return pushEsc(cancelDrag); });
+  $effect(() => {
+    if (!drag?.active || !invalidDrop) return;
+    const previous = document.body.style.cursor; document.body.style.cursor = 'not-allowed';
+    return () => { document.body.style.cursor = previous; };
+  });
+  function measureDropTargets() { padRects = launchpadPanel?.rects() ?? []; bankRects = launchpadPanel?.bankRects() ?? []; }
+  function cancelDrag() { clearTimeout(bankTimer); drag = null; dropTarget = null; hoverBank = null; }
+  function beginPadDrag(note: number, e: PointerEvent) {
+    const x = note % 10 - 1, y = Math.floor(note / 10) - 1;
+    const pad = bank.pads.find(p => p.x === x && p.y === y);
+    if (!pad?.sample) return;
+    measureDropTargets();
+    drag = { source: 'pad', fromBank: activeBank, fromX: x, fromY: y, paths: [], label: padLabel(pad.sample), color: ledToCss(pad.color), startX: e.clientX, startY: e.clientY, x: e.clientX, y: e.clientY, ctrl: e.ctrlKey, active: false, external: false };
+  }
+  function beginFileDrag(path: string, e: PointerEvent) {
+    measureDropTargets();
+    drag = { source: 'files', fromBank: activeBank, fromX: 0, fromY: 0, paths: [path], label: path.split(/[\\/]/).at(-1) ?? path, color: 'var(--orange)', startX: e.clientX, startY: e.clientY, x: e.clientX, y: e.clientY, ctrl: e.ctrlKey, active: false, external: false };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  }
+  function updateDrag(x: number, y: number, ctrl: boolean) {
+    if (!drag) return;
+    drag.x = x; drag.y = y; drag.ctrl = ctrl;
+    if (!drag.active) {
+      if (!passedThreshold(x - drag.startX, y - drag.startY)) return;
+      drag.active = true;
+      if (drag.source === 'pad') launchpadPanel?.consume((drag.fromY + 1) * 10 + drag.fromX + 1);
+    }
+    dropTarget = hitTest(x, y, padRects, bankRects, drawer === 'editor' && selXY && padEditor ? padEditor.rect() : null);
+    const nextBank = dropTarget?.kind === 'bank' ? dropTarget.bank : null;
+    if (nextBank !== hoverBank) {
+      clearTimeout(bankTimer); hoverBank = nextBank;
+      if (nextBank !== null && nextBank !== activeBank) bankTimer = window.setTimeout(() => {
+        if (!drag?.active || hoverBank !== nextBank) return;
+        chooseBank(nextBank); measureDropTargets();
+      }, BANK_HOVER_MS);
+    }
+  }
+  async function finishDrop() {
+    if (!drag) return;
+    const source = drag, target = dropTarget, xy = dropXY;
+    if (!source.active) { cancelDrag(); return; }
+    if (!source.external) { suppressClick = true; window.setTimeout(() => { suppressClick = false; }, 0); }
+    const invalid = invalidDrop;
+    cancelDrag();
+    if (invalid) { showToast('Not an audio file'); return; }
+    if (!xy || !target) return;
+    if (source.source === 'pad' && source.fromBank === activeBank && source.fromX === xy.x && source.fromY === xy.y) return;
+    const toBank = activeBank;
+    try {
+      if (source.source === 'pad') {
+        const set = await invoke<SetModel | null>('move_pad', { fromBank: source.fromBank, fromX: source.fromX, fromY: source.fromY, toBank, toX: xy.x, toY: xy.y, copy: source.ctrl });
+        if (set) { currentSet = set; selected = (xy.y + 1) * 10 + xy.x + 1; }
+      } else {
+        const report = await invoke<DropReport>('drop_files', { bank: toBank, x: xy.x, y: xy.y, paths: source.paths });
+        if (report) {
+          currentSet = report.set;
+          if (report.imported) confirm(`Imported ${report.imported}`);
+          if (report.leftover) showToast(`${report.leftover} file${report.leftover === 1 ? '' : 's'} not imported — bank full`);
+          if (report.rejected && !report.imported) showToast('Not an audio file');
+        }
+      }
+      refreshHistory(); await refreshMissing();
+    } catch (e) { showToast(errorText(e)); }
+  }
+  function externalEnter(paths: string[], position: { x: number; y: number }) {
+    if (mode !== 'play') return;
+    const point = physicalToCss(position, devicePixelRatio);
+    measureDropTargets();
+    drag = { source: 'files', fromBank: activeBank, fromX: 0, fromY: 0, paths, label: paths.length > 1 ? `${paths.length} files` : paths[0]?.split(/[\\/]/).at(-1) ?? '', color: 'var(--orange)', startX: point.x, startY: point.y, x: point.x, y: point.y, ctrl: false, active: true, external: true };
+    updateDrag(point.x, point.y, false);
+  }
 
   const layout = $derived(solvePlayLayout({
     width: bayW, height: bayH, drawerOpen: drawer !== null, drawerPinned, teleFolded, lanes: 4,
@@ -86,6 +172,8 @@
   const bank = $derived(currentSet.banks[activeBank]);
   const selXY = $derived(selected === null ? null : { x: (selected % 10) - 1, y: Math.floor(selected / 10) - 1 });
   const selectedPad = $derived(selXY ? bank?.pads.find((p) => p.x === selXY.x && p.y === selXY.y) ?? null : null);
+  const dropXY = $derived(dropTarget?.kind === 'pad' ? dropTarget : dropTarget?.kind === 'editor' && drag?.source === 'files' ? selXY : null);
+  const dragTag = $derived(drag && dropXY ? dropTag(drag.source, !!bank.pads.find(p => p.x === dropXY.x && p.y === dropXY.y), drag.ctrl, drag.paths.length) : '');
 
   // Frame order: index (7 - y) * 8 + x, top-left first.
   const padNames = $derived.by(() => {
@@ -176,6 +264,8 @@
     const stopActivity = runActivity();
     const onFullscreen = () => { if (!document.fullscreenElement) gameFull = false; };
     document.addEventListener('fullscreenchange', onFullscreen);
+    const swallowDragClick = (e: MouseEvent) => { if (suppressClick) { e.preventDefault(); e.stopImmediatePropagation(); suppressClick = false; } };
+    window.addEventListener('click', swallowDragClick, true);
 
     const unlisten: (() => void)[] = [];
     let disposed = false;
@@ -198,11 +288,17 @@
       });
       subscribe<SaveStatus>('save-status', (event) => { saveStatus = event; });
       subscribe<AudioStatus>('audio-status', (event) => { audioStatus = event; });
+      subscribe<{ paths: string[]; position: { x: number; y: number } }>('tauri://drag-enter', e => externalEnter(e.paths, e.position));
+      subscribe<{ position: { x: number; y: number } }>('tauri://drag-over', e => { if (drag?.external) { const p = physicalToCss(e.position, devicePixelRatio); updateDrag(p.x, p.y, false); } });
+      subscribe<{ paths: string[]; position: { x: number; y: number } }>('tauri://drag-drop', e => { externalEnter(e.paths, e.position); void finishDrop(); });
+      subscribe<unknown>('tauri://drag-leave', cancelDrag);
     }
     return () => {
       disposed = true;
       clearTimeout(historyTimer);
       confirmationTimers.forEach(clearTimeout);
+      cancelDrag();
+      window.removeEventListener('click', swallowDragClick, true);
       stopActivity();
       document.removeEventListener('fullscreenchange', onFullscreen);
       unlisten.forEach((fn) => fn());
@@ -352,6 +448,7 @@
 
   /** Games own the Launchpad pads and LEDs; every other screen leaves them to the sampler. */
   function setMode(next: typeof mode) {
+    cancelDrag();
     releaseKeyboard();
     const was = mode;
     mode = next;
@@ -427,7 +524,11 @@
   }
 </script>
 
-<svelte:window onkeydown={keydown} onkeyup={keyup} onblur={releaseKeyboard} />
+<svelte:window onkeydown={keydown} onkeyup={keyup} onblur={() => { releaseKeyboard(); cancelDrag(); }}
+  onpointermove={e => { if (drag && !drag.external) updateDrag(e.clientX, e.clientY, e.ctrlKey); }}
+  onpointerup={() => { if (drag && !drag.external) void finishDrop(); }} onpointercancel={cancelDrag} />
+
+{#if drag?.active}<DragGhost x={drag.x} y={drag.y} color={drag.color} label={drag.label} />{/if}
 
 <div class="instrument" data-crt={crt} style:--crt={CRT_FACTORS[crt]}>
   <div class="console" class:game-full={gameFull}>
@@ -470,6 +571,9 @@
               <div class="stack">
                 <div class="pair">
                   <LaunchpadPanel
+                    bind:this={launchpadPanel}
+                    ondragpad={beginPadDrag} dropTarget={dropXY}
+                    dropTag={dragTag} {invalidDrop} hoverBank={hoverBank === activeBank ? null : hoverBank}
                     bind:renaming
                     leds={displayLeds}
                     names={padNames}
@@ -503,10 +607,11 @@
 
           {#if drawer === 'browser'}
             <div class="drawer"><SampleBrowser bind:libraryDir selected={selXY ? { bank: activeBank, ...selXY } : null}
-              onclose={() => drawer = null} onload={path => void loadBrowserFile(path)} ondragfile={() => {}} onerror={showToast} /></div>
+              onclose={() => drawer = null} onload={path => void loadBrowserFile(path)} ondragfile={beginFileDrag} onerror={showToast} /></div>
           {:else if drawer === 'editor' && selXY}
             <div class="drawer">
               <PadEditor
+                bind:this={padEditor} drop={dropTarget?.kind === 'editor' && drag?.source === 'files' && !invalidDrop}
                 x={selXY.x}
                 y={selXY.y}
                 pad={selectedPad}

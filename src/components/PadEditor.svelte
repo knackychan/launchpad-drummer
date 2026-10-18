@@ -6,7 +6,8 @@
   import { ledToCss } from '../lib/led.ts';
   import { DB_FLOOR, fmtDb, fmtSemis } from '../lib/mix.ts';
 
-  let { x, y, pad, groups, peaks, onupdate, onassign, onremove, ontrigger, onrelease }: {
+  let { x, y, pad, groups, peaks, onupdate, onassign, onremove, ontrigger, onrelease, drop = false }: {
+    drop?: boolean;
     x: number;
     y: number;
     /** null = empty pad */
@@ -25,6 +26,8 @@
   let showRgb = $state(false);
   let canvas = $state<HTMLCanvasElement>();
   let pathDraft = $state('');
+  let root: HTMLDivElement;
+  export function rect() { return root.getBoundingClientRect(); }
 
   function update<K extends keyof Pad>(key: K, value: Pad[K]) {
     if (pad) onupdate({ ...pad, [key]: value }, key);
@@ -98,7 +101,7 @@
   }
 </script>
 
-<div class="editor screen" aria-label="Pad editor">
+<div bind:this={root} class="editor screen" class:drop aria-label="Pad editor">
   <div class="ed-head">
     <span class="lcd lcd-dim">R{y + 1}·C{x + 1}</span>
     <span class="lcd ed-name">{pad?.sample ? padLabel(pad.sample).toUpperCase() : 'EMPTY'}</span>

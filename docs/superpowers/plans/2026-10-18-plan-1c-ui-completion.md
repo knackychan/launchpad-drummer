@@ -503,7 +503,7 @@ export function keyNav(rows: TreeNode[], index: number, key: string): { index: n
 
 Task 5 verification (2026-10-19): listed engine/no-allocation/tree tests RED→GREEN; directory filter/sort test also RED→GREEN. fmt/workspace tests passed; npm 38 passed; Svelte 0 errors/warnings; build passed. Edge 1280×720: browser folder navigation, Space audition marker, Enter with no selection error, Esc close, Ctrl+B reopen; no runtime errors/overflow. Callback uses two audition voices and a 3 ms attack to satisfy the click threshold. D11 retirement also retains older queued auditions beyond the two latest references. No pad is preselected at startup so loading requires the player’s choice.
 
-### Task 6: Drag and drop
+### Task 6: Drag and drop — DONE
 
 **Purpose.** UI spec 5 in the UI: pad drags, browser file drags, Explorer file drops.
 
@@ -555,7 +555,9 @@ export function passedThreshold(dx: number, dy: number): boolean; // Math.hypot(
 
 **Do not:** use HTML5 `draggable`; add drag-to-delete; open the drawer on drop; call `trigger_pad` during a drag.
 
-**Done when:** [ ] tests first → PASS; [ ] preview: dragging a pad shows the ghost and the MOVE/SWAP/COPY tags, Esc cancels, bank hover switches banks after 400 ms; [ ] full verification + build; commit `feat(ui): drag and drop for pads, browser files and Explorer files`.
+**Done when:** [x] tests first → PASS; [x] preview: dragging a pad shows the ghost and the MOVE/SWAP/COPY tags, Esc cancels, bank hover switches banks after 400 ms; [x] full verification + build; commit `feat(ui): drag and drop for pads, browser files and Explorer files`.
+
+Task 6 verification (2026-10-19): `dnd.test.ts` (hitTest order and half-open edges, every dropTag row incl. `IMPORT ×3`, physicalToCss, isAudioName, passedThreshold) written first. fmt clean; cargo test --workspace all passed; npm test 41 passed; npm run check 0 errors/0 warnings; npm run build passed. Browser preview (synthetic pointer events): pad drag shows the ghost with the pad label and the MOVE tag on an empty pad, SWAP on a filled one, COPY when Ctrl is held mid-drag; Esc removes ghost and tags; hovering a scribble strip shows `.scrib.drop` and switches bank after 400 ms. Not verified here: real Explorer drops (Tauri drag events), browser-file drags with a real library, editor drop in the desktop app. Small additions: dropping a pad on itself is a no-op; the editor drop also tags the selected pad; the bank hover outline clears once that bank is active.
 
 ### Task 7: Pad editor completion, pad context menu, grid keyboard and labels
 
