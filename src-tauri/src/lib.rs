@@ -11,7 +11,6 @@ pub mod state;
 pub mod store;
 
 use lpd_core::kit::Set;
-use saver::SaveState;
 use state::AppState;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,13 +21,8 @@ fn housekeeping(app: AppHandle, state: AppState, health: Arc<audio::StreamHealth
     loop {
         std::thread::sleep(Duration::from_millis(100));
         state.autosave_tick(Instant::now());
+        // Save failures are logged by the save itself.
         if let Some(status) = state.take_save_change() {
-            if status.state == SaveState::Failed {
-                logfile::log(format!(
-                    "Save failed: {}",
-                    status.reason.as_deref().unwrap_or("unknown reason")
-                ));
-            }
             let _ = app.emit("save-status", status);
         }
         if let Some(status) = audio::poll_stream_health(&health, &state) {

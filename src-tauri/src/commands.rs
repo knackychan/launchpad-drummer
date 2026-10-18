@@ -85,9 +85,10 @@ pub(crate) fn missing_samples(state: State<'_, AppState>) -> Vec<MissingPad> {
     state.missing_samples()
 }
 
+/// Async: the config lock can be held across a config write.
 #[tauri::command]
-pub(crate) fn get_config(state: State<'_, AppState>) -> AppConfig {
-    state.get_config()
+pub(crate) async fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
+    worker(&state, |s| Ok(s.get_config())).await
 }
 
 #[tauri::command]
@@ -191,14 +192,18 @@ pub(crate) fn open_log_folder(app: AppHandle) -> Result<(), String> {
 
 /// `<Documents>\Launchpad Drummer`, created if missing.
 #[tauri::command]
-pub(crate) fn default_sets_dir(app: AppHandle) -> Result<String, String> {
+pub(crate) async fn default_sets_dir(app: AppHandle) -> Result<String, String> {
     let dir = app
         .path()
         .document_dir()
         .map_err(|e| e.to_string())?
         .join("Launchpad Drummer");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.to_string_lossy().into_owned())
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        Ok(dir.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

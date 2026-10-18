@@ -271,3 +271,84 @@ fn opening_a_kit_loads_its_samples_and_reports_missing_ones() {
     assert_eq!(km.failed_samples.len(), 1);
     assert_eq!(km.failed_samples[0].0, "samples/gone.wav");
 }
+
+// ---- Task 2 review fix-ups ---------------------------------------------------------------
+
+/// A set whose set.json is broken and whose backup is good.
+fn set_with_broken_main(dir: &Path) {
+    let mut set = Set::new();
+    set.banks[0].name = "From backup".into();
+    lpd_core::kit::save(dir, &set).unwrap();
+    lpd_core::kit::save(dir, &set).unwrap(); // the first copy becomes set.json.bak
+    std::fs::write(dir.join(lpd_core::kit::SET_FILE), "{ broken").unwrap();
+}
+
+#[test]
+fn a_set_opened_from_its_backup_is_written_back_by_autosave() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("kit");
+    set_with_broken_main(&dir);
+    let r = rig(4096);
+    let opened = r.state.open_set(dir.to_str().unwrap()).unwrap();
+    assert!(opened.from_backup);
+    assert!(!dir.join(lpd_core::kit::SET_FILE).exists(), "moved aside");
+
+    r.state
+        .autosave_tick(Instant::now() + launchpad_drummer_lib::saver::SAVE_DELAY * 2);
+    let reloaded = lpd_core::kit::load(&dir).unwrap();
+    assert!(!reloaded.from_backup, "set.json is back");
+    assert_eq!(reloaded.set.banks[0].name, "From backup");
+}
+
+#[test]
+fn opening_a_folder_without_a_set_says_so() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("Empty Folder");
+    std::fs::create_dir_all(&dir).unwrap();
+    let r = rig(4096);
+    let error = r.state.open_set(dir.to_str().unwrap()).unwrap_err();
+    assert_eq!(
+        error,
+        "Empty Folder has no set.json — pick a set folder, or use New set"
+    );
+}
+
+#[test]
+fn a_failed_move_aside_is_reported_with_its_cause() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("kit");
+    set_with_broken_main(&dir);
+    // A non-empty folder named set.json.broken: set.json cannot be moved aside.
+    let blocker = dir.join(lpd_core::kit::BROKEN_FILE);
+    std::fs::create_dir_all(&blocker).unwrap();
+    std::fs::write(blocker.join("keep"), b"x").unwrap();
+    let r = rig(4096);
+    r.state.rename_bank(0, "Mine".into());
+    let error = r.state.open_set(dir.to_str().unwrap()).unwrap_err();
+    assert!(error.contains("move broken set.json aside"), "{error}");
+    assert!(!error.contains("unreadable"), "{error}");
+    assert_eq!(r.state.get_current_set().banks[0].name, "Mine");
+}
+
+#[test]
+fn a_failed_manual_save_is_logged() {
+    let logs = tempfile::tempdir().unwrap();
+    launchpad_drummer_lib::logfile::init(logs.path().to_path_buf());
+    let (state, _log, _tmp) = state_with_writer(|_, _| anyhow::bail!("disk on fire"));
+    state.rename_bank(0, "x".into());
+    assert!(state.save_set().is_err());
+    let text = std::fs::read_to_string(logs.path().join("lpd.log")).unwrap();
+    assert!(text.contains("disk on fire"), "{text}");
+}
+
+#[test]
+fn a_config_that_cannot_be_written_is_not_changed() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A folder where the file should be: every write fails.
+    let path = tmp.path().join("config.json");
+    std::fs::create_dir_all(path.join("blocker")).unwrap();
+    let r = rig(4096);
+    r.state.restore(path);
+    assert!(r.state.set_library_dir(Some("D:/Lib".into())).is_err());
+    assert_eq!(r.state.get_config().library_dir, None);
+}

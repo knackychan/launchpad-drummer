@@ -4,15 +4,16 @@
 //! `router` → `history` → `kit_manager` → `saver`. `painter`, `save_gate` and `assigns` are
 //! separate: `painter` and `assigns` are leaves (nothing is taken while holding them) and
 //! `save_gate` is taken first, only to order disk writes. No lock is held across disk I/O,
-//! sample decoding or MIDI output. `startup` and `config` are leaves too; the one exception
-//! to "no lock across disk I/O" is `config`, held while its own small file is written.
+//! sample decoding or MIDI output. `config` → `startup` are leaves too (taken after nothing
+//! else); the one exception to "no lock across disk I/O" is `config`, held while its own small
+//! file is written.
 
 use crate::audio::AudioStatus;
 use crate::config::{self, AppConfig};
 use crate::lights::LightPainter;
 use crate::logfile;
 use crate::router::Router;
-use crate::saver::{SaveStatus, Saver};
+use crate::saver::{SaveState, SaveStatus, Saver};
 use crate::startup::{self, Startup};
 use crate::store::{prepare_sample, KitManager, LoadedKit};
 use lpd_core::audio::{Command, Event, Sample};
@@ -109,6 +110,32 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Apply `f` to a copy, write the copy, and keep it only when the write succeeded.
+fn write_config(c: &mut ConfigFile, f: impl FnOnce(&mut AppConfig)) -> Result<(), String> {
+    let mut next = c.config.clone();
+    f(&mut next);
+    if let Some(path) = &c.path {
+        config::save(path, &next).map_err(|e| format!("Couldn't save the app config: {e:#}"))?;
+    }
+    c.config = next;
+    Ok(())
+}
+
+/// What the player is told when a set folder does not open.
+fn open_error(dir: &Path, e: &anyhow::Error) -> String {
+    let name = startup::set_name(dir);
+    if !dir.join(kit::SET_FILE).exists() && !dir.join(kit::BACKUP_FILE).exists() {
+        return format!("{name} has no set.json — pick a set folder, or use New set");
+    }
+    // `kit::load` read the backup but could not move the broken set.json aside.
+    if e.chain()
+        .any(|c| c.to_string() == "move broken set.json aside")
+    {
+        return format!("Couldn't open {name}: {e:#}");
+    }
+    format!("Couldn't open {name} — set.json and backup are unreadable. Files left untouched.")
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub router: Arc<Mutex<Router>>,
@@ -125,6 +152,8 @@ pub struct AppState {
     writer: Writer,
     /// Newest set-open request; an older one finishing later is discarded.
     open_ticket: Arc<AtomicU64>,
+    /// Count of committed set installs; `adopt` acts only for the latest.
+    installed: Arc<AtomicU64>,
     assigns: Arc<Mutex<Assigns>>,
     input_mode: Arc<AtomicU8>,
 }
@@ -165,6 +194,7 @@ impl AppState {
             save_gate: Arc::new(Mutex::new(())),
             writer,
             open_ticket: Arc::new(AtomicU64::new(0)),
+            installed: Arc::new(AtomicU64::new(0)),
             assigns: Arc::new(Mutex::new(Assigns::default())),
             input_mode: Arc::new(AtomicU8::new(InputMode::Sampler as u8)),
         }
@@ -492,10 +522,7 @@ impl AppState {
         let dir = Path::new(dir_str);
         let loaded = KitManager::load_from_dir(dir).map_err(|e| {
             logfile::log(format!("Open {}: {e:#}", dir.display()));
-            format!(
-                "Couldn't open {} — set.json and backup are unreadable. Files left untouched.",
-                startup::set_name(dir)
-            )
+            open_error(dir, &e)
         })?;
         self.finish_open(ticket, loaded)
     }
@@ -507,18 +534,23 @@ impl AppState {
         }
         let set = loaded.set.clone();
         let dir = loaded.dir.clone();
-        self.install(
+        let seq = self.install(
             ticket,
             loaded.set,
             Some(loaded.dir),
             loaded.samples,
             loaded.failed_samples,
         )?;
-        Ok(self.adopt(&dir, set, loaded.from_backup))
+        if loaded.from_backup {
+            // set.json was moved aside: let autosave write it back.
+            self.touch();
+        }
+        Ok(self.adopt(seq, &dir, set, loaded.from_backup))
     }
 
-    /// A set is now open: it becomes the startup state and the last set in the config.
-    fn adopt(&self, dir: &Path, set: Set, from_backup: bool) -> OpenResult {
+    /// A set is now open: it becomes the startup state and the last set in the config, unless
+    /// a newer install got there first (`seq` is checked under the config lock).
+    fn adopt(&self, seq: u64, dir: &Path, set: Set, from_backup: bool) -> OpenResult {
         let result = OpenResult {
             set,
             path: dir.display().to_string(),
@@ -526,6 +558,10 @@ impl AppState {
             from_backup,
             backup_saved_at: startup::backup_time(dir),
         };
+        let mut c = lock(&self.config);
+        if self.installed.load(Ordering::SeqCst) != seq {
+            return result;
+        }
         *lock(&self.startup) = Startup::Loaded {
             path: result.path.clone(),
             name: result.name.clone(),
@@ -533,7 +569,9 @@ impl AppState {
             backup_saved_at: result.backup_saved_at.clone(),
         };
         let last = Some(result.path.clone());
-        if let Err(e) = self.update_config(|c| c.last_set = last) {
+        let written = write_config(&mut c, |c| c.last_set = last);
+        drop(c);
+        if let Err(e) = written {
             logfile::log(e);
         }
         logfile::log(format!("Opened set {}", result.path));
@@ -545,11 +583,11 @@ impl AppState {
     pub fn new_set(&self, dir_str: &str) -> Result<OpenResult, String> {
         let ticket = self.begin_open();
         let dir = Path::new(dir_str);
-        kit::ensure_new_set_dir(dir).map_err(|e| e.to_string())?;
+        kit::ensure_new_set_dir(dir).map_err(|e| format!("{e:#}"))?;
         let created_dir = !dir.exists();
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("{e:#}"))?;
         let set = Set::new();
-        kit::save(dir, &set).map_err(|e| e.to_string())?;
+        kit::save(dir, &set).map_err(|e| format!("{e:#}"))?;
         let installed = self.install(
             ticket,
             set.clone(),
@@ -557,15 +595,18 @@ impl AppState {
             Default::default(),
             vec![],
         );
-        if let Err(reason) = installed {
-            // Not adopted: take back what this call created so a retry finds the folder free.
-            let _ = std::fs::remove_file(dir.join(kit::SET_FILE));
-            if created_dir {
-                let _ = std::fs::remove_dir(dir);
+        let seq = match installed {
+            Ok(seq) => seq,
+            Err(reason) => {
+                // Not adopted: take back what this call created so a retry finds the folder free.
+                let _ = std::fs::remove_file(dir.join(kit::SET_FILE));
+                if created_dir {
+                    let _ = std::fs::remove_dir(dir);
+                }
+                return Err(reason);
             }
-            return Err(reason);
-        }
-        Ok(self.adopt(dir, set, false))
+        };
+        Ok(self.adopt(seq, dir, set, false))
     }
 
     // ---- app config ----------------------------------------------------------------------
@@ -578,13 +619,7 @@ impl AppState {
     /// across its own small write so writes land in order; nothing else waits on it (not
     /// `save_gate`: opening a set must not wait for a set save in flight).
     fn update_config(&self, f: impl FnOnce(&mut AppConfig)) -> Result<(), String> {
-        let mut c = lock(&self.config);
-        f(&mut c.config);
-        match &c.path {
-            Some(path) => config::save(path, &c.config)
-                .map_err(|e| format!("Couldn't save the app config: {e:#}")),
-            None => Ok(()),
-        }
+        write_config(&mut lock(&self.config), f)
     }
 
     pub fn set_library_dir(&self, dir: Option<String>) -> Result<(), String> {
@@ -636,7 +671,7 @@ impl AppState {
         dir: Option<PathBuf>,
         samples: HashMap<String, Arc<Sample>>,
         failed: Vec<(String, String)>,
-    ) -> Result<(), String> {
+    ) -> Result<u64, String> {
         let mut r = lock(&self.router);
         if self.open_ticket.load(Ordering::SeqCst) != ticket {
             return Err("A newer open/new request replaced this one.".into());
@@ -646,6 +681,8 @@ impl AppState {
             drop(r);
             return Err(rejected.reason);
         }
+        // Taken under the router lock, so it orders installs exactly as they happened.
+        let seq = self.installed.fetch_add(1, Ordering::SeqCst) + 1;
         lock(&self.history).clear();
         {
             let mut km = lock(&self.kit_manager);
@@ -657,7 +694,7 @@ impl AppState {
         }
         drop(r);
         *lock(&self.assigns) = Assigns::default();
-        Ok(())
+        Ok(seq)
     }
 
     // ---- saving --------------------------------------------------------------------------
@@ -690,7 +727,20 @@ impl AppState {
                 .map_err(|e| format!("Couldn't save to {}: {e:#}", dir.display())),
             None => Err("No set folder yet. Create or open a set first.".to_string()),
         };
-        lock(&self.saver).finish(epoch, rev, result.clone(), now);
+        let new_failure = {
+            let mut saver = lock(&self.saver);
+            let status = saver.status();
+            let new_failure = result.as_ref().err().filter(|reason| {
+                status.state != SaveState::Failed || status.reason.as_ref() != Some(*reason)
+            });
+            let new_failure = new_failure.cloned();
+            saver.finish(epoch, rev, result.clone(), now);
+            new_failure
+        };
+        // Each new failure is logged once, whether the save was manual or automatic.
+        if let Some(reason) = new_failure {
+            logfile::log(format!("Save failed: {reason}"));
+        }
         result
     }
 

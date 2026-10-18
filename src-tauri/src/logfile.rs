@@ -49,16 +49,21 @@ pub fn log(line: impl AsRef<str>) {
 }
 
 /// lpd.2.log → lpd.3.log, lpd.1.log → lpd.2.log, lpd.log → lpd.1.log (the oldest is replaced).
+/// lpd.log is moved out of the way first; when that fails nothing is shifted, so no history is
+/// lost, and the next call tries again.
 fn rotate(target: &Target) {
-    let name = |n: u32| match n {
-        0 => target.dir.join("lpd.log"),
-        n => target.dir.join(format!("lpd.{n}.log")),
-    };
-    for n in (0..KEEP).rev() {
+    let name = |n: u32| target.dir.join(format!("lpd.{n}.log"));
+    let current = target.dir.join("lpd.log");
+    let moving = target.dir.join("lpd.log.rotating");
+    if std::fs::rename(&current, &moving).is_err() {
+        return;
+    }
+    for n in (1..KEEP).rev() {
         if name(n).exists() {
             let _ = std::fs::rename(name(n), name(n + 1));
         }
     }
+    let _ = std::fs::rename(&moving, name(1));
 }
 
 #[cfg(test)]
@@ -99,5 +104,32 @@ mod tests {
         }
         let names = logs(tmp.path());
         assert_eq!(names, ["lpd.1.log", "lpd.2.log", "lpd.3.log", "lpd.log"]);
+
+        // lpd.log cannot be renamed (held open without delete sharing): older files stay put.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let read = |n: &str| std::fs::read(tmp.path().join(n)).unwrap();
+            let before = [read("lpd.1.log"), read("lpd.2.log"), read("lpd.3.log")];
+            let holder = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1 | 2) // FILE_SHARE_READ | FILE_SHARE_WRITE
+                .open(tmp.path().join("lpd.log"))
+                .unwrap();
+            for i in 0..10 {
+                log(format!("held line {i} with some padding"));
+            }
+            assert_eq!(
+                [read("lpd.1.log"), read("lpd.2.log"), read("lpd.3.log")],
+                before,
+                "no history lost"
+            );
+            assert_eq!(logs(tmp.path()), names);
+            drop(holder);
+            log("released");
+            assert!(String::from_utf8(read("lpd.1.log"))
+                .unwrap()
+                .contains("held line 9"));
+        }
     }
 }
