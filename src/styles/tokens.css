@@ -1,0 +1,64 @@
+@font-face {
+  font-family: Antonio;
+  src: url('/fonts/antonio-latin-wght-normal.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 100 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Share Tech Mono';
+  src: url('/fonts/share-tech-mono-latin-400-normal.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+  --ink: #000000;
+  --body: #2b2725;
+  --body-raised: rgba(24,21,20,.6);
+  --line: #463e38;
+  --line-hi: #64584f;
+  --vec: #4fd0c6;
+  --vec-dim: rgba(79,208,198,.4);
+  --glass: #000000;
+  --plastic: #d8d0bb;
+  --frame: 12px;
+  --lcd: #fff6dc;
+  --lcd-dim: #8fa3bf;
+  --silk: #ffae2b;
+  --led-off: #3b3430;
+  --orange: #ff5b1f;
+  --phos: #7dffb0;
+  --teal: #37c2b0;
+  --ok: #5cff9d;
+  --warn: #ffb21a;
+  --error: #ff3d4f;
+  --select: #ece3cc;
+  --focus: #ff4fd8;
+  --hand-l: #41c8ff;
+  --hand-r: #ffb21a;
+  --playhead: #ff5b1f;
+  --cap1: #3d3835;
+  --cap2: #2b2725;
+  --lip0: #110f0e;
+  --pad1: #36312e;
+  --pad2: #272321;
+  --padl: #51483f;
+  --r-pad: 3px;
+  --r-key: 3px;
+  --r-screen: 3px;
+  --r-panel: 2px;
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --f-silk: Antonio, Bahnschrift, 'Segoe UI', sans-serif;
+  --f-lcd: 'Share Tech Mono', Consolas, monospace;
+  --crt: 1;
+  --px: 3px;
+  --panel-shadow: inset 0 0 0 1px var(--line), inset 0 1px 0 rgba(255,255,255,.07), 0 8px 0 rgba(8,6,5,.78), 0 12px 6px rgba(0,0,0,.35), 0 26px 48px rgba(0,0,0,.7);
+}
