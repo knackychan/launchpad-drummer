@@ -138,7 +138,7 @@
     if (!source.external) { suppressClick = true; window.setTimeout(() => { suppressClick = false; }, 0); }
     const invalid = invalidDrop;
     cancelDrag();
-    if (invalid) { showToast('Not an audio file'); return; }
+    if (invalid) { if (xy) showToast('Not an audio file'); return; }
     if (!xy || !target) return;
     if (source.source === 'pad' && source.fromBank === activeBank && source.fromX === xy.x && source.fromY === xy.y) return;
     const toBank = activeBank;
@@ -174,7 +174,8 @@
   const selXY = $derived(selected === null ? null : { x: (selected % 10) - 1, y: Math.floor(selected / 10) - 1 });
   const selectedPad = $derived(selXY ? bank?.pads.find((p) => p.x === selXY.x && p.y === selXY.y) ?? null : null);
   const dropXY = $derived(dropTarget?.kind === 'pad' ? dropTarget : dropTarget?.kind === 'editor' && drag?.source === 'files' ? selXY : null);
-  const dragTag = $derived(drag && dropXY ? dropTag(drag.source, !!bank.pads.find(p => p.x === dropXY.x && p.y === dropXY.y), drag.ctrl, drag.paths.length) : '');
+  const dragTag = $derived(drag && dropXY && !(drag.source === 'pad' && drag.fromBank === activeBank && drag.fromX === dropXY.x && drag.fromY === dropXY.y)
+    ? dropTag(drag.source, !!bank.pads.find(p => p.x === dropXY.x && p.y === dropXY.y), drag.ctrl, drag.paths.filter(isAudioName).length) : '');
 
   // Frame order: index (7 - y) * 8 + x, top-left first.
   const padNames = $derived.by(() => {

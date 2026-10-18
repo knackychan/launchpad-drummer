@@ -16,6 +16,7 @@ test('drop tags cover import replace move swap and live copy', () => {
   assert.equal(dropTag('files',true,true,3),'IMPORT ×3'); assert.equal(dropTag('pad',false,false,1),'MOVE');
   assert.equal(dropTag('pad',true,false,1),'SWAP'); assert.equal(dropTag('pad',true,true,1),'COPY');
   assert.equal(dropTag('pad',false,true,1),'COPY');
+  assert.equal(dropTag('files',false,true,2),'IMPORT ×2'); assert.equal(dropTag('files',true,true,1),'REPLACE');
 });
 test('native coordinates, audio extensions and drag threshold', () => {
   assert.deepEqual(physicalToCss({x:300,y:150},1.5),{x:200,y:100});
