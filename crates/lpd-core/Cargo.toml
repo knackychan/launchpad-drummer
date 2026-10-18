@@ -1,0 +1,16 @@
+[package]
+name = "lpd-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rtrb = { workspace = true }
+symphonia = { workspace = true }
+
+[dev-dependencies]
+hound = { workspace = true }
+tempfile = { workspace = true }
+assert_no_alloc = { workspace = true }
