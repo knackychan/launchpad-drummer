@@ -12,6 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+lpd-core = { path = "../crates/lpd-core" }
 tauri = { version = "2", features = [] }
 midir = "0.10"
 serde = { version = "1", features = ["derive"] }
