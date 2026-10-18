@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { pushEsc } from "../lib/esc.ts";
+  $effect(() => { if (renaming !== null) return pushEsc(() => { renaming = null; }); });
   // 1:1 Launch Control XL mirror + master (UI spec 7.1): label column, 8 channel columns, master.
   import Knob from './Knob.svelte';
   import Fader from './Fader.svelte';
@@ -8,8 +10,10 @@
   import { dbToPos, fmtDbShort, fmtLp, fmtPan, fmtSemis, knobToLp, lpToKnob } from '../lib/mix.ts';
 
   let {
+    renaming = $bindable<number | null>(null),
     groups, masterDb, dims, onupdategroup, onupdatemaster, onstopall,
   }: {
+    renaming?: number | null;
     groups: Group[];
     masterDb: number;
     dims?: MixDims;
@@ -29,7 +33,6 @@
     fs: 10,
   };
   const d = $derived(dims ?? DEFAULT_DIMS);
-  let renaming = $state<number | null>(null);
   const narrow = $derived(d.cw < 44);
   const TICKS: [number, string][] = [[6, '+6'], [0, '0'], [-12, '−12'], [-40, '−40'], [-60, '−∞']];
 

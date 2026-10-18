@@ -49,6 +49,7 @@ export interface SetModel {
 }
 
 export interface AudioStatus {
+  dropouts?: number;
   state: string;
   deviceName: string;
   sampleRate: number;

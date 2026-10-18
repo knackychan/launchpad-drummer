@@ -11,25 +11,37 @@
   import SetupDisplay from './components/SetupDisplay.svelte';
   import HordeGame from './components/HordeGame.svelte';
   import ConsoleBackdrop from './components/ConsoleBackdrop.svelte';
+  import NoticeLcd from './components/NoticeLcd.svelte';
+  import SetMenu from './components/SetMenu.svelte';
+  import PowerOn from './components/PowerOn.svelte';
+  import { invoke as call, listen, isTauri } from './lib/api.ts';
+  import { activeNotices, type Confirmation, type Level, type Notice, type NoticeInputs } from './lib/notices.ts';
+  import { middleTruncate } from './lib/format.ts';
+  import { padForKey } from './lib/keymap.ts';
+  import { runEsc } from './lib/esc.ts';
   import { createLedFrame, ledToCss } from './lib/led.ts';
   import type { PadInput, Rgb } from './lib/led.ts';
   import { CRT_FACTORS, readDisplay, saveDisplay } from './lib/display.ts';
   import type { CrtLevel } from './lib/display.ts';
   import { createDefaultPad, createEmptySet, createPreviewSet, GROUP_COLORS, padLabel } from './lib/model.ts';
-  import type { AudioStatus, Group, LightModes, OpenResult, Pad, SamplePeaks, SetModel } from './lib/model.ts';
+  import type { AudioStatus, Group, LightModes, MissingPad, OpenResult, Pad, SamplePeaks, SetModel, Startup } from './lib/model.ts';
   import { solvePlayLayout } from './lib/layout.ts';
   import { hitAmount, hitGroup, runActivity } from './lib/activity.ts';
-  import { audioLabel, currentNotice, IDLE_SAVE, padEditKey, saveBadge } from './lib/status.ts';
+  import { audioLabel, IDLE_SAVE, padEditKey } from './lib/status.ts';
   import type { SaveStatus } from './lib/status.ts';
 
-  const tauri = typeof window !== 'undefined' ? window.__TAURI__ : undefined;
-  const invoke = <T = unknown>(cmd: string, args?: Record<string, unknown>) =>
-    tauri ? tauri.core.invoke<T>(cmd, args) : Promise.resolve(undefined as T);
+  const tauri = isTauri;
+  const editCommands = new Set(['update_pad', 'assign_sample', 'remove_pad', 'update_group', 'rename_bank', 'update_bank_lights', 'update_bank_humanize']);
+  async function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+    const result = await call<T>(cmd, args);
+    if (editCommands.has(cmd)) refreshHistory();
+    return result;
+  }
 
   let mode = $state<'play' | 'games' | 'setup'>('play');
   let game = $state('horde');
   let gameFull = $state(false);
-  let deviceState = $state('disconnected');
+  let deviceState = $state<NoticeInputs['launchpad']>('disconnected');
   let midiLog = $state<{ time: string; text: string }[]>([]);
   let crt = $state<CrtLevel>('low');
   let leds = $state<readonly Rgb[]>(createLedFrame());
@@ -42,8 +54,19 @@
   let setName = $state(tauri ? 'DEFAULT SET' : 'PREVIEW KIT');
   let audioStatus = $state<AudioStatus | null>(null);
   let saveStatus = $state<SaveStatus>(IDLE_SAVE);
-  let toast = $state<string | null>(null);
-  let toastTimer = 0;
+  let startup = $state<Startup>({ kind: 'loaded', path: '', name: '', fromBackup: false, backupSavedAt: null });
+  let setPath = $state('');
+  let powerError = $state<string | null>(null);
+  let missing = $state<MissingPad[]>([]);
+  let missingIndex = 0;
+  let history = $state({ canUndo: false, canRedo: false });
+  let confirmations = $state<Confirmation[]>([]);
+  let dismissed = $state<Set<string>>(new Set());
+  let backup = $state<NoticeInputs['backup']>(null);
+  let renaming = $state<number | null>(null);
+  let mixerRenaming = $state<number | null>(null);
+  let historyTimer = 0;
+  const confirmationTimers = new Set<number>();
   let assignSeq = 0;
 
   let drawer = $state<'editor' | null>(null);
@@ -77,8 +100,10 @@
     return frame;
   });
 
-  const notice = $derived(currentNotice({ tauri: !!tauri, deviceState, save: saveStatus, audio: audioStatus, toast }));
-  const saveState = $derived(saveBadge(saveStatus));
+  const notices = $derived(activeNotices({ learnArmed: null, audioLost: audioStatus?.state === 'lost' || audioStatus?.state === 'error',
+    backup, saveFailed: saveStatus.state === 'failed' ? saveStatus.reason : null,
+    launchpad: tauri ? deviceState : 'connected', lcxl: tauri ? 'disconnected' : 'connected', missing: missing.length,
+    asioFallback: false, dropoutRecent: false, confirmations, keysAbsent: false, dismissed }));
   const lampClass = (state: string) => ({ connected: 'ok', running: 'ok', busy: 'warn', bootloader: 'error', stopped: 'error', error: 'error' } as Record<string, string>)[state] ?? '';
 
   function logMidi(text: string) {
@@ -86,9 +111,31 @@
   }
   /** A message about something the player just did, shown in the notice LCD for a while. */
   function showToast(text: string) {
-    toast = text;
-    clearTimeout(toastTimer);
-    toastTimer = window.setTimeout(() => { toast = null; }, 12000);
+    confirm(text, 'error');
+  }
+  function confirm(text: string, level: Level = 'ok') {
+    const id = crypto.randomUUID();
+    confirmations = [...confirmations, { id, text, level }];
+    const timer = window.setTimeout(() => { confirmations = confirmations.filter(c => c.id !== id); confirmationTimers.delete(timer); }, 3000);
+    confirmationTimers.add(timer);
+  }
+  function refreshHistory() {
+    clearTimeout(historyTimer);
+    historyTimer = window.setTimeout(() => { void call<typeof history>('history_state').then(h => { if (h) history = h; }).catch(e => showToast(errorText(e))); }, 100);
+  }
+  async function refreshMissing() { missing = await invoke<MissingPad[]>('missing_samples') ?? []; }
+  async function undoRedo(cmd: 'undo' | 'redo') {
+    if (cmd === 'undo' ? !history.canUndo : !history.canRedo) return;
+    try { const set = await invoke<SetModel | null>(cmd); if (set) { currentSet = set; confirm(cmd === 'undo' ? 'Undone' : 'Redone'); await refreshMissing(); } refreshHistory(); }
+    catch (e) { showToast(errorText(e)); }
+  }
+  async function noticeAction(n: Notice) {
+    try {
+      if (n.action?.id === 'dismiss') dismissed = new Set([...dismissed, n.id]);
+      if (n.action?.id === 'setup') setMode('setup');
+      if (n.action?.id === 'reconnect') { const status = await invoke<AudioStatus>('audio_reconnect'); if (status) audioStatus = status; }
+      if (n.action?.id === 'show') { await refreshMissing(); const p = missing[missingIndex++ % missing.length]; if (p) { chooseBank(p.bank); selected = (p.y + 1) * 10 + p.x + 1; drawer = 'editor'; setMode('play'); } }
+    } catch (e) { showToast(errorText(e)); }
   }
   const errorText = (e: unknown) => String(e instanceof Error ? e.message : e);
 
@@ -97,8 +144,12 @@
   }
 
   async function loadInitialState() {
-    if (!tauri) return;
     try {
+      startup = await invoke<Startup>('get_startup');
+      if (startup.kind === 'loaded') { setPath = startup.path; setName = startup.name; backup = startup.fromBackup ? { savedAt: startup.backupSavedAt } : null; }
+      await refreshMissing();
+      history = await invoke<typeof history>('history_state');
+      if (!tauri) return;
       const [set, b, status, save] = await Promise.all([
         invoke<SetModel>('get_current_set'),
         invoke<number>('get_current_bank'),
@@ -122,29 +173,32 @@
     const onFullscreen = () => { if (!document.fullscreenElement) gameFull = false; };
     document.addEventListener('fullscreenchange', onFullscreen);
 
-    const api = tauri?.event;
     const unlisten: (() => void)[] = [];
-    if (api) {
-      void api.listen<{ state: string; message: string }>('launchpad-status', (event) => {
-        deviceState = event.payload.state;
-        logMidi(event.payload.message);
-      }).then((fn) => unlisten.push(fn));
-      void api.listen<{ note: number; pressed: boolean }>('launchpad-pad', (event) => {
-        logMidi(`PAD ${event.payload.note} ${event.payload.pressed ? 'DOWN' : 'UP'}`);
-        padInput({ ...event.payload, source: 'hardware' });
-      }).then((fn) => unlisten.push(fn));
-      void api.listen<[number, number, number][]>('launchpad-frame', (event) => {
+    let disposed = false;
+    function subscribe<T>(event: string, fn: (payload: T) => void) {
+      void listen<T>(event, fn).then(stop => { if (disposed) stop(); else unlisten.push(stop); }).catch(e => showToast(errorText(e)));
+    }
+    if (tauri) {
+      subscribe<{ state: NoticeInputs['launchpad']; message: string }>('launchpad-status', (event) => {
+        deviceState = event.state;
+        logMidi(event.message);
+      });
+      subscribe<{ note: number; pressed: boolean }>('launchpad-pad', (event) => {
+        logMidi(`PAD ${event.note} ${event.pressed ? 'DOWN' : 'UP'}`);
+        padInput({ ...event, source: 'hardware' });
+      });
+      subscribe<[number, number, number][]>('launchpad-frame', (event) => {
         if (mode === 'games') return;
-        leds = event.payload.map(([r, g, b]) => [r, g, b] as const);
+        leds = event.map(([r, g, b]) => [r, g, b] as const);
         frameSeen = true;
-      }).then((fn) => unlisten.push(fn));
-      void api.listen<SaveStatus>('save-status', (event) => { saveStatus = event.payload; })
-        .then((fn) => unlisten.push(fn));
-      void api.listen<AudioStatus>('audio-status', (event) => { audioStatus = event.payload; })
-        .then((fn) => unlisten.push(fn));
+      });
+      subscribe<SaveStatus>('save-status', (event) => { saveStatus = event; });
+      subscribe<AudioStatus>('audio-status', (event) => { audioStatus = event; });
     }
     return () => {
-      clearTimeout(toastTimer);
+      disposed = true;
+      clearTimeout(historyTimer);
+      confirmationTimers.forEach(clearTimeout);
       stopActivity();
       document.removeEventListener('fullscreenchange', onFullscreen);
       unlisten.forEach((fn) => fn());
@@ -205,6 +259,7 @@
   }
 
   function chooseBank(b: number) {
+    releaseKeyboard();
     activeBank = b;
     void invoke('select_bank', { bank: b }).catch((e) => console.warn('Bank select error:', e));
   }
@@ -259,42 +314,28 @@
     void invoke('stop_all');
   }
 
-  async function promptSetManagement() {
-    if (!tauri) return;
-    const action = window.prompt("Set Action: type 'load', 'new', or 'save':", 'save');
-    if (!action) return;
-    if (action.toLowerCase() === 'save') {
-      await saveSet();
-    } else if (action.toLowerCase() === 'new' || action.toLowerCase() === 'load') {
-      const isNew = action.toLowerCase() === 'new';
-      const dir = window.prompt(isNew ? 'New set folder path:' : 'Set folder path to load:');
-      if (!dir) return;
-      try {
-        const opened = await invoke<OpenResult>(isNew ? 'new_set' : 'open_set', { dir });
-        currentSet = opened.set;
-        setName = opened.name;
-        selected = null;
-        peaks = null;
-        toast = null;
-        void invoke<number>('get_current_bank').then((b) => { activeBank = b; });
-      } catch (e) {
-        showToast(`Couldn't ${isNew ? 'create' : 'open'} set — ${errorText(e)}`);
-      }
-    }
-  }
-  async function saveSet() {
+  async function manageSet(isNew: boolean) {
     try {
-      await invoke('save_now');
-      logMidi('Set saved successfully');
+      const defaultDir = await invoke<string>('default_sets_dir');
+      const dir = await invoke<string | null>('pick_folder', { title: isNew ? 'New set — choose an empty folder' : 'Open set folder', defaultDir });
+      if (!dir) return;
+      const opened = await invoke<OpenResult>(isNew ? 'new_set' : 'open_set', { dir });
+      if (!opened) return;
+      currentSet = opened.set; setName = opened.name; setPath = opened.path;
+      startup = { kind: 'loaded', path: opened.path, name: opened.name, fromBackup: opened.fromBackup, backupSavedAt: opened.backupSavedAt };
+      backup = opened.fromBackup ? { savedAt: opened.backupSavedAt } : null;
+      dismissed = new Set(); powerError = null; selected = null; peaks = null;
+      activeBank = await invoke<number>('get_current_bank') ?? 0;
+      await refreshMissing(); refreshHistory();
     } catch (e) {
-      // The backend also emits save-status; this makes the failure visible without waiting for it.
-      saveStatus = { state: 'failed', reason: errorText(e) };
-      logMidi(`Save failed: ${errorText(e)}`);
+      if (startup.kind !== 'loaded') powerError = errorText(e);
+      else showToast(errorText(e));
     }
   }
 
   /** Games own the Launchpad pads and LEDs; every other screen leaves them to the sampler. */
   function setMode(next: typeof mode) {
+    releaseKeyboard();
     const was = mode;
     mode = next;
     if (next !== 'games') exitGameFull();
@@ -313,33 +354,71 @@
     if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
   }
 
+  const keyboardHeld = new Map<string, number>();
+  function keyup(event: KeyboardEvent) {
+    const id = event.code || event.key.toLowerCase();
+    const note = keyboardHeld.get(id);
+    if (note === undefined) return;
+    event.preventDefault(); keyboardHeld.delete(id);
+    padInput({ note, pressed: false, source: 'screen' });
+  }
+  function releaseKeyboard() {
+    for (const note of keyboardHeld.values()) padInput({ note, pressed: false, source: 'screen' });
+    keyboardHeld.clear();
+  }
   function keydown(event: KeyboardEvent) {
+    if (event.defaultPrevented) return;
     const target = event.target as HTMLElement;
-    if (target.closest('input, textarea, select')) return;
-    if (event.key === 'Escape') {
-      if (gameFull) { exitGameFull(); return; }
-      if (mode === 'play') stopAll();
-    }
-    if (event.ctrlKey && event.key.toLowerCase() === 'e' && mode === 'play') {
-      event.preventDefault();
-      drawer = drawer ? null : 'editor';
-    }
+    if (target.closest('input, textarea, select, [contenteditable="true"], [role="menu"]')) return;
+    const key = event.key.toLowerCase();
+    let handled = true;
+    if (key === 'escape') { if (!runEsc()) { if (gameFull) exitGameFull(); else if (mode === 'play') stopAll(); } }
+    else if (event.ctrlKey) {
+      if (key === 'n' || key === 'o') void manageSet(key === 'n');
+      else if (key === 'z' || key === 'y') void undoRedo(key === 'y' || event.shiftKey ? 'redo' : 'undo');
+      else if (key === '1') setMode('play');
+      else if (key === ',') setMode('setup');
+      else if (key === '2') { /* TRAIN remains a blank cap. */ }
+      else if (key === 'e' && mode === 'play') drawer = drawer ? null : 'editor';
+      else handled = false;
+    } else if (mode === 'play' && startup.kind === 'loaded') {
+      const gridFocused = !!target.closest('.pad-grid') || document.activeElement === document.body;
+      if (event.altKey && /^[1-8]$/.test(key)) chooseBank(Number(key) - 1);
+      else if (key === 'pageup' || key === 'pagedown') chooseBank(Math.max(0, Math.min(7, activeBank + (key === 'pageup' ? -1 : 1))));
+      else if (key === 'f2') {
+        const channel = target.closest<HTMLElement>('.mx-col[data-group]');
+        if (channel) mixerRenaming = Number(channel.dataset.group); else renaming = activeBank;
+      } else if (key === 'delete' && selXY) { removePad(selXY.x, selXY.y); confirm('Pad cleared'); }
+      else if (gridFocused && ['arrowleft', 'arrowright', 'arrowup', 'arrowdown'].includes(key)) {
+        const xy = selXY ?? { x: 0, y: 0 };
+        const x = Math.max(0, Math.min(7, xy.x + (key === 'arrowright' ? 1 : key === 'arrowleft' ? -1 : 0)));
+        const y = Math.max(0, Math.min(7, xy.y + (key === 'arrowup' ? 1 : key === 'arrowdown' ? -1 : 0)));
+        selected = (y + 1) * 10 + x + 1;
+      } else if (!event.altKey && !target.closest('[role="tree"]')) {
+        const xy = key === ' ' && gridFocused ? selXY : padForKey(key);
+        if (xy) {
+          if (!event.repeat) {
+            const id = event.code || key, note = (xy.y + 1) * 10 + xy.x + 1;
+            if (!keyboardHeld.has(id)) { keyboardHeld.set(id, note); padInput({ note, pressed: true, source: 'screen' }); }
+          }
+        } else handled = false;
+      } else handled = false;
+    } else handled = false;
+    if (handled) event.preventDefault();
   }
 </script>
 
-<svelte:window onkeydown={keydown} />
+<svelte:window onkeydown={keydown} onkeyup={keyup} onblur={releaseKeyboard} />
 
 <div class="instrument" data-crt={crt} style:--crt={CRT_FACTORS[crt]}>
   <div class="console" class:game-full={gameFull}>
     <ConsoleBackdrop />
     <header class="top-strip">
       <div class="brand" aria-hidden="true">LPD·01</div>
-      <button class="set-lcd screen" onclick={promptSetManagement} title="Set: save, load or create">
-        <span class="silk">SET</span><span class="lcd">{setName}</span><span class="lcd lcd-dim">▾</span>
-      </button>
-      <button class="key small" aria-label="Undo" title="Undo (Ctrl+Z)" aria-disabled="true">↶</button>
-      <button class="key small" aria-label="Redo" title="Redo (Ctrl+Y)" aria-disabled="true">↷</button>
-      <div class="notice screen lcd {notice.cls}" role="status">{notice.text}</div>
+      <SetMenu name={setName} path={setPath} onnew={() => void manageSet(true)} onopen={() => void manageSet(false)} onreveal={() => void invoke('reveal_path', { path: setPath }).catch(e => showToast(errorText(e)))} />
+      <button class="key small" aria-label="Undo" title="Undo (Ctrl+Z)" aria-disabled={!history.canUndo} onclick={() => void undoRedo('undo')}>↶</button>
+      <button class="key small" aria-label="Redo" title="Redo (Ctrl+Y)" aria-disabled={!history.canRedo} onclick={() => void undoRedo('redo')}>↷</button>
+      <NoticeLcd {notices} idle={tauri ? 'Launchpad MK2 connected' : 'Browser preview — demo kit, no audio engine'} onaction={n => void noticeAction(n)} />
       <div class="chips" aria-hidden="true">
         {#each GROUP_COLORS as c, i}<i data-chip={i} style:--c={ledToCss(c)}></i>{/each}
       </div>
@@ -355,7 +434,9 @@
     </nav>
 
     <main class="bay" aria-label={mode === 'play' ? 'Play' : mode === 'games' ? 'Games' : 'Setup'} bind:clientWidth={bayW} bind:clientHeight={bayH}>
-      {#if mode === 'play'}
+      {#if mode === 'play' && startup.kind !== 'loaded'}
+        <PowerOn {startup} error={powerError} launchpad={deviceState} lcxl="disconnected" audio={audioStatus?.state ?? 'stopped'} onnew={() => void manageSet(true)} onopen={() => void manageSet(false)} />
+      {:else if mode === 'play'}
         <section
           class="play-screen"
           class:docked={layout.docked}
@@ -370,6 +451,7 @@
               <div class="stack">
                 <div class="pair">
                   <LaunchpadPanel
+                    bind:renaming
                     leds={displayLeds}
                     names={padNames}
                     {selected}
@@ -383,6 +465,7 @@
                     onstop={stopAll}
                   />
                   <MixerStrip
+                    bind:renaming={mixerRenaming}
                     groups={currentSet.mixer.groups}
                     masterDb={currentSet.mixer.masterDb}
                     dims={layout.mix}
@@ -470,9 +553,9 @@
         <span class="lamp {lampClass(audioStatus?.state ?? 'stopped')}"></span><span class="silk">AUDIO</span>
       </button>
       <span class="lcd lcd-dim" class:audio-error={audioStatus?.state === 'error'}>{audioLabel(audioStatus)}</span>
-      <span class="lcd lcd-dim status-path">{setName}</span>
-      {#if saveState}<span class="lcd save-state {saveState.cls}" role="status">{saveState.text}</span>{/if}
-      <button class="key small" onclick={saveSet} title="Save current set">SAVE</button>
+      <span class="lcd lcd-dim">DROPS {audioStatus?.dropouts ?? 0}</span>
+      <span class="lcd lcd-dim status-path" title={setPath}>{middleTruncate(setPath, 48)}</span>
+      {#key saveStatus}<span class="lamp" class:ok={saveStatus.state === 'saved'} class:blink={saveStatus.state === 'saved'} class:error={saveStatus.state === 'failed'} role="img" aria-label={saveStatus.state === 'failed' ? 'Save failed' : saveStatus.state === 'saved' ? 'Saved' : 'Saving…'}></span>{/key}
     </footer>
   </div>
   <CrtLayers level={crt} />

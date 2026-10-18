@@ -24,16 +24,6 @@
     oninput({ note, pressed: false, source: 'screen' });
   }
   function releaseAll() { for (const note of held) release(note); }
-  function navigate(event: KeyboardEvent, index: number) {
-    const offsets: Record<string, number> = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -8, ArrowDown: 8 };
-    if (event.key in offsets) {
-      event.preventDefault();
-      const col = index % 8;
-      if ((event.key === 'ArrowLeft' && col === 0) || (event.key === 'ArrowRight' && col === 7)) return;
-      focusIndex = Math.max(0, Math.min(63, index + offsets[event.key]));
-      buttons[focusIndex]?.focus();
-    }
-  }
   onMount(() => {
     window.addEventListener('blur', releaseAll);
     return () => { window.removeEventListener('blur', releaseAll); releaseAll(); };
@@ -67,11 +57,10 @@
       onpointercancel={() => release(note)}
       onlostpointercapture={() => release(note)}
       onkeydown={(event) => {
-        navigate(event, index);
-        if (event.key === ' ' || event.key === 'Enter') { event.preventDefault(); press(note); }
+        if (event.key === 'Enter') { event.preventDefault(); press(note); }
       }}
       onkeyup={(event) => {
-        if (event.key === ' ' || event.key === 'Enter') { event.preventDefault(); release(note); }
+        if (event.key === 'Enter') { event.preventDefault(); release(note); }
       }}
       onblur={() => release(note)}
     ><span class="glyph"></span>{#if names[index]}<span class="nm">{names[index]}</span>{/if}</button>

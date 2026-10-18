@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { pushEsc } from "../lib/esc.ts";
+  $effect(() => { if (renaming !== null) return pushEsc(() => { renaming = null; }); });
   // Launchpad MK2 mirror (UI spec 4.1–4.2): top buttons, 8×8 pads, side bank buttons + scribble strips, bank strip.
   import PadGrid from './PadGrid.svelte';
   import Knob from './Knob.svelte';
@@ -6,8 +8,10 @@
   import type { Bank, LightModes } from '../lib/model.ts';
 
   let {
+    renaming = $bindable<number | null>(null),
     leds, names, selected, banks, activeBank, oninput, onbank, onrename, onlight, onhumanize, onstop,
   }: {
+    renaming?: number | null;
     leds: readonly Rgb[];
     names: readonly string[];
     selected: number | null;
@@ -27,7 +31,6 @@
     ['playState', 'PLAY', 'Dim idle pads, full brightness while a voice sounds'],
     ['ripple', 'RIPPLE', 'Expanding rings from the hit pad'],
   ];
-  let renaming = $state<number | null>(null);
   const bank = $derived(banks[activeBank]);
 
   function finishRename(index: number, input: HTMLInputElement, commit: boolean) {

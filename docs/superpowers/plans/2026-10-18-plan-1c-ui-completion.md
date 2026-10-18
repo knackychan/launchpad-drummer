@@ -258,7 +258,7 @@ pub const MAX_BYTES: u64 = 1_000_000;                    // rotate: lpd.2.log→
 - [ ] `promptSetManagement` uses `new_set`/`open_set`/`save_now`; old commands removed; `npm run check` clean.
 - [ ] Full verification; commit `feat(tauri): app config, startup decision, autosave, log file and pickers`.
 
-### Task 3: Shell UI — notices, set menu, power-on, undo/redo keys, status strip, keyboard map
+### Task 3: Shell UI — notices, set menu, power-on, undo/redo keys, status strip, keyboard map — DONE
 
 **Purpose.** UI spec 3, 7.1, 7.2 and 10: the top strip, the notice LCD, the power-on screen and the keyboard become real.
 
@@ -375,8 +375,10 @@ Confirmations: `confirm(text, level = 'ok')` in `App.svelte` pushes `{ id: crypt
 
 **Done when:**
 - [ ] Tests first → PASS.
-- [ ] Preview at 1280×720: Play renders; the notice LCD shows the idle preview text; undo/redo unlit; the set menu opens and closes with Esc; keyboard keys light pads; no console errors.
-- [ ] Full verification + `npm run build`; commit `feat(ui): notices, set menu, power-on, undo keys and keyboard map`.
+- [x] Preview at 1280×720: Play renders; the notice LCD shows the idle preview text; undo/redo unlit; the set menu opens and closes with Esc; keyboard keys light pads; no console errors.
+- [x] Full verification + `npm run build`; commit `feat(ui): notices, set menu, power-on, undo keys and keyboard map`.
+
+Task 3 verification (2026-10-19): helper tests failed for absent modules, then 4 passed. `cargo fmt --all -- --check`: exit 0; `cargo test --workspace`: exit 0, all passing; `npm test`: 36 passed; `npm run check`: 0 errors, 0 warnings; `npm run build`: passed. Edge preview at 1280×720: no page errors or horizontal overflow; set menu/Esc, Q pad selection, arrow movement and disabled undo checked. Power-on native picker flows await the Task 18 desktop smoke test. Ctrl+B/Ctrl+K remain with Tasks 5/16 as specified.
 
 ---
 
