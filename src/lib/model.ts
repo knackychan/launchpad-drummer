@@ -141,6 +141,14 @@ export function padLabel(sample: string): string {
   return file.replace(/\.[a-z0-9]+$/i, '').replace(/_/g, ' ');
 }
 
+/** Screen-reader label of a grid pad: position, sample, mix group, choke group and whether the sample is missing. */
+export function padAriaLabel(pad: Pad | null, x: number, y: number, _groups: Group[], missing: boolean): string {
+  const where = `Row ${y + 1}, column ${x + 1}`;
+  if (!pad?.sample) return `${where}, empty`;
+  const choke = pad.chokeGroup ?? 'off';
+  return `${where}, ${padLabel(pad.sample).toUpperCase()}, mix ${pad.mixGroup + 1}, choke ${choke}${missing ? ', sample missing' : ''}`;
+}
+
 /** Mixer channel legend: "1 KICK", or "GROUP 1" while the channel still has its default name. */
 export function groupLegend(index: number, name: string): string {
   const upper = name.trim().toUpperCase();

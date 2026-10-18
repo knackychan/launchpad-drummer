@@ -9,11 +9,14 @@
 
   let {
     renaming = $bindable<number | null>(null),
-    ondragpad, dropTarget = null, dropTag = '', invalidDrop = false, hoverBank = null,
+    ondragpad, onmenu, labels = [], missing = [], dropTarget = null, dropTag = '', invalidDrop = false, hoverBank = null,
     leds, names, selected, banks, activeBank, oninput, onbank, onrename, onlight, onhumanize, onstop,
   }: {
     renaming?: number | null;
     ondragpad?: (note: number, event: PointerEvent) => void;
+    onmenu?: (x: number, y: number, at: { x: number; y: number }) => void;
+    labels?: readonly string[];
+    missing?: readonly boolean[];
     dropTarget?: { x: number; y: number } | null;
     dropTag?: string;
     invalidDrop?: boolean;
@@ -62,7 +65,7 @@
   </div>
   <div></div><div></div>
 
-  <PadGrid bind:this={grid} {leds} {names} {selected} {oninput} {ondragpad} {dropTarget} tag={dropTag} invalid={invalidDrop} />
+  <PadGrid bind:this={grid} {leds} {names} {labels} {missing} {selected} {oninput} {ondragpad} {onmenu} {dropTarget} tag={dropTag} invalid={invalidDrop} />
 
   <div class="side" role="group" aria-label="Banks">
     {#each banks as b, i}

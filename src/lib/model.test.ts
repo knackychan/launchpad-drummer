@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createDefaultPad, LAUNCHPAD_PALETTE } from './model.ts';
+import { createDefaultPad, LAUNCHPAD_PALETTE, padAriaLabel, createEmptySet } from './model.ts';
 
 test('createDefaultPad initializes pad with coordinates and valid defaults', () => {
   const pad = createDefaultPad(3, 4);
@@ -21,4 +21,13 @@ test('LAUNCHPAD_PALETTE contains 16 valid 0..63 RGB color presets', () => {
     assert.ok(g >= 0 && g <= 63);
     assert.ok(b >= 0 && b <= 63);
   }
+});
+
+test('padAriaLabel describes empty, filled and missing pads', () => {
+  const groups = createEmptySet().mixer.groups;
+  const kick = { ...createDefaultPad(1, 3), sample: 'samples/kick_808.wav', mixGroup: 3 };
+  assert.equal(padAriaLabel(kick, 1, 3, groups, false), 'Row 4, column 2, KICK 808, mix 4, choke off');
+  assert.equal(padAriaLabel(null, 0, 0, groups, false), 'Row 1, column 1, empty');
+  const snare = { ...createDefaultPad(2, 1), sample: 'samples/snare.wav', mixGroup: 1, chokeGroup: 1 };
+  assert.equal(padAriaLabel(snare, 2, 1, groups, true), 'Row 2, column 3, SNARE, mix 2, choke 1, sample missing');
 });

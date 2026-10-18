@@ -559,7 +559,7 @@ export function passedThreshold(dx: number, dy: number): boolean; // Math.hypot(
 
 Task 6 verification (2026-10-19): `dnd.test.ts` (hitTest order and half-open edges, every dropTag row incl. `IMPORT ×3`, physicalToCss, isAudioName, passedThreshold) written first. fmt clean; cargo test --workspace all passed; npm test 41 passed; npm run check 0 errors/0 warnings; npm run build passed. Browser preview (synthetic pointer events): pad drag shows the ghost with the pad label and the MOVE tag on an empty pad, SWAP on a filled one, COPY when Ctrl is held mid-drag; Esc removes ghost and tags; hovering a scribble strip shows `.scrib.drop` and switches bank after 400 ms. Not verified here: real Explorer drops (Tauri drag events), browser-file drags with a real library, editor drop in the desktop app. Small additions: dropping a pad on itself is a no-op; the editor drop also tags the selected pad; the bank hover outline clears once that bank is active. Review fix-ups: Ctrl is also read from the pointerup event and from Control keydown/keyup while dragging; a click that follows an Esc-cancelled drag is suppressed like a completed drag's (preview: tag SWAP→COPY→SWAP on Control, click after Esc swallowed, later click passes).
 
-### Task 7: Pad editor completion, pad context menu, grid keyboard and labels
+### Task 7: Pad editor completion, pad context menu, grid keyboard and labels — DONE
 
 **Purpose.** UI spec 4.1, 4.3 and 11.
 
@@ -594,7 +594,9 @@ Task 6 verification (2026-10-19): `dnd.test.ts` (hitTest order and half-open edg
 
 **Do not:** bring back a typed path input; play a pad on right-click; change the waveform drawing.
 
-**Done when:** [ ] test first → PASS; [ ] preview: the right-click menu opens at the pad and closes with Esc; Shift+F10 on the focused grid opens it at the selected pad; arrows move the bezel; [ ] full verification + build; commit `feat(ui): pad editor missing-sample box, pad menu and grid keyboard`.
+**Done when:** [x] test first → PASS; [x] preview: the right-click menu opens at the pad and closes with Esc; Shift+F10 on the focused grid opens it at the selected pad; arrows move the bezel; [x] full verification + build; commit `feat(ui): pad editor missing-sample box, pad menu and grid keyboard`.
+
+Task 7 verification (2026-10-19): `padAriaLabel` test (the three plan examples) written first, RED (missing export) then GREEN. fmt clean; cargo test --workspace all passed; npm test 42 passed; npm run check 0 errors/0 warnings; npm run build passed. Browser preview (Chrome 1280×720): right-click opens the menu at the pointer (Learn MIDI note… disabled, Clear pad Del, Show sample in Explorer) and selects without playing, Esc closes; ArrowUp/ArrowRight then Shift+F10 on the focused grid moved `aria-activedescendant` pad-0-0 → pad-1-1 and opened the menu at that pad's centre; 64 `gridcell` in 8 `row` elements with the plan's labels; with a temporary preview `missing_samples` entry the pad showed the `!` glyph and the editor the `Sample missing: …` errbox with LOCATE…; empty pad shows the exact empty text; no console errors (the temporary entry was reverted). D11: `update_pad` already took `key` and `padEditKey` already sends the `pad:{bank}:{x}:{y}:{field}` keys for knob/trim drags, so no Rust change was needed. Notes: the typed-path input, `pathDraft`, the editor's `onassign`/`onremove` props and App's now-unused `assignSample` were removed; the existing `.pad.empty:hover .glyph::before` `+` rule was kept instead of adding a second one (no restyling of existing parts); pads are `tabindex="-1"` and the grid is the single tab stop (mousedown focuses the grid, Enter on the grid presses the selected pad); the reduced-motion steady-red `.pad.missing` rule and the locate flow (pick_file, locate_sample, peaks refetch) could not be exercised here (no Tauri, no OS media query).
 
 ---
 

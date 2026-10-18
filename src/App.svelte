@@ -16,6 +16,7 @@
   import PowerOn from './components/PowerOn.svelte';
   import SampleBrowser from './components/SampleBrowser.svelte';
   import DragGhost from './components/DragGhost.svelte';
+  import ContextMenu from './components/ContextMenu.svelte';
   import { BANK_HOVER_MS, dropTag, hitTest, isAudioName, passedThreshold, physicalToCss, type DropTarget } from './lib/dnd.ts';
   import { invoke as call, listen, isTauri } from './lib/api.ts';
   import { activeNotices, type Confirmation, type Level, type Notice, type NoticeInputs } from './lib/notices.ts';
@@ -26,7 +27,7 @@
   import type { PadInput, Rgb } from './lib/led.ts';
   import { CRT_FACTORS, readDisplay, saveDisplay } from './lib/display.ts';
   import type { CrtLevel } from './lib/display.ts';
-  import { createDefaultPad, createEmptySet, createPreviewSet, GROUP_COLORS, padLabel } from './lib/model.ts';
+  import { createEmptySet, createPreviewSet, GROUP_COLORS, padAriaLabel, padLabel } from './lib/model.ts';
   import type { AppConfig, AudioStatus, DropReport, Group, LightModes, MissingPad, OpenResult, Pad, SamplePeaks, SetModel, Startup } from './lib/model.ts';
   import { solvePlayLayout } from './lib/layout.ts';
   import { hitAmount, hitGroup, runActivity } from './lib/activity.ts';
@@ -70,7 +71,8 @@
   let mixerRenaming = $state<number | null>(null);
   let historyTimer = 0;
   const confirmationTimers = new Set<number>();
-  let assignSeq = 0;
+  let peaksNonce = $state(0);
+  let padMenu = $state<{ x: number; y: number; at: { x: number; y: number } } | null>(null);
 
   let drawer = $state<'editor' | 'browser' | null>(null);
   let libraryDir = $state<string | null>(null);
@@ -183,6 +185,21 @@
     for (const p of bank?.pads ?? []) if (p.sample) names[(7 - p.y) * 8 + p.x] = padLabel(p.sample);
     return names;
   });
+  const missingSet = $derived(new Set(missing.filter(m => m.bank === activeBank).map(m => `${m.x},${m.y}`)));
+  const padLabels = $derived.by(() => {
+    const labels = Array<string>(64).fill('');
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+      const pad = bank?.pads.find(p => p.x === x && p.y === y) ?? null;
+      labels[(7 - y) * 8 + x] = padAriaLabel(pad, x, y, currentSet.mixer.groups, !!pad?.sample && missingSet.has(`${x},${y}`));
+    }
+    return labels;
+  });
+  const padMissing = $derived.by(() => {
+    const flags = Array<boolean>(64).fill(false);
+    for (const p of bank?.pads ?? []) if (p.sample && missingSet.has(`${p.x},${p.y}`)) flags[(7 - p.y) * 8 + p.x] = true;
+    return flags;
+  });
+  const selectedMissing = $derived(!!selectedPad?.sample && !!selXY && missingSet.has(`${selXY.x},${selXY.y}`));
   // The backend light painter streams the real frame; before the first frame (and in the browser
   // preview) the pads show their own colours, pressed pads white.
   const displayLeds = $derived.by<readonly Rgb[]>(() => {
@@ -323,6 +340,7 @@
   // Editor waveform: peaks of the selected pad's sample from the backend (a stand-in shape in the preview).
   $effect(() => {
     const sample = selectedPad?.sample;
+    peaksNonce;
     peaks = null;
     if (!sample) return;
     if (!tauri) { peaks = previewPeaks(sample); return; }
@@ -396,26 +414,36 @@
     else bank.pads.push(pad);
     void invoke('update_pad', { bank: activeBank, pad, key: padEditKey(activeBank, pad.x, pad.y, field) });
   }
-  /** Decode the sample on the backend, then take the set it returns. Resolves false when rejected. */
-  async function assignSample(x: number, y: number, path: string): Promise<boolean> {
-    if (!tauri) {
-      const existing = bank.pads.find((p) => p.x === x && p.y === y);
-      updatePad(existing ? { ...existing, sample: path } : { ...createDefaultPad(x, y), sample: path, color: [...GROUP_COLORS[y % 8]] as [number, number, number] });
-      return true;
-    }
-    const seq = ++assignSeq;
+  function clearPad(x: number, y: number) {
+    void invoke<SetModel>('clear_pad', { bank: activeBank, x, y })
+      .then(set => { if (set) currentSet = set; confirm('Pad cleared'); void refreshMissing(); })
+      .catch(e => showToast(errorText(e)));
+  }
+  async function locateSample(x: number, y: number) {
     try {
-      const set = await invoke<SetModel>('assign_sample', { bank: activeBank, x, y, path, defaultColor: GROUP_COLORS[y % 8] });
-      if (seq === assignSeq) currentSet = set;
-      return true;
-    } catch (e) {
-      if (seq === assignSeq) showToast(`Sample not assigned — ${errorText(e)}`);
-      return false;
-    }
+      const path = await invoke<string | null>('pick_file', { title: 'Locate sample', extensions: ['wav', 'aif', 'aiff', 'flac', 'mp3', 'ogg'] });
+      if (!path) return;
+      const set = await invoke<SetModel>('locate_sample', { bank: activeBank, x, y, path });
+      if (set) currentSet = set;
+      await refreshMissing(); peaksNonce++;
+    } catch (e) { showToast(errorText(e)); }
   }
-  function removePad(x: number, y: number) {
-    void invoke<SetModel>('clear_pad', { bank: activeBank, x, y }).then(set => { if (set) currentSet = set; }).catch(e => showToast(errorText(e)));
+  function openPadMenu(x: number, y: number, at: { x: number; y: number }) {
+    selected = (y + 1) * 10 + x + 1;
+    padMenu = { x, y, at };
   }
+  const padMenuItems = $derived.by(() => {
+    if (!padMenu) return [];
+    const { x, y } = padMenu, pad = bank.pads.find(p => p.x === x && p.y === y);
+    const filled = !!pad?.sample;
+    return [
+      { label: 'Learn MIDI note…', disabled: true },
+      ...(filled ? [
+        { label: 'Clear pad', shortcut: 'Del', action: () => clearPad(x, y) },
+        { label: 'Show sample in Explorer', action: () => void invoke('reveal_path', { path: pad!.sample }).catch(e => showToast(errorText(e))) },
+      ] : []),
+    ];
+  });
   function updateGroup(index: number, group: Group) {
     currentSet.mixer.groups[index] = group;
     void invoke('update_group', { group: index, groupData: group });
@@ -519,7 +547,7 @@
       else if (key === 'f2') {
         const channel = target.closest<HTMLElement>('.mx-col[data-group]');
         if (channel) mixerRenaming = Number(channel.dataset.group); else renaming = activeBank;
-      } else if (key === 'delete' && selXY) { removePad(selXY.x, selXY.y); confirm('Pad cleared'); }
+      } else if (key === 'delete' && selXY) { if (selectedPad?.sample) clearPad(selXY.x, selXY.y); }
       else if (gridFocused && ['arrowleft', 'arrowright', 'arrowup', 'arrowdown'].includes(key)) {
         const xy = selXY ?? { x: 0, y: 0 };
         const x = Math.max(0, Math.min(7, xy.x + (key === 'arrowright' ? 1 : key === 'arrowleft' ? -1 : 0)));
@@ -544,6 +572,7 @@
   onpointerup={e => { if (drag && !drag.external) { drag.ctrl = e.ctrlKey; void finishDrop(); } }} onpointercancel={cancelDrag} />
 
 {#if drag?.active}<DragGhost x={drag.x} y={drag.y} color={drag.color} label={drag.label} />{/if}
+{#if padMenu}<ContextMenu x={padMenu.at.x} y={padMenu.at.y} items={padMenuItems} onclose={() => { padMenu = null; }} />{/if}
 
 <div class="instrument" data-crt={crt} style:--crt={CRT_FACTORS[crt]}>
   <div class="console" class:game-full={gameFull}>
@@ -587,7 +616,7 @@
                 <div class="pair">
                   <LaunchpadPanel
                     bind:this={launchpadPanel}
-                    ondragpad={beginPadDrag} dropTarget={dropXY}
+                    ondragpad={beginPadDrag} onmenu={openPadMenu} labels={padLabels} missing={padMissing} dropTarget={dropXY}
                     dropTag={dragTag} {invalidDrop} hoverBank={hoverBank === activeBank ? null : hoverBank}
                     bind:renaming
                     leds={displayLeds}
@@ -627,14 +656,16 @@
             <div class="drawer">
               <PadEditor
                 bind:this={padEditor} drop={dropTarget?.kind === 'editor' && drag?.source === 'files' && !invalidDrop}
+                bank={activeBank}
                 x={selXY.x}
                 y={selXY.y}
                 pad={selectedPad}
                 groups={currentSet.mixer.groups}
                 {peaks}
+                missing={selectedMissing}
                 onupdate={updatePad}
-                onassign={assignSample}
-                onremove={removePad}
+                onlocate={() => void locateSample(selXY.x, selXY.y)}
+                onclear={() => clearPad(selXY.x, selXY.y)}
                 ontrigger={(x, y) => void invoke('trigger_pad', { x, y })}
                 onrelease={(x, y) => void invoke('release_pad', { x, y })}
               />

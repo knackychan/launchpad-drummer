@@ -6,8 +6,11 @@
   import { ledToCss } from '../lib/led.ts';
   import { DB_FLOOR, fmtDb, fmtSemis } from '../lib/mix.ts';
 
-  let { x, y, pad, groups, peaks, onupdate, onassign, onremove, ontrigger, onrelease, drop = false }: {
+  let { bank, x, y, pad, groups, peaks, missing, onupdate, onlocate, onclear, ontrigger, onrelease, drop = false }: {
     drop?: boolean;
+    bank: number;
+    /** The pad's sample file cannot be found. */
+    missing: boolean;
     x: number;
     y: number;
     /** null = empty pad */
@@ -16,16 +19,14 @@
     peaks: SamplePeaks | null;
     /** `field` names the control being dragged so the backend can fold a drag into one undo step. */
     onupdate: (pad: Pad, field?: string) => void;
-    /** Load and assign a sample (path relative to the set folder, or any file). Resolves false on failure. */
-    onassign: (x: number, y: number, path: string) => Promise<boolean>;
-    onremove: (x: number, y: number) => void;
+    onlocate: () => void;
+    onclear: () => void;
     ontrigger: (x: number, y: number) => void;
     onrelease: (x: number, y: number) => void;
   } = $props();
 
   let showRgb = $state(false);
   let canvas = $state<HTMLCanvasElement>();
-  let pathDraft = $state('');
   let root: HTMLDivElement;
   export function rect() { return root.getBoundingClientRect(); }
 
@@ -92,43 +93,27 @@
     const near = [pad.trimStartMs, pad.trimEndMs ?? len].some((v) => Math.abs((v / len) * r.width - px) < 8);
     canvas.style.cursor = near ? 'ew-resize' : 'pointer';
   }
-  async function setSample(input: HTMLInputElement) {
-    const sample = input.value.trim();
-    if (!sample || sample === pad?.sample) return;
-    const ok = await onassign(x, y, sample);
-    // A rejected sample leaves the pad as it was; show that, not the rejected text.
-    if (!ok) { pathDraft = ''; input.value = pad?.sample ?? ''; }
-  }
 </script>
 
-<div bind:this={root} class="editor screen" class:drop aria-label="Pad editor">
+<div bind:this={root} class="editor screen" class:drop aria-label="Pad editor, bank {bank + 1}">
   <div class="ed-head">
     <span class="lcd lcd-dim">R{y + 1}·C{x + 1}</span>
     <span class="lcd ed-name">{pad?.sample ? padLabel(pad.sample).toUpperCase() : 'EMPTY'}</span>
     {#if pad && peaks}<span class="lcd lcd-dim small">{(peaks.lengthMs / 1000).toFixed(2)} s · {(peaks.rate / 1000).toFixed(1)} kHz</span>{/if}
     {#if pad}
-      <button type="button" class="key small clear" title="Clear pad" onclick={() => onremove(x, y)}>CLEAR</button>
+      <button type="button" class="key small clear" title="Clear pad" onclick={onclear}>CLEAR</button>
     {/if}
   </div>
 
-  <div class="ed-sec">
-    <label class="silk" for="pad-sample">SAMPLE</label>
-    <input
-      id="pad-sample"
-      class="lcd screen path"
-      type="text"
-      spellcheck="false"
-      placeholder="samples/kick.wav"
-      value={pad?.sample ?? pathDraft}
-      oninput={(e) => { pathDraft = e.currentTarget.value; }}
-      onchange={(e) => void setSample(e.currentTarget)}
-      onkeydown={(e) => e.stopPropagation()}
-    />
-  </div>
-
   {#if !pad}
-    <div class="empty-msg">Empty pad.<br />Type a sample path (relative to the set folder, or any file) and press Enter.</div>
+    <div class="empty-msg">Empty pad. Drop a sample here, drag one from the browser, or press Enter on a file in the browser.</div>
   {:else}
+    {#if missing}
+      <div class="errbox">
+        <span class="errtext">Sample missing: {pad.sample}</span>
+        <button type="button" class="key small" onclick={onlocate}>LOCATE…</button>
+      </div>
+    {/if}
     <div class="ed-sec">
       <div class="silk">SAMPLE · TRIM</div>
       <canvas bind:this={canvas} class="wave" aria-label="Waveform. Drag the handles to trim. Click to audition." onpointerdown={waveDown} onpointermove={waveHover}></canvas>
@@ -214,7 +199,7 @@
     <div class="ed-sec">
       <span class="silk">MIDI</span>
       <div class="ed-row">
-        <button type="button" class="key" aria-disabled="true" title="MIDI learn — not fitted yet">LEARN</button>
+        <button type="button" class="key" aria-disabled="true" title="MIDI learn — not wired yet">LEARN</button>
         <span class="tooltip-note">Bind a note from another MIDI device</span>
       </div>
     </div>
@@ -233,7 +218,8 @@
   .ed-row.tight { gap: 4px; }
   .ed-row.knobs { gap: 22px; align-items: flex-start; flex-wrap: nowrap; }
   .ed-row.rgb { gap: 14px; }
-  .path { height: 26px; padding: 0 8px; border: 0; font-size: 12px; width: 100%; }
+  .errbox { border: 1px solid rgba(255,59,48,.5); border-radius: 4px; padding: 8px; display: flex; gap: 8px; align-items: center; color: var(--error); font: 400 11px/1.4 var(--f-lcd); }
+  .errtext { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   .wave { display: block; width: 100%; height: 72px; border-radius: 2px; background: var(--glass); box-shadow: inset 0 0 0 1px var(--line); cursor: pointer; touch-action: none; }
   .trim { display: flex; justify-content: space-between; }
   .swatches { display: grid; grid-template-columns: repeat(8, 26px); gap: 6px; }
