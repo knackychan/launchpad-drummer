@@ -1,0 +1,9 @@
+[package]
+name = "lp-probe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lpd-core = { path = "../../crates/lpd-core" }
+anyhow = { workspace = true }
+midir = { workspace = true }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/lpd-core", "src-tauri"]
+members = ["crates/lpd-core", "src-tauri", "tools/lp-probe"]
 
 [workspace.dependencies]
 anyhow = "1"
