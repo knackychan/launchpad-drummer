@@ -2,6 +2,7 @@
 
 mod biquad;
 mod engine;
+pub mod host;
 mod sample;
 mod voice;
 
