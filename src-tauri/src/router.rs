@@ -25,6 +25,7 @@ pub struct Router {
     /// Samples no longer reachable from the caches. The audio thread may still hold the last
     /// strong reference, so they are freed here, off the audio thread, once nothing else does.
     retired: Vec<Arc<Sample>>,
+    auditions: Vec<Arc<Sample>>,
     bank: usize,
     /// Held pads by pad id (bank * 64 + y * 8 + x).
     held: HashSet<u16>,
@@ -47,6 +48,7 @@ impl Router {
             set,
             samples,
             retired: Vec::new(),
+            auditions: Vec::with_capacity(2),
             bank: 0,
             held: HashSet::new(),
             voice_counts: HashMap::new(),
@@ -85,6 +87,20 @@ impl Router {
 
     pub fn samples(&self) -> &HashMap<String, Arc<Sample>> {
         &self.samples
+    }
+
+    pub fn audition(&mut self, sample: Arc<Sample>) {
+        if self.auditions.len() == 2 {
+            let old = self.auditions.remove(0);
+            // A queued audition may still own it even after two newer requests.
+            self.retire([old]);
+        }
+        self.auditions.push(sample.clone());
+        let _ = self.audio_tx.push(Command::Audition { sample });
+    }
+
+    pub fn stop_audition(&mut self) {
+        let _ = self.audio_tx.push(Command::StopAudition);
     }
 
     /// Put a decoded sample into the active cache; the entry it replaces is retired.

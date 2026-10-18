@@ -7,7 +7,9 @@ mod sample;
 mod voice;
 
 pub use biquad::LowPass;
-pub use engine::{Command, Engine, Event, GroupParams, GROUPS, MAX_BLOCK, MAX_VOICES};
+pub use engine::{
+    Command, Engine, Event, GroupParams, AUDITION_PAD, GROUPS, MAX_BLOCK, MAX_VOICES,
+};
 pub use sample::Sample;
 pub use voice::{PlayParams, Voice};
 

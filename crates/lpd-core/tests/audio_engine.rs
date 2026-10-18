@@ -1,6 +1,51 @@
 use lpd_core::audio::*;
 use std::sync::Arc;
 
+#[test]
+fn audition_bypasses_groups_but_obeys_master_and_emits_no_pad_events() {
+    let (mut engine, mut events) = Engine::new(SR);
+    for group in 0..8 {
+        engine.handle(Command::SetGroup {
+            group,
+            params: GroupParams {
+                mute: true,
+                ..Default::default()
+            },
+        });
+    }
+    let sample = constant(100, 0.5);
+    engine.handle(Command::Audition {
+        sample: sample.clone(),
+    });
+    assert!(render(&mut engine, 100).iter().any(|v| *v > 0.0));
+    engine.handle(Command::SetMasterGain(0.0));
+    engine.handle(Command::Audition {
+        sample: sample.clone(),
+    });
+    assert!(render(&mut engine, 100).iter().all(|v| *v == 0.0));
+    assert!(events.pop().is_err());
+}
+
+#[test]
+fn audition_replacement_and_stop_fade_without_clicks() {
+    let (mut engine, mut events) = Engine::new(SR);
+    let a = constant(48000, 0.5);
+    let b = constant(48000, -0.5);
+    engine.handle(Command::Audition { sample: a.clone() });
+    let mut out = left(&render(&mut engine, 1000));
+    engine.handle(Command::Audition { sample: b.clone() });
+    out.extend(left(&render(&mut engine, 1000)));
+    engine.handle(Command::StopAudition);
+    out.extend(left(&render(&mut engine, 1000)));
+    let max_step = out
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(0.0, f32::max);
+    assert!(max_step < 0.05, "step {max_step}");
+    assert!(out[out.len() - 100..].iter().all(|v| *v == 0.0));
+    assert!(events.pop().is_err());
+}
+
 const SR: u32 = 48_000;
 
 fn constant(frames: usize, value: f32) -> Arc<Sample> {

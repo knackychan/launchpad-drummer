@@ -6,6 +6,36 @@ use std::sync::Arc;
 static ALLOC: AllocDisabler = AllocDisabler;
 
 #[test]
+fn audition_paths_never_allocate_or_free() {
+    let (mut engine, _) = Engine::new(48_000);
+    let samples: Vec<_> = (0..4)
+        .map(|_| {
+            Arc::new(Sample {
+                rate: 48_000,
+                data: vec![0.25; 4096],
+            })
+        })
+        .collect();
+    let mut out = [0.0; 1024];
+    assert_no_alloc(|| {
+        for sample in &samples {
+            engine.handle(Command::Audition {
+                sample: sample.clone(),
+            });
+            engine.render(&mut out);
+            engine.render(&mut out);
+        }
+        engine.handle(Command::StopAudition);
+        engine.render(&mut out);
+        engine.handle(Command::Audition {
+            sample: samples[0].clone(),
+        });
+        engine.handle(Command::StopAll);
+        engine.render(&mut out);
+    });
+}
+
+#[test]
 fn audio_callback_never_allocates() {
     let (mut engine, mut events) = Engine::new(48_000);
     let (mut tx, mut rx) = rtrb::RingBuffer::new(256);

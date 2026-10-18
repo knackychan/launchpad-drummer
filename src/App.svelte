@@ -14,17 +14,18 @@
   import NoticeLcd from './components/NoticeLcd.svelte';
   import SetMenu from './components/SetMenu.svelte';
   import PowerOn from './components/PowerOn.svelte';
+  import SampleBrowser from './components/SampleBrowser.svelte';
   import { invoke as call, listen, isTauri } from './lib/api.ts';
   import { activeNotices, type Confirmation, type Level, type Notice, type NoticeInputs } from './lib/notices.ts';
   import { middleTruncate } from './lib/format.ts';
   import { padForKey } from './lib/keymap.ts';
-  import { runEsc } from './lib/esc.ts';
+  import { pushEsc, runEsc } from './lib/esc.ts';
   import { createLedFrame, ledToCss } from './lib/led.ts';
   import type { PadInput, Rgb } from './lib/led.ts';
   import { CRT_FACTORS, readDisplay, saveDisplay } from './lib/display.ts';
   import type { CrtLevel } from './lib/display.ts';
   import { createDefaultPad, createEmptySet, createPreviewSet, GROUP_COLORS, padLabel } from './lib/model.ts';
-  import type { AudioStatus, Group, LightModes, MissingPad, OpenResult, Pad, SamplePeaks, SetModel, Startup } from './lib/model.ts';
+  import type { AppConfig, AudioStatus, DropReport, Group, LightModes, MissingPad, OpenResult, Pad, SamplePeaks, SetModel, Startup } from './lib/model.ts';
   import { solvePlayLayout } from './lib/layout.ts';
   import { hitAmount, hitGroup, runActivity } from './lib/activity.ts';
   import { audioLabel, IDLE_SAVE, padEditKey } from './lib/status.ts';
@@ -47,7 +48,7 @@
   let leds = $state<readonly Rgb[]>(createLedFrame());
   let frameSeen = $state(false);
   let pressed = $state<number[]>([]);
-  let selected = $state<number | null>(21);
+  let selected = $state<number | null>(null);
 
   let currentSet = $state<SetModel>(tauri ? createEmptySet() : createPreviewSet());
   let activeBank = $state(0);
@@ -69,7 +70,9 @@
   const confirmationTimers = new Set<number>();
   let assignSeq = 0;
 
-  let drawer = $state<'editor' | null>(null);
+  let drawer = $state<'editor' | 'browser' | null>(null);
+  let libraryDir = $state<string | null>(null);
+  $effect(() => { if (drawer) return pushEsc(() => { drawer = null; }); });
   let drawerPinned = $state(true);
   let teleFolded = $state(false);
   let bayW = $state(0);
@@ -149,6 +152,7 @@
       if (startup.kind === 'loaded') { setPath = startup.path; setName = startup.name; backup = startup.fromBackup ? { savedAt: startup.backupSavedAt } : null; }
       await refreshMissing();
       history = await invoke<typeof history>('history_state');
+      libraryDir = (await invoke<AppConfig>('get_config')).libraryDir;
       if (!tauri) return;
       const [set, b, status, save] = await Promise.all([
         invoke<SetModel>('get_current_set'),
@@ -332,6 +336,20 @@
     }
   }
 
+  async function loadBrowserFile(path: string) {
+    if (!selXY) { showToast('Select a pad first'); return; }
+    try {
+      const report = await invoke<DropReport>('load_into_pad', { bank: activeBank, ...selXY, path });
+      if (report) {
+        currentSet = report.set;
+        if (report.imported) confirm(`Imported ${report.imported}`);
+        if (report.leftover) showToast(`${report.leftover} file${report.leftover === 1 ? '' : 's'} not imported — bank full`);
+        if (report.rejected && !report.imported) showToast('Not an audio file');
+        refreshHistory(); await refreshMissing();
+      }
+    } catch (e) { showToast(errorText(e)); }
+  }
+
   /** Games own the Launchpad pads and LEDs; every other screen leaves them to the sampler. */
   function setMode(next: typeof mode) {
     releaseKeyboard();
@@ -378,7 +396,9 @@
       else if (key === '1') setMode('play');
       else if (key === ',') setMode('setup');
       else if (key === '2') { /* TRAIN remains a blank cap. */ }
-      else if (key === 'e' && mode === 'play') drawer = drawer ? null : 'editor';
+      else if ((key === 'e' || key === 'b') && mode === 'play') {
+        const panel = key === 'e' ? 'editor' : 'browser'; drawer = drawer === panel ? null : panel;
+      }
       else handled = false;
     } else if (mode === 'play' && startup.kind === 'loaded') {
       const gridFocused = !!target.closest('.pad-grid') || document.activeElement === document.body;
@@ -481,7 +501,10 @@
             </div>
           </div>
 
-          {#if drawer && selXY}
+          {#if drawer === 'browser'}
+            <div class="drawer"><SampleBrowser bind:libraryDir selected={selXY ? { bank: activeBank, ...selXY } : null}
+              onclose={() => drawer = null} onload={path => void loadBrowserFile(path)} ondragfile={() => {}} onerror={showToast} /></div>
+          {:else if drawer === 'editor' && selXY}
             <div class="drawer">
               <PadEditor
                 x={selXY.x}
@@ -498,8 +521,8 @@
             </div>
           {/if}
           <div class="dtabs" role="tablist" aria-label="Side panel" aria-orientation="vertical">
-            <button class="key dtab blank" aria-disabled="true" title="Sample browser — not fitted yet" aria-label="Browser — not fitted yet"></button>
-            <button class="key dtab" class:on={drawer === 'editor'} role="tab" aria-selected={drawer === 'editor'} title="Pad editor (Ctrl+E)" onclick={() => { drawer = drawer ? null : 'editor'; }}>EDITOR</button>
+            <button class="key dtab" class:on={drawer === 'browser'} role="tab" aria-selected={drawer === 'browser'} title="Sample browser (Ctrl+B)" onclick={() => { drawer = drawer === 'browser' ? null : 'browser'; }}>BROWSER</button>
+            <button class="key dtab" class:on={drawer === 'editor'} role="tab" aria-selected={drawer === 'editor'} title="Pad editor (Ctrl+E)" onclick={() => { drawer = drawer === 'editor' ? null : 'editor'; }}>EDITOR</button>
             <button
               class="key round pin"
               class:on={drawerPinned}

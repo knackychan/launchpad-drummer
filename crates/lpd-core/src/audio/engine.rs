@@ -4,6 +4,7 @@ use std::f32::consts::{FRAC_PI_4, SQRT_2};
 use std::sync::Arc;
 
 pub const MAX_VOICES: usize = 32;
+pub const AUDITION_PAD: u16 = u16::MAX;
 /// Extra slots so voices that are fading out do not count against MAX_VOICES.
 const SLOTS: usize = MAX_VOICES + 8;
 pub const GROUPS: usize = 8;
@@ -59,6 +60,10 @@ pub enum Command {
         params: GroupParams,
     },
     SetMasterGain(f32),
+    Audition {
+        sample: Arc<Sample>,
+    },
+    StopAudition,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +89,11 @@ pub struct Engine {
     master_gain: f32,
     next_age: u64,
     events: Producer<Event>,
+    auditions: [Voice; 2],
+    audition_age: u64,
+    audition_attack: [usize; 2],
+    audition_l: Vec<f32>,
+    audition_r: Vec<f32>,
 }
 
 impl Engine {
@@ -105,6 +115,11 @@ impl Engine {
             master_gain: 1.0,
             next_age: 0,
             events,
+            auditions: [Voice::idle(), Voice::idle()],
+            audition_age: 0,
+            audition_attack: [0; 2],
+            audition_l: vec![0.0; MAX_BLOCK],
+            audition_r: vec![0.0; MAX_BLOCK],
         };
         (engine, rx)
     }
@@ -142,6 +157,9 @@ impl Engine {
                 for v in &mut self.voices {
                     v.fade_out(frames);
                 }
+                for v in &mut self.auditions {
+                    v.fade_out(frames);
+                }
             }
             Command::SetGroup { group, params } => {
                 if let Some(g) = self.groups.get_mut(group as usize) {
@@ -151,6 +169,42 @@ impl Engine {
                 }
             }
             Command::SetMasterGain(gain) => self.master_gain = gain,
+            Command::StopAudition => {
+                let frames = self.frames_for(STOP_FADE_MS);
+                for v in &mut self.auditions {
+                    v.fade_out(frames);
+                }
+            }
+            Command::Audition { sample } => {
+                let frames = self.frames_for(RESTART_FADE_MS);
+                for v in &mut self.auditions {
+                    v.fade_out(frames);
+                }
+                let slot = self
+                    .auditions
+                    .iter()
+                    .position(|v| !v.is_active())
+                    .unwrap_or_else(|| {
+                        if self.auditions[0].age <= self.auditions[1].age {
+                            0
+                        } else {
+                            1
+                        }
+                    });
+                let params = PlayParams {
+                    gain: 1.0,
+                    pitch_semitones: 0.0,
+                    start_frame: 0,
+                    end_frame: sample.frames(),
+                    choke_group: None,
+                    mix_group: 0,
+                    hold: false,
+                };
+                let ratio = sample.rate as f64 / self.rate as f64;
+                self.auditions[slot].start(AUDITION_PAD, sample, params, ratio, self.audition_age);
+                self.audition_age = self.audition_age.wrapping_add(1);
+                self.audition_attack[slot] = 0;
+            }
         }
     }
 
@@ -242,6 +296,22 @@ impl Engine {
             for i in 0..n {
                 out[2 * i] += g.lp_l.process(g.buf_l[i]) * gl;
                 out[2 * i + 1] += g.lp_r.process(g.buf_r[i]) * gr;
+            }
+        }
+        let attack_frames = self.frames_for(RESTART_FADE_MS).max(1);
+        for (slot, voice) in self.auditions.iter_mut().enumerate() {
+            if !voice.is_active() {
+                continue;
+            }
+            self.audition_l[..n].fill(0.0);
+            self.audition_r[..n].fill(0.0);
+            voice.render_add(&mut self.audition_l[..n], &mut self.audition_r[..n]);
+            for i in 0..n {
+                let gain =
+                    self.audition_attack[slot].min(attack_frames) as f32 / attack_frames as f32;
+                self.audition_attack[slot] = (self.audition_attack[slot] + 1).min(attack_frames);
+                out[2 * i] += self.audition_l[i] * gain;
+                out[2 * i + 1] += self.audition_r[i] * gain;
             }
         }
         for s in out.iter_mut() {

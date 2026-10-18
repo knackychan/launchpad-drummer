@@ -7,6 +7,43 @@ use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+}
+
+pub fn list_dir(path: &Path) -> Result<Vec<DirEntry>> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        let metadata = entry.metadata()?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & (0x2 | 0x4) != 0 {
+                continue;
+            }
+        }
+        let is_dir = metadata.is_dir();
+        if is_dir || metadata.is_file() && kit::ops::is_audio_path(&entry.path()) {
+            entries.push(DirEntry {
+                name,
+                path: entry.path().to_string_lossy().into_owned(),
+                is_dir,
+            });
+        }
+    }
+    entries.sort_by_key(|e| (!e.is_dir, e.name.to_lowercase()));
+    Ok(entries)
+}
+
 pub struct LoadedKit {
     pub set: Set,
     pub dir: PathBuf,

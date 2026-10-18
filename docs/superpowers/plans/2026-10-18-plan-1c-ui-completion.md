@@ -445,7 +445,7 @@ pub struct DropReport { pub set: Set, pub imported: usize, pub leftover: usize, 
 
 Task 4 verification (2026-10-19): 3 core operations tests and 2 state tests RED→GREEN; fmt clean, workspace tests passed, npm 36 passed, Svelte 0 errors/warnings, build passed. D11: imports use prepare_sample and edit_in with request/epoch checks; changed targets reject a stale batch. Moving preserves mix routing (the initial test expected the destination row incorrectly and was corrected).
 
-### Task 5: Sample browser and audition
+### Task 5: Sample browser and audition — DONE
 
 **Purpose.** UI spec 4.4, plus 7.3: "Audition plays a file once through the master bus, not through a pad."
 
@@ -499,7 +499,9 @@ export function keyNav(rows: TreeNode[], index: number, key: string): { index: n
 
 **Do not:** route auditions through a pad or group; add a search box (spec: ask before adding); scan the library recursively up front.
 
-**Done when:** [ ] tests first → PASS; [ ] preview: the BROWSER tab opens the browser, the keyboard moves the cursor, Space marks ♪, Enter with no pad selected shows the error confirmation; [ ] full verification + build; commit `feat: sample browser with audition`.
+**Done when:** [x] tests first → PASS; [x] preview: the BROWSER tab opens the browser, the keyboard moves the cursor, Space marks ♪, Enter with no pad selected shows the error confirmation; [x] full verification + build; commit `feat: sample browser with audition`.
+
+Task 5 verification (2026-10-19): listed engine/no-allocation/tree tests RED→GREEN; directory filter/sort test also RED→GREEN. fmt/workspace tests passed; npm 38 passed; Svelte 0 errors/warnings; build passed. Edge 1280×720: browser folder navigation, Space audition marker, Enter with no selection error, Esc close, Ctrl+B reopen; no runtime errors/overflow. Callback uses two audition voices and a 3 ms attack to satisfy the click threshold. D11 retirement also retains older queued auditions beyond the two latest references. No pad is preselected at startup so loading requires the player’s choice.
 
 ### Task 6: Drag and drop
 

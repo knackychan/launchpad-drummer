@@ -248,6 +248,49 @@ pub(crate) async fn drop_files(
 }
 
 #[tauri::command]
+pub(crate) async fn list_dir(path: String) -> Result<Vec<crate::store::DirEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::store::list_dir(std::path::Path::new(&path)).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn audition_file(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    worker(&state, move |s| {
+        let sample = lpd_core::kit::decode_file(std::path::Path::new(&path))
+            .map_err(|e| format!("{e:#}"))?;
+        s.router
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .audition(std::sync::Arc::new(sample));
+        Ok(())
+    })
+    .await
+}
+
+#[tauri::command]
+pub(crate) fn stop_audition(state: State<'_, AppState>) {
+    state
+        .router
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .stop_audition();
+}
+
+#[tauri::command]
+pub(crate) async fn load_into_pad(
+    bank: usize,
+    x: u8,
+    y: u8,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<DropReport, String> {
+    worker(&state, move |s| s.drop_files(bank, x, y, vec![path])).await
+}
+
+#[tauri::command]
 pub(crate) async fn locate_sample(
     bank: usize,
     x: u8,
