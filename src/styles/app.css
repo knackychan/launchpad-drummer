@@ -70,6 +70,9 @@ button:disabled, [aria-disabled='true'] { cursor: default; }
 .device-status { display: flex; align-items: center; gap: 6px; padding: 0; height: 22px; background: none; border: none; }
 .lamp { width: 6px; height: 6px; background: var(--led-off); border-radius: 50%; box-shadow: 0 0 0 1px rgba(0,0,0,.8); flex-shrink: 0; }
 .lamp.stopped { background: var(--error); box-shadow: 0 0 5px rgba(255,61,79,.4); }
+.lamp.connected { background: var(--ok); box-shadow: 0 0 7px var(--ok); }
+.lamp.warn { background: var(--warn); }
+.lamp.bootloader { background: var(--error); box-shadow: 0 0 7px var(--error); }
 .setup { max-width: 860px; margin: 24px auto; }
 .games-stage { height: 100%; min-height: 0; display: grid; grid-template-columns: 178px minmax(0,1fr) 204px; gap: 12px; }
 .game-picker { padding: 22px 10px 10px; display: flex; flex-direction: column; gap: 8px; }

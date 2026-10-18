@@ -48,6 +48,7 @@
   }
   function padInput(input: PadInput) {
     if (mode === 'games' && game === 'horde') { hordeComponent?.padInput(input.note, input.pressed); return; }
+    if (input.note % 10 === 9) return;
     if (input.pressed) selected = input.note;
     sendFrame(applyLedUpdates(leds, [{ note: input.note, rgb: input.pressed ? [63, 63, 63] : [0, 0, 0] }]));
   }
@@ -67,7 +68,7 @@
       <button class="key small" aria-label="Redo" disabled>
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m13 4 4 4-4 4m4-4H9a5 5 0 0 0 0 10" /></svg>
       </button>
-      <div class="notice screen lcd" role="status">Launchpad not connected — on-screen pads available</div>
+      <div class="notice screen lcd" role="status">{deviceState === 'connected' ? 'Launchpad MK2 connected' : deviceState === 'busy' ? 'Launchpad port busy — close other MIDI apps' : deviceState === 'bootloader' ? 'Launchpad bootloader — run updater' : 'Launchpad not connected — on-screen pads available'}</div>
     </header>
 
     <nav class="mode-rail" aria-label="Mode">
@@ -130,8 +131,8 @@
 
     <footer class="status-strip">
       {#each ['LAUNCHPAD', 'LCXL', 'AUDIO'] as device}
-        <button class="device-status" onclick={() => { mode = 'setup'; }} aria-label="{device}: {device === 'AUDIO' ? 'stopped' : 'not connected'}. Open Setup">
-          <span class="lamp" class:stopped={device === 'AUDIO'}></span><span class="silk">{device}</span>
+        <button class="device-status" onclick={() => { mode = 'setup'; }} aria-label="{device}: {device === 'LAUNCHPAD' ? deviceState : device === 'AUDIO' ? 'stopped' : 'not connected'}. Open Setup">
+          <span class="lamp" class:stopped={device === 'AUDIO'} class:connected={device === 'LAUNCHPAD' && deviceState === 'connected'} class:warn={device === 'LAUNCHPAD' && deviceState === 'busy'} class:bootloader={device === 'LAUNCHPAD' && deviceState === 'bootloader'}></span><span class="silk">{device}</span>
         </button>
       {/each}
       <span class="lcd lcd-dim">AUDIO STOPPED</span>
