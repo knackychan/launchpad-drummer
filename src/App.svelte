@@ -89,6 +89,7 @@
   let hoverBank = $state<number | null>(null);
   let bankTimer = 0;
   let suppressClick = false;
+  let pointerHeld = false;
   let padRects: ReturnType<LaunchpadPanel['rects']> = [];
   let bankRects: ReturnType<LaunchpadPanel['bankRects']> = [];
   const invalidDrop = $derived(drag?.source === 'files' && !drag.paths.some(isAudioName));
@@ -99,7 +100,7 @@
     return () => { document.body.style.cursor = previous; };
   });
   function measureDropTargets() { padRects = launchpadPanel?.rects() ?? []; bankRects = launchpadPanel?.bankRects() ?? []; }
-  function cancelDrag() { clearTimeout(bankTimer); drag = null; dropTarget = null; hoverBank = null; }
+  function cancelDrag() { if (drag?.active && !drag.external && pointerHeld) suppressClick = true; clearTimeout(bankTimer); drag = null; dropTarget = null; hoverBank = null; }
   function beginPadDrag(note: number, e: PointerEvent) {
     const x = note % 10 - 1, y = Math.floor(note / 10) - 1;
     const pad = bank.pads.find(p => p.x === x && p.y === y);
@@ -266,6 +267,14 @@
     document.addEventListener('fullscreenchange', onFullscreen);
     const swallowDragClick = (e: MouseEvent) => { if (suppressClick) { e.preventDefault(); e.stopImmediatePropagation(); suppressClick = false; } };
     window.addEventListener('click', swallowDragClick, true);
+    const trackDown = () => { pointerHeld = true; };
+    const trackUp = () => { pointerHeld = false; if (suppressClick) window.setTimeout(() => { suppressClick = false; }, 0); };
+    const trackCtrl = (e: KeyboardEvent) => { if (e.key === 'Control' && drag && !drag.external) drag.ctrl = e.type === 'keydown'; };
+    window.addEventListener('pointerdown', trackDown, true);
+    window.addEventListener('pointerup', trackUp, true);
+    window.addEventListener('pointercancel', trackUp, true);
+    window.addEventListener('keydown', trackCtrl);
+    window.addEventListener('keyup', trackCtrl);
 
     const unlisten: (() => void)[] = [];
     let disposed = false;
@@ -299,6 +308,11 @@
       confirmationTimers.forEach(clearTimeout);
       cancelDrag();
       window.removeEventListener('click', swallowDragClick, true);
+      window.removeEventListener('pointerdown', trackDown, true);
+      window.removeEventListener('pointerup', trackUp, true);
+      window.removeEventListener('pointercancel', trackUp, true);
+      window.removeEventListener('keydown', trackCtrl);
+      window.removeEventListener('keyup', trackCtrl);
       stopActivity();
       document.removeEventListener('fullscreenchange', onFullscreen);
       unlisten.forEach((fn) => fn());
@@ -526,7 +540,7 @@
 
 <svelte:window onkeydown={keydown} onkeyup={keyup} onblur={() => { releaseKeyboard(); cancelDrag(); }}
   onpointermove={e => { if (drag && !drag.external) updateDrag(e.clientX, e.clientY, e.ctrlKey); }}
-  onpointerup={() => { if (drag && !drag.external) void finishDrop(); }} onpointercancel={cancelDrag} />
+  onpointerup={e => { if (drag && !drag.external) { drag.ctrl = e.ctrlKey; void finishDrop(); } }} onpointercancel={cancelDrag} />
 
 {#if drag?.active}<DragGhost x={drag.x} y={drag.y} color={drag.color} label={drag.label} />{/if}
 
