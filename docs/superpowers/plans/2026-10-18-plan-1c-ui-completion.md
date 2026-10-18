@@ -2,188 +2,378 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build everything the UI spec (`../specs/2026-10-17-ui-design.md`) and the engine spec (`../specs/2026-10-17-drum-sampler-design.md`) still describe but the app does not do yet: persistence, notices, undo, editing by drag and drop, browser, telemetry feed, audio and MIDI setup, Launch Control XL, MIDI learn, sequencer and keys.
+**Goal:** Build everything the UI spec (`../specs/2026-10-17-ui-design.md`) and the engine spec (`../specs/2026-10-17-drum-sampler-design.md`) describe for Part 1 that the app does not do yet: persistence, notices, undo, drag and drop, sample browser, telemetry feed, audio and MIDI setup, Launch Control XL, MIDI learn, step sequencer, keys instrument.
 
-**Architecture:** The router (Rust) owns the one `Set`; every kit edit goes through one `AppState::edit` path that records undo, marks the set dirty for autosave and returns the new set. Pure logic (history, kit ops, LCXL codec, sequencer timing, FFT, synth) lives in `lpd-core` with integration tests; `src-tauri` wires threads, devices and Tauri commands; the Svelte UI only edits and draws. Hardware pad hits never pass through the UI.
+**Architecture:** The router (Rust) owns the single `Set`. Every kit edit goes through `AppState::edit`, which records undo, marks the set dirty for autosave and leaves the router holding the new set. Pure logic (history, kit ops, learn, LCXL codec, sequencer timing, FFT, synth) lives in `lpd-core` with integration tests. `src-tauri` wires threads, devices and Tauri commands. The Svelte UI only edits and draws. Hardware pad hits never pass through the UI.
 
-**Tech Stack:** Rust (lpd-core, Tauri 2, cpal 0.15, midir 0.10, rtrb, symphonia, rustysynth, tauri-plugin-dialog, tauri-plugin-opener), Svelte 5 + TypeScript, `node --test` for `src/lib/*.test.ts`.
+**Tech Stack:** Rust (lpd-core, Tauri 2, cpal 0.15, midir 0.10, rtrb 0.3, symphonia 0.5, rustysynth 1, tauri-plugin-dialog 2, tauri-plugin-opener 2), Svelte 5 + TypeScript 5.9, Vite 8, `node --test` for `src/lib/*.test.ts`.
 
-**Format note:** this plan follows plan 1B's format (task-level contracts, not full code listings): the scope is ~18 tasks over three layers. Each task fixes the interfaces (Rust signatures, Tauri command names and camelCase args, event names and payloads, TS types) and the tests to write; later tasks rely on those names exactly. The implementer writes the code, TDD, inside those contracts.
+**How to read this plan.** Every task is self-contained: it restates the spec text it implements (so nobody has to interpret a section number), names the mockup lines to copy the look and behaviour from, fixes every new name (Rust items, Tauri commands with their exact JS argument keys, events with payload shapes, TS types, CSS classes, user-visible strings), lists the tests with expected values, and ends with a "Do not" list and a "Done when" checklist. Section 0 holds the rules and the shared name registry that all tasks use. **If a task and section 0 disagree, section 0 wins; if this plan and the specs disagree, this plan wins (it records decisions made after the specs). Report every disagreement you find instead of choosing silently.**
 
 ---
 
-## Conventions (every task)
+## 0. Global rules, decisions and shared names
 
-- Shell: PowerShell on Windows. Repo root `D:\MY DOCS\MY TOOLS\LAUNCHBAND\launchpad-drummer`, branch `ui-sci-retro-skin`.
-- Prepend cargo: `$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"`.
-- **Tauri v2 arg naming:** Rust command args are snake_case; JS passes **only** camelCase keys (`{ groupData }`, `{ humanizeDb }`), never both.
-- **Never call `trigger_pad` for hardware-sourced events** (`padInput` with `source: 'hardware'`); the router already played them.
-- **Do not restyle working parts.** Look comes from `src/styles/app.css` + `tokens.css` and the mockup `docs/mockups/ui-mockup-scifi.html`; reuse its classes (`.plate`, `.screen`, `.lcd`, `.lcd-dim`, `.silk`, `.key`, `.key.on`, `.key.small`, `.key.round`, `.switch`, `.lamp`, `.rack-unit`). New UI parts copy the mockup's markup and CSS for that part. Remove the `unfitted` class only when a plate becomes functional.
-- Browser preview (no `window.__TAURI__`) must keep working: every new feature has a harmless no-op or demo path there (`invoke` already resolves `undefined`).
-- Rust: `cargo fmt` before every commit; no allocation added to the audio callback (`crates/lpd-core/tests/no_alloc.rs` covers the engine; extend it when the engine changes).
-- Verification before each commit (all must pass):
-  ```
+### 0.1 Environment and workflow
+
+- Repo root: `D:\MY DOCS\MY TOOLS\LAUNCHBAND\launchpad-drummer`. Branch: `ui-sci-retro-skin` (commit on it; do not create other branches, do not push).
+- Shell: PowerShell 7 on Windows (Git Bash also available). Before cargo: `$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"`.
+- Verification before every commit (all must pass; paste the summary lines into the task report):
+  ```powershell
+  cargo fmt --all -- --check
   cargo test --workspace
   npm test
   npm run check
   ```
-  and `npm run build` at the end of every UI task.
-- Commit per task: `git add <files>; git commit -m "<type>(<scope>): <summary>"` with a blank line and `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` at the end.
-- Keep the existing tests green; extend `src-tauri` unit tests with the fake-queue pattern already used in `router.rs` / `lights.rs`.
+  UI tasks also run `npm run build` (it runs `svelte-check`, then `vite build`).
+- One commit per task (fix-up commits after review are fine). Message: conventional type + scope, e.g. `feat(core): …`, then a blank line, then `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+- TDD: write the listed tests first, run them, see them fail for the expected reason, implement, see them pass.
+- Browser preview: `npm run dev` serves `http://127.0.0.1:1420`. Without `window.__TAURI__` the app shows `createPreviewSet()`. Every feature must render and not throw there: commands resolve `undefined`, unless the task names a preview fallback.
 
-## File map (new files)
+### 0.2 Invariants (never break)
 
-| File | Responsibility |
+1. **Hardware-sourced pad events are never re-triggered from the UI.** `padInput({ …, source: 'hardware' })` updates selection and activity only. Only `source: 'screen'` calls `trigger_pad` / `release_pad`. The same holds for router events about learned notes (`pad-hit`) and sequencer steps.
+2. **Tauri v2 argument names:** Rust command parameters are snake_case; JS passes **only** the camelCase key (`{ groupData }`, `{ humanizeDb }`, `{ fromBank }`). Never pass both spellings. Rust structs crossing the bridge use `#[serde(rename_all = "camelCase")]`.
+3. **The look is done.** Do not restyle existing parts. New parts copy markup and CSS from `docs/mockups/ui-mockup-scifi.html` (line refs per task) and reuse existing classes from `src/styles/app.css` / `tokens.css`: `.plate` (+ `data-label` legend), `.screen`, `.lcd`, `.lcd-dim`, `.silk`, `.key`, `.key.on`, `.key.small`, `.key.round`, `.key.blank`, `.switch`, `.lamp` (+ `.ok`/`.warn`/`.error`), `.rack-unit`. Before adding CSS, grep `src/styles/app.css` for the selector; reuse a rule that is already ported. New CSS goes in the component's `<style>` unless several components share the class (then `app.css`). Use the tokens (`--orange`, `--warn`, `--ok`, `--error`, `--lcd`, `--lcd-dim`, `--silk`, `--vec`, `--vec-dim`, `--line`, `--line-hi`, `--glass`, `--focus`, fonts `--f-lcd`, `--f-silk`). Add a raw colour only when the mockup line uses one.
+4. **No allocation, locks or I/O in the audio callback.** `crates/lpd-core/tests/no_alloc.rs` wraps engine work in `assert_no_alloc`; every new engine code path gets a case there. Nothing may be freed on the audio thread: send it back through a queue.
+5. **Single set owner:** the router's `Set` is the only copy. `KitManager` holds `dir`, `samples`, `failed_samples` only. Readers clone from the router.
+6. **Undo scope** (UI spec 7.3): pad params, sample replace, move/swap/copy, clear, bank names, light modes, humanize, group **names**, learn bindings, pattern edits, keys settings. **Not** mixer values (volume, pan, pitch, low-pass, mute, solo, master), whether from the screen or the LCXL. 50 steps. Undo restores the snapshot but keeps the current mixer values (`restore_keeping_mixer`).
+7. **Autosave:** any change to the set (undoable or not, incl. mixer values) calls `AppState::touch()`; the saver writes 1 s after the last change.
+8. Lock order in `src-tauri`: `router` → `history` → `kit_manager` → `painter`. Never hold `router` while calling `emit`: clone what you need, drop the guard, then emit.
+9. `prefers-reduced-motion`: no key transitions, learn blink steady (2 px `--warn` ring), missing-sample blink steady red + `!`, no scope afterglow, CRT layers still. Hardware LEDs unaffected.
+10. Accessibility: focus ring 2 px `--focus` at 2 px offset on `:focus-visible` only (already global). Knobs/faders `role="slider"` + `aria-valuetext`; latching keys `aria-pressed`; choke/mix/mode/step-count rows `role="radiogroup"`; telemetry and CRT layers `aria-hidden`.
+11. Text uses the true minus `−`, multiplication `×`, ellipsis `…`, middle dot `·` and arrow `→` exactly as written in this plan.
+
+### 0.3 Decisions already made (do not revisit)
+
+| # | Decision |
 |---|---|
-| `crates/lpd-core/src/kit/history.rs` | Undo/redo stack of `Set` snapshots (pure) |
-| `crates/lpd-core/src/kit/ops.rs` | Pure set edits: drop files onto pads, move / swap / copy pads, clear, learn bindings follow |
-| `crates/lpd-core/src/kit/learn.rs` | Learn binding model + param target ids + CC→value mapping |
-| `crates/lpd-core/src/seq.rs` | Pattern model helpers, step timing with swing, nearest-step for record, grow rule |
-| `crates/lpd-core/src/devices/lcxl.rs` | Launch Control XL bytes ↔ events, LED SysEx |
-| `crates/lpd-core/src/audio/taps.rs` | Lock-free master/channel taps for telemetry |
-| `crates/lpd-core/src/audio/fft.rs` | Radix-2 FFT + 28 log bands |
-| `crates/lpd-core/src/instrument/{mod,basic,soundfont}.rs` | `Instrument` trait, built-in keys synth, rustysynth wrapper |
-| `src-tauri/src/config.rs` | App config file (last set, library folder, sf2, audio prefs, MIDI roles) |
-| `src-tauri/src/saver.rs` | Autosave thread + save status |
-| `src-tauri/src/logfile.rs` | Rotating log file |
-| `src-tauri/src/telemetry.rs` | 60 Hz telemetry frame builder/emitter |
-| `src-tauri/src/devices.rs` | MIDI device registry (all ports, roles, status) + generic MIDI inputs |
-| `src-tauri/src/lcxl.rs` | LCXL bridge thread |
-| `src-tauri/src/sequencer.rs` | Sequencer clock thread |
-| `src/lib/notices.ts` | Notice priority resolver (pure) |
-| `src/lib/keymap.ts` | Computer-keyboard map (pure) |
-| `src/lib/dnd.ts` | Drag hit-testing + drag state helpers (pure) |
-| `src/lib/api.ts` | Typed `invoke` / `listen` wrappers + preview fallbacks (moves the inline `invoke` out of App.svelte) |
-| `src/components/NoticeLcd.svelte`, `PowerOn.svelte`, `SetMenu.svelte`, `ContextMenu.svelte`, `SampleBrowser.svelte`, `SetupAudio.svelte`, `SetupMidi.svelte`, `SetupLearn.svelte`, `SetupLog.svelte` | UI parts |
+| D1 | Keys sound engine: a built-in Rust synth (`BasicKeys`) so the keys sound out of the box; SETUP › KEYS can load a user `.sf2`, which `SoundFontKeys` (rustysynth) then plays. No `.sf2` is downloaded or bundled. (User, 2026-10-18.) |
+| D2 | The sequencer and the keys plate ship in Part 1 (the brief says "everything still missing"). |
+| D3 | The sequencer clock runs on a dedicated router-side thread with sleep + 1 ms spin, jitter ≤ 1 ms; not sample-accurate (UI spec 4.7 asked for sample-accurate; recorded deviation). |
+| D4 | Pad learn targets carry the bank: `{"pad":{"bank":0,"x":0,"y":0}}` (the engine spec 4.2 example had no bank; recorded deviation). |
+| D5 | The group pitch offset does not apply to the keys instrument routed into that group (fader, pan, low-pass, mute and solo do). |
+| D6 | LCXL protocol values are the engine spec's "expected" values (2.3), unverified until `lp-probe` runs on the unit. |
+| D7 | MIDI roles: Launchpad MK2 and Launch Control XL are fixed by port name. Every other input port is `keys` (if the name contains `Keystation` or the user set it) or `other`. Only `keys` ports play the keys instrument; `other` ports act only through learn bindings. Roles are app config (per machine), not set data. |
+| D8 | File and folder pickers, reveal-in-Explorer and open-folder run in Rust commands (tauri-plugin-dialog / tauri-plugin-opener Rust APIs). The JS side never imports plugin packages, so capabilities stay `core:default`. |
+| D9 | CRT level and BEND are per-user localStorage settings (CRT already is); the keys octave window and fold states are UI state in localStorage. Library folder, `.sf2` path, audio prefs and MIDI roles live in the app config file. Everything else lives in `set.json`. |
+| D10 | Task 1 outcome (implemented in commit `10835e4`): `edit` records an undo step only when the set actually changed; a group rename that also changes values is split (name via `edit`, values via `Router::update_group` without history); `Router::release_pad_in(bank, x, y)`, `Router::install_set(set)`, `Router::send_mixer()` and `router::mixer_audio_differs(a, b)` exist; holds are tracked by pad id. |
+
+### 0.4 Shared name registry
+
+Every name below is created by the task in the "Task" column and used unchanged by later tasks. Payloads are JSON as the UI sees them (camelCase).
+
+**Tauri commands** (Rust name; JS args object; return):
+
+| Command | JS args | Returns | Task |
+|---|---|---|---|
+| `undo` / `redo` | — | `Set \| null` | 1 (done) |
+| `history_state` | — | `{ canUndo, canRedo }` | 1 (done) |
+| `update_pad` | `{ bank, pad, key? }` | — | exists; `key` added in 7 |
+| `get_startup` | — | `Startup` | 2 |
+| `new_set` / `open_set` | `{ dir }` | `OpenResult` | 2 |
+| `pick_folder` | `{ title, defaultDir? }` | `string \| null` | 2 |
+| `pick_file` | `{ title, extensions }` | `string \| null` | 2 |
+| `reveal_path` | `{ path }` | — | 2 |
+| `open_log_folder` | — | — | 2 |
+| `default_sets_dir` | — | `string` | 2 |
+| `get_config` | — | `AppConfig` | 2 |
+| `set_library_dir` | `{ dir }` (string or null) | — | 2 |
+| `set_soundfont` | `{ path }` (string or null) | `KeysStatus` | 2 (stub), 15 (real) |
+| `missing_samples` | — | `MissingPad[]` | 2 |
+| `save_now` | — | — (error string) | 2 (renames `save_set_dir`) |
+| `drop_files` | `{ bank, x, y, paths }` | `DropReport` | 4 |
+| `move_pad` | `{ fromBank, fromX, fromY, toBank, toX, toY, copy }` | `Set \| null` | 4 |
+| `clear_pad` | `{ bank, x, y }` | `Set` | 4 (replaces `remove_pad`) |
+| `locate_sample` | `{ bank, x, y, path }` | `Set` | 4 |
+| `list_dir` | `{ path }` | `DirEntry[]` | 5 |
+| `audition_file` / `stop_audition` | `{ path }` / — | — | 5 |
+| `load_into_pad` | `{ bank, x, y, path }` | `DropReport` | 5 |
+| `set_telemetry` | `{ on }` | — | 8 |
+| `reset_dropouts` | — | — | 8 |
+| `audio_devices` | `{ backend }` | `AudioDevice[]` | 9 |
+| `asio_available` | — | `{ available, reason }` | 9 |
+| `set_audio` | `{ prefs }` | `AudioStatus` | 9 |
+| `audio_reconnect` | — | `AudioStatus` | 9 |
+| `midi_devices` | — | `MidiDevice[]` | 10 |
+| `set_midi_role` | `{ port, role }` | — | 10 |
+| `arm_learn` | `{ target }` (`{ pad: { bank, x, y } }` or `{ param: id }`) | — | 12 |
+| `cancel_learn` | — | — | 12 |
+| `unbind` | `{ index }` | `Set` | 12 |
+| `seq_play` / `seq_rec` | `{ play }` / `{ armed }` | — | 13 |
+| `seq_update` | `{ pattern, key? }` | `Set` | 13 |
+| `seq_add_lane` | `{ bank, x, y }` | `Set` (error string) | 13 |
+| `seq_audition_step` | `{ bank, x, y }` | — | 13 |
+| `keys_note` | `{ note, velocity, on }` | — | 15 |
+| `keys_pitch` / `keys_mod` | `{ value }` | — | 15 |
+| `set_keys` | `{ settings }` | `Set` | 15 |
+| `keys_status` | — | `KeysStatus` | 15 |
+| `trigger_pad_in` / `release_pad_in` | `{ bank, x, y }` | — | 16 |
+
+**Events** (backend → UI):
+
+| Event | Payload | Task |
+|---|---|---|
+| `launchpad-status` | `{ state, message }` (exists) | — |
+| `launchpad-pad` | `{ note, pressed }` (exists) | — |
+| `launchpad-frame` | `[r, g, b][64]` (exists) | — |
+| `save-status` | `{ state: 'idle'\|'pending'\|'saved'\|'failed', reason: string \| null }` | 2 |
+| `telemetry` | `{ scope: number[1024], bands: number[28], peakHz, master: [l, r], groups: number[8] }` | 8 |
+| `audio-status` | `AudioStatus` | 8 / 9 |
+| `midi-devices` | `MidiDevice[]` | 10 |
+| `midi-log` | `{ text }` | 10 |
+| `keys-note` | `{ note, velocity, on }` | 10 |
+| `keys-wheel` | `{ pitch, mod }` | 10 |
+| `mixer-changed` | `{ groups: Group[], masterDb }` | 11 |
+| `learn-bound` | `{ binding: Binding }` | 12 |
+| `learn-ignored` | `{ reason: string }` | 12 |
+| `pad-hit` | `{ bank, x, y }` | 12 |
+| `set-changed` | `Set` | 12 / 13 |
+| `seq-position` | `{ playing, rec, step, length, bpm, msIntoStep }` | 13 |
+| `keys-status` | `KeysStatus` | 15 |
+
+**Set file additions** (all `#[serde(default)]` so old `set.json` files load): `learn: Vec<Binding>` (Task 12), `pattern: Pattern` (Task 13), `keys: KeysSettings` (Task 15). `SET_VERSION` stays 1.
+
+**TS types** in `src/lib/model.ts` mirror every Rust struct above with the same field names; each task adds the types it introduces.
+
+### 0.5 Mockup map (`docs/mockups/ui-mockup-scifi.html`)
+
+CSS: shell + notice 85–108 · drawer, tree, pads, drop states, editor 114–180 · knobs/faders + learn dot/blink 181–197 · mixer 198–213 · keys 214–245, 389–398 · sequencer 246–275, 399–407 · setup racks 276–290 · power-on 291–301 · menus, popover, ghost 334–344, 416–417 · telemetry 421–445 · bend 446–486 · reduced motion 497–502.
+JS: undo 644–650 · notices 725–775 · menus 776–789 · learn 790–809 · knob 810–836 · fader 837–857 · status strip 881–901 · grid 902–947 · banks + pad menu 948–979 · drag and drop 980–1064 · editor 1066–1133 · browser 1134–1170 · layout 1171–1225 · keys 1226–1352 · sequencer 1353–1451 · mixer + channel menu + LCXL sim 1452–1518 · setup 1519–1546 · power-on 1547–1562 · telemetry 1661–1823 · CRT/bend 1898–1936 · keyboard 1937–1965 · markup 504–566.
+Copy the markup structure, class names and CSS; re-implement the behaviour in Svelte (the mockup's DOM-building `h()` code is a reference, not code to paste). Where the mockup and this plan differ, this plan wins.
 
 ---
 
 ## Phase A — Foundation
 
-### Task 1: One set owner, edit pipeline, undo history, humanize
+### Task 1: One set owner, edit pipeline, undo history, humanize — DONE (`10835e4`, review pending)
 
-Today `AppState` keeps two copies of the set (router + `KitManager.set`), edits are not undoable and `humanizeDb` is stored but never applied.
+Implemented. The reviewers check it against this text; later tasks rely on these names.
+
+- `crates/lpd-core/src/kit/history.rs`: `UNDO_STEPS = 50`; `History::{new, record(before, key, now), undo(current), redo(current), can_undo, can_redo, clear}`; `restore_keeping_mixer(snapshot, &current) -> Set`. The same `key` within 1 s of the previous record coalesces (and refreshes the time); `None` never coalesces; record clears redo; cap 50; undo/redo already apply `restore_keeping_mixer`.
+- `AppState::edit<R>(key: Option<&str>, f: impl FnOnce(&mut Set) -> R) -> R`: applies `f` to the router set, records history only if the set changed, re-sends mixer audio only if `mixer_audio_differs`, calls `touch()`.
+- `AppState::{undo, redo, history_state}`; commands `undo`, `redo`, `history_state` registered.
+- Router: `trigger_pad_in(bank, x, y, velocity_gain)` is the only trigger path. Humanize = `gain × velocity_gain × db_to_gain(u × humanize_db / 2)`, `u` uniform in [−1, 1) from a xorshift32 (`set_seed` for tests). `release_pad_in`, `install_set`, `send_mixer`, `mixer_audio_differs`. Holds tracked by pad id.
+- `KitManager { dir, samples, failed_samples }`, `save(&self, set: &Set)`.
+
+### Task 2: App config, startup decision, autosave, save status, log file, pickers
+
+**Purpose.** The app must reopen the last set, save by itself, report save failures, and offer folder and file pickers. Today nothing is remembered between runs and saving is a manual key.
 
 **Files:**
-- Create: `crates/lpd-core/src/kit/history.rs`, test `crates/lpd-core/tests/kit_history.rs`
-- Modify: `crates/lpd-core/src/kit/mod.rs` (export), `src-tauri/src/store.rs` (drop `KitManager.set`), `src-tauri/src/state.rs`, `src-tauri/src/router.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/lib.rs`
+- Create: `src-tauri/src/config.rs`, `src-tauri/src/saver.rs`, `src-tauri/src/logfile.rs`, `src-tauri/src/startup.rs`
+- Modify: `src-tauri/Cargo.toml` (add `tauri-plugin-dialog = "2"`, `tauri-plugin-opener = "2"`), `src-tauri/src/lib.rs`, `state.rs`, `commands.rs`, `store.rs`, `launchpad.rs`, `audio.rs` (logging only), `src/App.svelte` (only `promptSetManagement`, see 11)
 
 **Contracts:**
 ```rust
-// lpd-core kit::history
-pub const UNDO_STEPS: usize = 50;
-pub struct History { /* undo: VecDeque<Set>, redo: Vec<Set>, last_key: Option<String>, last_at: Option<Instant> */ }
-impl History {
-    pub fn new() -> Self;
-    /// Call BEFORE applying an edit with the set as it was. Same `key` within 1 s of the
-    /// previous record = coalesced (no new step; e.g. one knob drag). `None` never coalesces.
-    pub fn record(&mut self, before: &Set, key: Option<&str>, now: Instant);
-    pub fn undo(&mut self, current: &Set) -> Option<Set>;
-    pub fn redo(&mut self, current: &Set) -> Option<Set>;
-    pub fn can_undo(&self) -> bool; pub fn can_redo(&self) -> bool;
-    pub fn clear(&mut self);
-}
-/// Mixer values are not covered by undo (UI spec 7.3): the restored set keeps `current`'s
-/// group volume/pan/pitch/lowpass/mute/solo and master, but takes group *names* from `snapshot`.
-pub fn restore_keeping_mixer(snapshot: Set, current: &Set) -> Set;
-```
-- `record` drops the redo stack; caps at 50 (oldest dropped).
-- `AppState::edit<R>(&self, key: Option<&str>, f: impl FnOnce(&mut Set) -> R) -> R`: locks router, records history, applies `f` to `router.set_mut()`, re-sends mixer commands only if the mixer changed, marks dirty (Task 2 hooks `saver.touch()`; in this task a no-op `fn touch(&self)` on AppState), emits nothing. All existing edit commands (`update_pad`, `remove_pad`, `update_bank_lights`, `rename_bank`, `update_bank_humanize`, group *rename*) go through it. Group value changes (`update_group` without a name change) and `update_master_db` do **not** record history but still `touch()`.
-- `KitManager` keeps `dir`, `samples`, `failed_samples` only; `save` takes `&Set` (`km.save(router.set())`).
-- Commands: `undo() -> Option<Set>`, `redo() -> Option<Set>`, `history_state() -> HistoryState { canUndo, canRedo }` (serde camelCase). `load_set_dir` / `new_set_dir` clear history.
-- Humanize: `Router::trigger_pad_in(bank, x, y, velocity_gain: f32)` is the one trigger path (`trigger_pad(x,y)` = current bank, gain 1.0). It multiplies `params.gain` by `velocity_gain × db_to_gain(u × humanize_db/2)`, `u` uniform in [−1, 1] from a xorshift32 field on the router (seeded from time; tests seed via `Router::set_seed`).
-
-**Tests (write first):**
-- `kit_history.rs`: record+undo returns the earlier set; redo returns the later; new record clears redo; 51 records keep 50; same key within 1 s coalesces, after 1 s does not, `None` never coalesces; `restore_keeping_mixer` keeps current volumes but snapshot names.
-- `router.rs` unit: with `humanize_db = 6` and a fixed seed, ten triggers produce gains inside `[db_to_gain(-3), db_to_gain(3)]` and not all equal; `humanize_db = 0` gives exactly the pad gain.
-- `state.rs` unit (construct `AppState` with `RingBuffer` queues as `lib.rs` does): `edit` then `undo` restores the pad; `update_group` volume change is not undoable.
-
-- [ ] Write failing tests → run `cargo test -p lpd-core --test kit_history` (FAIL: missing module) → implement → PASS
-- [ ] Router humanize test → implement → PASS; state tests → refactor `AppState`/`KitManager` → PASS
-- [ ] Register `undo`, `redo`, `history_state` in `lib.rs`; full verification; commit `feat(core): undo history, single set owner and humanize`
-
-### Task 2: App config, startup, autosave, save status, log file, dialogs
-
-**Files:**
-- Create: `src-tauri/src/config.rs`, `src-tauri/src/saver.rs`, `src-tauri/src/logfile.rs`
-- Modify: `src-tauri/Cargo.toml` (+ `tauri-plugin-dialog = "2"`, `tauri-plugin-opener = "2"`, `dirs` not needed: use `app.path()`), `src-tauri/src/lib.rs`, `state.rs`, `commands.rs`, `store.rs`, `src-tauri/capabilities/default.json` (add `dialog:default`, `opener:default` only if JS calls them — the plan calls them from Rust, so `core:default` stays enough)
-
-**Contracts:**
-```rust
-// config.rs — stored at app.path().app_config_dir()/config.json, atomic write (tmp + rename)
+// config.rs — file: <app_config_dir>/config.json (app.path().app_config_dir()), atomic write (config.json.tmp + rename)
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppConfig {
     pub last_set: Option<String>,
     pub library_dir: Option<String>,
     pub soundfont: Option<String>,
-    pub audio: AudioPrefs,           // { backend: "wasapi"|"asio", device: Option<String>, bufferFrames: Option<u32> }
+    pub audio: AudioPrefs,
     pub midi_roles: BTreeMap<String, String>, // port name → "keys" | "other"
 }
-pub fn load(path: &Path) -> AppConfig;          // missing/broken → default
-pub fn save(path: &Path, c: &AppConfig) -> Result<()>;
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AudioPrefs { pub backend: String /* "wasapi" | "asio"; default "wasapi" */, pub device: Option<String>, pub buffer_frames: Option<u32> }
+pub fn load(path: &Path) -> AppConfig;                 // missing or broken file → AppConfig::default()
+pub fn save(path: &Path, c: &AppConfig) -> anyhow::Result<()>;
 
-// Startup decision (UI spec 7.2), computed once in setup():
-#[serde(tag = "kind", rename_all = "camelCase")]
+// startup.rs
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Startup {
-    Loaded { path: String, name: String, from_backup: bool, backup_saved_at: Option<String> /* "hh:mm" of set.json.bak mtime */ },
+    Loaded { path: String, name: String, from_backup: bool, backup_saved_at: Option<String> },
     FirstRun,
     NotFound { path: String },
     Unreadable { path: String, name: String },
 }
+/// `load` is KitManager::load_from_dir in the app, a fake in tests.
+pub fn decide_startup(last: Option<&Path>, load: impl Fn(&Path) -> anyhow::Result<LoadedKit>) -> (Startup, Option<LoadedKit>);
+pub fn set_name(dir: &Path) -> String;                // folder name
+pub fn backup_time(dir: &Path) -> Option<String>;     // set.json.bak mtime as local "HH:MM"
+
+// saver.rs
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveStatus { pub state: String /* "idle"|"pending"|"saved"|"failed" */, pub reason: Option<String> }
+pub struct Saver { /* deadline: Option<Instant>, retry_at: Option<Instant>, status: SaveStatus, enabled: bool */ }
+impl Saver {
+    pub fn new() -> Self;
+    pub fn touch(&mut self, now: Instant);                // deadline = now + SAVE_DELAY; state "pending" (only when enabled)
+    pub fn set_enabled(&mut self, on: bool);              // off while no set dir is open; turning off clears the deadline
+    /// Runs the save when due. Returns Some(new status) when the status changed.
+    pub fn tick(&mut self, now: Instant, save: impl FnOnce() -> anyhow::Result<()>) -> Option<SaveStatus>;
+}
+pub const SAVE_DELAY: Duration = Duration::from_secs(1);
+pub const RETRY_DELAY: Duration = Duration::from_secs(2);
+
+// logfile.rs
+pub fn init(dir: PathBuf);                               // app.path().app_log_dir()
+pub fn log(line: impl AsRef<str>);                       // "[YYYY-MM-DD HH:MM:SS] line\n" appended to lpd.log; no-op before init
+pub const MAX_BYTES: u64 = 1_000_000;                    // rotate: lpd.2.log→lpd.3.log, lpd.1.log→lpd.2.log, lpd.log→lpd.1.log
 ```
-- Startup: `config.last_set` → `KitManager::load_from_dir`; ok → `Loaded`; dir missing → `NotFound`; both files unreadable → `Unreadable` (never overwrite: `kit::load` already renames nothing — verify and keep it so). No last set → `FirstRun`. While not `Loaded` the router keeps an empty set with **no** dir, and autosave is off.
-- Saver thread (`saver.rs`): `Saver::touch()` sets `deadline = now + 1 s`, state `pending`; thread ticks every 100 ms; on deadline saves `router.set().clone()` via `km.save`; ok → state `saved`; err → state `failed` with reason and retries every 2 s. Emits `save-status` `{ state: "pending"|"saved"|"failed", reason: Option<String> }` on each change. `save_set_dir` command saves immediately (Ctrl+S not in spec; keep the existing command for the SAVE key, which the UI drops in Task 3).
-- Missing samples: `missing_samples() -> Vec<MissingPad { bank, x, y, sample }>` from `km.failed_samples` × set pads.
-- Commands (all registered in `lib.rs`):
-  - `get_startup() -> Startup`
-  - `new_set(dir: String) -> Result<Set,String>` / `open_set(dir: String) -> Result<OpenResult,String>` where `OpenResult { set, path, name, fromBackup, backupSavedAt }`; both update `config.last_set`, clear history, restart autosave. Keep `load_set_dir`/`new_set_dir` as aliases calling the same code until the UI no longer uses them, then delete them in Task 3.
-  - `pick_folder(title: String, default_dir: Option<String>) -> Option<String>` and `pick_file(title: String, extensions: Vec<String>) -> Option<String>` via `tauri_plugin_dialog::DialogExt` blocking pickers, run inside `tauri::async_runtime::spawn_blocking` (make these `async` commands).
-  - `reveal_path(path: String)` via `tauri_plugin_opener::OpenerExt::reveal_item_in_dir`; relative paths resolve against the set dir.
-  - `default_sets_dir() -> String` = `Documents\Launchpad Drummer` (`app.path().document_dir()`).
-  - `open_log_folder()`.
-  - `get_config() -> AppConfig`, `set_library_dir(dir: Option<String>)`, `set_soundfont(path: Option<String>)` (Task 15 uses it).
-- `logfile.rs`: `log(line)` appends `[yyyy-mm-dd hh:mm:ss] line` to `app_log_dir/lpd.log`; rotates at 1 MB to `lpd.1.log`…`lpd.3.log`. Log: startup outcome, failed samples, save errors, device status changes. Replace `eprintln!` in `lib.rs`, `launchpad.rs`, `audio.rs` with it (keep `eprintln!` too in debug builds).
 
-**Tests:** `config.rs` unit: default on missing file, round-trip, broken JSON → default. `saver.rs` unit with a closure-based save function (inject `Fn(&Set) -> Result<()>`): touch then 1.1 s later saves once; two touches 0.5 s apart save once; failure → `failed` then retry succeeds → `saved`. Use an injectable clock (`fn tick(&mut self, now: Instant)`) instead of sleeping. `logfile.rs`: rotation at a tiny limit in a temp dir. Startup decision as a pure fn `decide_startup(last: Option<&Path>, load: impl Fn(&Path)->Result<LoadedKit>) -> Startup` tested for the four cases (use `tempfile` + `kit::save`).
+**Behaviour:**
+1. `setup()` in `lib.rs`: register `.plugin(tauri_plugin_dialog::init()).plugin(tauri_plugin_opener::init())`; init the log; load the config; run `decide_startup(config.last_set)`:
+   - `last_set` is `None` → `FirstRun`.
+   - The path does not exist → `NotFound { path }`.
+   - Load ok → `Loaded`; the router gets the set and samples (`router.set_current_set`), `km.dir` is set, the saver is enabled. `from_backup` comes from `kit::load`; `backup_saved_at = backup_time(dir)`.
+   - Load fails (set.json and backup both unreadable) → `Unreadable { path, name }`. Files stay untouched (`kit::load` renames set.json aside only when the backup *was* readable — keep that).
+   - Not `Loaded` → the router keeps `Set::new()`, `km.dir = None`, the saver is disabled.
+   - Log the outcome and every failed sample (`{path}: {error}`).
+2. Keep the decision in `AppState.startup: Arc<Mutex<Startup>>`; `get_startup` returns it.
+3. `AppState::touch()` (currently a no-op) → `saver.lock().touch(Instant::now())`; it emits nothing. The saver thread (spawned in `setup`, 100 ms tick) calls `tick(now, || km.save(&set))` with `set` cloned from the router **before** locking the kit manager (lock order). Emit `save-status` on each returned change; log failures with the reason. After a failure the saver retries every 2 s until a save succeeds (state stays `failed` meanwhile); a new `touch` while failed keeps `failed` showing but moves the deadline.
+4. `new_set(dir)`: create the folder, `kit::save(dir, &Set::new())`, install it, `km.dir = dir`, clear samples and failed list, clear history, enable the saver, set `config.last_set = dir` and save the config; startup becomes `Loaded`. Returns `OpenResult`.
+5. `open_set(dir)`: `KitManager::load_from_dir`; on success the same as `new_set` with the loaded set and samples; on failure return `Err("Couldn't open {name} — set.json and backup are unreadable. Files left untouched.")` and change nothing.
+   ```rust
+   #[derive(Serialize)] #[serde(rename_all = "camelCase")]
+   pub struct OpenResult { pub set: Set, pub path: String, pub name: String, pub from_backup: bool, pub backup_saved_at: Option<String> }
+   ```
+6. `missing_samples() -> Vec<MissingPad>` with `#[serde(rename_all = "camelCase")] MissingPad { bank: usize, x: u8, y: u8, sample: String }`: every pad in every bank whose `sample` is in `km.failed_samples` (by path) or not in `router.samples()`. Order: bank, then y descending (top row first), then x.
+7. Pickers (async commands; body in `tauri::async_runtime::spawn_blocking`): `pick_folder(title, default_dir)` = `app.dialog().file().set_title(title)` (+ `.set_directory(dir)` when given) `.blocking_pick_folder()`; `pick_file(title, extensions)` adds `.add_filter(name, &extensions)` with name `"SoundFont"` when the list is `["sf2"]`, else `"Audio"`, then `.blocking_pick_file()`. Return the path as a string (`FilePath::into_path()`), `None` on cancel.
+8. `reveal_path(path)`: relative paths resolve against `km.dir`; `app.opener().reveal_item_in_dir(path)`. `open_log_folder()`: `app.opener().open_path(log_dir, None::<&str>)`.
+9. `default_sets_dir()` = `<Documents>\Launchpad Drummer` (`app.path().document_dir()`), created if missing.
+10. `get_config`; `set_library_dir(dir)` (saves the config); `set_soundfont(path)` (saves the config; returns `KeysStatus { engine: "builtin", name: "BUILT-IN", error: None }` until Task 15 makes it real). Define `#[serde(rename_all = "camelCase")] KeysStatus { engine: String, name: String, error: Option<String> }` in `state.rs`.
+11. Rename the command `save_set_dir` → `save_now` (immediate save through the saver path; emits `save-status`). Remove the `load_set_dir` and `new_set_dir` commands **and** `AppState::load_set_dir/new_set_dir`, replaced by `open_set`/`new_set`. Update `promptSetManagement` in `src/App.svelte` to call `new_set`/`open_set` and `save_now`, so the app keeps working until Task 3 replaces that code.
+12. Replace `eprintln!` in `lib.rs`, `launchpad.rs`, `audio.rs`, `state.rs` with `logfile::log` (keep the `eprintln!` too under `cfg(debug_assertions)`). Also log every Launchpad status change.
 
-- [ ] Tests first for config, saver, logfile, decide_startup → implement → PASS
-- [ ] Wire plugins (`.plugin(tauri_plugin_dialog::init()).plugin(tauri_plugin_opener::init())`), commands, startup in `setup()`; full verification; commit `feat(tauri): app config, startup, autosave, log file and pickers`
+**Tests:**
+- `config.rs` unit: missing file → default; save + load round-trip (with one `midi_roles` entry); broken JSON → default; unknown fields are ignored.
+- `saver.rs` unit (no sleeping; pass `Instant`s): touch at t0, tick at t0+0.9 s → no save; tick at t0+1.1 s → one save, status `saved`; touches at t0 and t0+0.5 s → one save, at ≥ t0+1.5 s; a failing save → `failed` with the reason; tick 1 s later → no retry; 2 s later → retry; success → `saved`; a disabled saver never saves.
+- `logfile.rs` unit: temp dir with an internal test hook `init_with_limit(dir, 64)`: writing past the limit creates `lpd.1.log`; four rotations leave at most `lpd.log` + 3 older files.
+- `startup.rs` unit with `tempfile`: `None` → FirstRun; missing dir → NotFound; valid set (`kit::save`) → Loaded with `from_backup: false`; broken set.json + valid .bak → Loaded with `from_backup: true` and `backup_saved_at` `Some`; both broken → Unreadable, and both files are byte-for-byte unchanged.
 
-### Task 3: Shell UI — notices, set menu, power-on, undo/redo keys, status strip, keyboard
+**Do not:** add UI for any of this (Task 3); store the CRT level in the config; save the config on every touch; hold the router lock while writing to disk (clone the set, release, then write).
+
+**Done when:**
+- [ ] Tests written first and failing for the expected reason, then passing.
+- [ ] `cargo build -p launchpad-drummer` succeeds.
+- [ ] `promptSetManagement` uses `new_set`/`open_set`/`save_now`; old commands removed; `npm run check` clean.
+- [ ] Full verification; commit `feat(tauri): app config, startup decision, autosave, log file and pickers`.
+
+### Task 3: Shell UI — notices, set menu, power-on, undo/redo keys, status strip, keyboard map
+
+**Purpose.** UI spec 3, 7.1, 7.2 and 10: the top strip, the notice LCD, the power-on screen and the keyboard become real.
 
 **Files:**
-- Create: `src/lib/api.ts`, `src/lib/notices.ts` (+ `notices.test.ts`), `src/lib/keymap.ts` (+ `keymap.test.ts`), `src/components/NoticeLcd.svelte`, `src/components/SetMenu.svelte`, `src/components/PowerOn.svelte`
-- Modify: `src/App.svelte`, `src/tauri.d.ts`, `src/lib/model.ts` (types `Startup`, `OpenResult`, `SaveStatus`, `HistoryState`, `MissingPad`)
+- Create: `src/lib/api.ts`, `src/lib/notices.ts` + `src/lib/notices.test.ts`, `src/lib/keymap.ts` + `src/lib/keymap.test.ts`, `src/lib/format.ts` + `src/lib/format.test.ts`, `src/lib/esc.ts`, `src/components/NoticeLcd.svelte`, `src/components/SetMenu.svelte`, `src/components/PowerOn.svelte`, `src/components/ContextMenu.svelte`
+- Modify: `src/App.svelte`, `src/tauri.d.ts`, `src/lib/model.ts`, `src/components/LaunchpadPanel.svelte` (bindable `renaming` for F2), `src/styles/app.css` (menu/popover classes if not present)
 
 **Contracts:**
 ```ts
-// notices.ts — UI spec 7.1 table. Pure.
+// api.ts — the only module that touches window.__TAURI__
+export const isTauri: boolean;
+export function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T>; // preview: resolves PREVIEW[cmd]?.(args) ?? undefined
+export function listen<T>(event: string, fn: (payload: T) => void): Promise<() => void>;   // preview: resolves a no-op unlisten
+// PREVIEW map: get_startup → { kind: 'loaded', path: 'PREVIEW', name: 'PREVIEW KIT', fromBackup: false, backupSavedAt: null },
+// history_state → { canUndo: false, canRedo: false }, missing_samples → [],
+// get_config → { lastSet: null, libraryDir: null, soundfont: null, audio: { backend: 'wasapi', device: null, bufferFrames: null }, midiRoles: {} }.
+
+// notices.ts — UI spec 7.1, pure
 export type Level = 'error' | 'warn' | 'info' | 'ok';
-export interface Notice { id: string; prio: number; level: Level; text: string; action?: { label: string; id: string }; sticky?: boolean }
+export interface NoticeAction { label: string; id: 'reconnect' | 'dismiss' | 'howto' | 'show' | 'setup' }
+export interface Notice { id: string; prio: number; level: Level; text: string; action?: NoticeAction }
+export interface Confirmation { id: string; text: string; level?: Level }   // default level 'ok'
 export interface NoticeInputs {
-  learnArmed: null | 'cc' | 'note'; audioLost: boolean; backup: null | { savedAt: string | null }; saveFailed: string | null;
-  launchpad: 'connected' | 'disconnected' | 'busy' | 'bootloader'; lcxl: 'connected' | 'disconnected' | 'busy' | 'absent';
-  missing: number; asioFallback: boolean; dropoutRecent: boolean; confirmations: { id: string; text: string }[];
+  learnArmed: null | 'cc' | 'note';
+  audioLost: boolean;
+  backup: null | { savedAt: string | null };
+  saveFailed: string | null;
+  launchpad: 'connected' | 'disconnected' | 'busy' | 'bootloader';
+  lcxl: 'connected' | 'disconnected' | 'busy';
+  missing: number;
+  asioFallback: boolean;
+  dropoutRecent: boolean;
+  confirmations: Confirmation[];
+  keysAbsent: boolean;            // Task 16 wires it; false until then
   dismissed: ReadonlySet<string>;
 }
-export function activeNotices(i: NoticeInputs): Notice[]; // sorted by prio (1 = highest), dismissed removed
+export function activeNotices(i: NoticeInputs): Notice[];   // sorted by prio ascending; dismissed ids removed
+export const ICONS: Record<Level, string> = { error: '✖', warn: '⚠', info: '•', ok: '✓' };
+
+// format.ts
+/** Keep the last path segment whole when it fits; put "…" in the middle; result length ≤ max. */
+export function middleTruncate(s: string, max: number): string;
+
+// keymap.ts — UI spec 10
+export function padForKey(key: string): { x: number; y: number } | null;
+// "1".."8" → y 3, x 0..7; "q w e r t y u i" → y 2; "a s d f g h j k" → y 1; "z x c v b n m ," → y 0. Case-insensitive. Anything else → null.
+
+// esc.ts — Esc chain (UI spec 10: drag → learn → rename → menu/popover; if nothing, STOP ALL)
+export function pushEsc(handler: () => void): () => void;  // returns remove(); the last pushed runs first
+export function runEsc(): boolean;                          // pops and runs the top handler; false when empty
 ```
-Texts exactly as the spec table (rows 1–13). Actions: `RECONNECT` (audio), `DISMISS` (backup, asio), `HOW TO FIX` (bootloader popover with steps: 1 run Novation's `launchpad-mk2-updater.exe`, 2 unplug, 3 replug), `SHOW` (missing), `SETUP` (dropout). Confirmations last 3 s (App owns the timers: `confirm(text)` helper).
-- `NoticeLcd.svelte`: one slot showing `notices[0]` with icon (✖ ⚠ • ✓) coloured by level, its action key, and `+n` key opening a popover listing all; `aria-live` polite, `assertive` when the top one is an error. Empty → the existing idle text.
-- `SetMenu.svelte`: the set LCD becomes a menu button `SET ▸ {name} ▾`: New set… (Ctrl+N), Open set… (Ctrl+O), Show in Explorer. New: `pick_folder('New set', default_sets_dir)` → `new_set`. Open: `pick_folder` → `open_set` → backup notice if `fromBackup`.
-- `PowerOn.svelte` (mockup `#poweron`): centre bay when startup is not `Loaded` and no set is open: title, status line (`Last set not found: {path}` / `Couldn't open {name} — set.json and backup are unreadable. Files left untouched.` / first-run text), lamps LAUNCHPAD / LCXL / AUDIO, keys NEW SET and OPEN SET. PLAY shows it; SETUP still works; pads and mixer hidden. Browser preview: never shown (preview set is open).
-- Undo/redo keys: lit when `history_state` says so; click / Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z call `undo`/`redo`, replace `currentSet` with the result, show confirmation `✓ Undone` / `✓ Redone`. Refresh `history_state` after every edit call (debounced 100 ms).
-- Status strip: drop the SAVE key; add save LED (dim = pending, green blink 600 ms on `saved`, red on `failed`), `DROPS n` LCD (0 until Task 8), set path middle-truncated (`D:\Sets\…\My Kit`, helper `middleTruncate(path, max)` in `notices.ts` or a small `format.ts`, tested), LCXL lamp from the device registry (until Task 10: off).
-- `keymap.ts` (UI spec 10): `padForKey(key: string): { x: number; y: number } | null` — rows `1–8` → y=3, `Q–I` → y=2, `A–K` → y=1, `Z–,` → y=0 (x = position). Tested for every key incl. `,`.
-- `App.svelte` keyboard handler (one `keydown` + `keyup`), never while typing in inputs, Play screen only for pad keys: letters/digits play+select (`source: 'screen'`, release on keyup), Space plays selected pad, arrows move selection (grid focused or nothing focused), PageUp/PageDown bank −/+, Alt+1–8 bank, F2 rename active bank (focus in mixer → that group), Delete clear selected pad (undoable), Ctrl+E drawer editor, Ctrl+B drawer browser (Task 5 adds the panel; until then no-op), Ctrl+K fold keys (Task 16), Ctrl+1 PLAY, Ctrl+, SETUP, Ctrl+N/O, Ctrl+Z/Y, Esc chain: drag → learn → rename → menu/popover → full-screen game → STOP ALL. Expose the chain as a small stack (`escStack.push(fn)` / pop) so components register cancel handlers.
-- `api.ts`: `invoke`, `listen` wrappers moved from `App.svelte`, typed per command; preview fallbacks (`get_startup` → `{kind:'loaded', name:'PREVIEW KIT', …}`).
 
-**Tests:** `notices.test.ts`: priority order for a mix of inputs (learn beats audio lost beats backup …); dismissed backup disappears; LCXL busy text; missing count pluralisation (`1 sample missing` / `3 samples missing`); confirmation ordering. `keymap.test.ts` as above.
+**Notice table** (exact text; `{…}` = substitution; prio = row):
 
-- [ ] Tests first (notices, keymap, middleTruncate) → implement → PASS
-- [ ] Components + App wiring; remove `promptSetManagement` / `window.prompt` / `alert`; delete the `load_set_dir`/`new_set_dir` aliases from Rust
-- [ ] Preview check: `npm run dev`, open `http://127.0.0.1:1420`, Play renders, notice LCD shows the preview text, undo keys unlit, no console errors
-- [ ] Full verification + `npm run build`; commit `feat(ui): notices, set menu, power-on, undo keys and keyboard map`
+| prio | id | when | level | text | action |
+|---|---|---|---|---|---|
+| 1 | `learn` | `learnArmed` | warn (styled `.notice.learn`) | cc: `Move a control on any MIDI device · Esc cancels` / note: `Hit a key or pad on any MIDI device · Esc cancels` | — |
+| 2 | `audio-lost` | `audioLost` | error | `Audio device lost` | RECONNECT |
+| 3 | `backup` | `backup` | warn | `set.json unreadable — loaded backup (saved {savedAt})`; `savedAt` null → `(saved earlier)` | DISMISS |
+| 4 | `save-failed` | `saveFailed` | error | `Couldn't save set — {reason}. Retrying` | — |
+| 5 | `lp-bootloader` | `launchpad === 'bootloader'` | error | `Launchpad in bootloader — run Novation's MK2 updater, then replug` | HOW TO FIX |
+| 6 | `lp-busy` | `launchpad === 'busy'` | warn | `Launchpad port busy — close Components, DAWs or another copy of this app` | — |
+| 7 | `missing` | `missing > 0` | warn | `1 sample missing` / `{n} samples missing` | SHOW |
+| 8 | `asio` | `asioFallback` | warn | `ASIO not available — using WASAPI` | DISMISS |
+| 9 | `dropout` | `dropoutRecent` | warn | `Audio dropout — raise buffer size` | SETUP |
+| 10 | `lcxl-busy` | `lcxl === 'busy'` | warn | `Launch Control XL port busy — close other MIDI apps` | — |
+| 11 | `ok:{id}` | each confirmation | its level (default ok) | `{text}` | — |
+| 12 | `lp-off` | `launchpad === 'disconnected'` | info | `Launchpad not connected — checking every 2 s` | — |
+| 13 | `lcxl-off` | `lcxl === 'disconnected'` | info | `Launch Control XL not connected — checking every 2 s` | — |
+| 14 | `keys-off` | `keysAbsent` | info | `Keystation 49 not connected — on-screen keys still play` | — |
+
+Confirmations: `confirm(text, level = 'ok')` in `App.svelte` pushes `{ id: crypto.randomUUID(), text, level }` and removes it after 3000 ms. Texts used across tasks: `Undone`, `Redone`, `Pad cleared`, `Imported {n}`, `Learned {label}`, `Set saved`, `Lane added`.
+
+**Components:**
+- `NoticeLcd.svelte` (mockup CSS 85–108, JS 746–771): props `{ notices: Notice[]; idle: string; onaction: (n: Notice) => void }`. Shows `notices[0]`: `<span class="ico">` (`ICONS`) + `<span class="txt">` coloured by level (`.notice.error|warn|info|ok`; `.notice.learn` for prio 1), its action as `.key.small` on the right, and a `+n` `.key.small` when more notices exist, which opens a `.popover` (fixed, 460 px, below the LCD) listing every notice (icon, text, action). Empty list → the `idle` text in `.lcd-dim`. `role="status"`, `aria-live="polite"`; `aria-live="assertive"` when `notices[0].level === 'error'`. The popover closes on outside click and via `pushEsc`. `idle` = today's idle texts (`Launchpad MK2 connected` when connected; preview `Browser preview — demo kit, no audio engine`).
+- HOW TO FIX opens a popover with three lines: `1. Run Novation's launchpad-mk2-updater.exe.` `2. Unplug the Launchpad.` `3. Plug it back in. The app reconnects within 2 s.`
+- SHOW selects the next missing pad (cycling through `missing_samples()` in order), switches the bank if needed and opens the drawer on the editor (the one automatic drawer open, UI spec 4). SETUP → `setMode('setup')`. RECONNECT → `audio_reconnect` (Task 9; until then `invoke` returns nothing). DISMISS → add the id to `dismissed`.
+- `SetMenu.svelte` replaces the set LCD button. The existing `.set-lcd` markup (`SET` silk, name LCD, `▾`) opens a `ContextMenu` with `New set…` (shortcut `Ctrl+N`), `Open set…` (`Ctrl+O`), separator, `Show in Explorer`.
+  - New → `pick_folder({ title: 'New set — choose an empty folder', defaultDir: await invoke('default_sets_dir') })` → `new_set({ dir })`.
+  - Open → `pick_folder({ title: 'Open set folder', defaultDir })` → `open_set({ dir })`. An error string shows in the power-on status line when the power-on screen is up, otherwise as an error confirmation.
+  - After either: replace `currentSet`, `setName = result.name`, `setPath = result.path`, backup notice if `fromBackup`, refresh missing samples and history state.
+  - Show in Explorer → `reveal_path({ path: setPath })`; disabled without a set.
+- `ContextMenu.svelte` (mockup CSS 335–338 + 416–417, JS 777–789): props `{ x, y, items: MenuItem[]; onclose }`, `MenuItem = { label: string; shortcut?: string; disabled?: boolean; checked?: boolean; info?: boolean; sep?: boolean; action?: () => void }`. Fixed `.menu.screen`, min-width 190 px, clamped inside the window; the first enabled item gets focus; ↑/↓ move, Enter/Space activate, Esc (via `pushEsc`) and outside click close; `role="menu"`, items `role="menuitem"` (`role="menuitemcheckbox"` + `aria-checked` + a `✓ ` prefix when `checked` is defined); `info` rows are dim and not focusable. Tasks 7, 12 and 16 reuse it.
+- `PowerOn.svelte` (mockup CSS 291–301, JS 1547–1562): shown in the bay instead of the Play screen when `startup.kind !== 'loaded'` and no set has been opened since. Content: title `LAUNCHPAD DRUMMER` (30 px / 700 / +0.18 em, with the mockup's chromatic-fringe class); status line: FirstRun → `No set yet. Create one or open a set folder.`; NotFound → `Last set not found: {path}`; Unreadable → `Couldn't open {name} — set.json and backup are unreadable. Files left untouched.`; lamps LAUNCHPAD / LCXL / AUDIO in the same states as the status strip; keys `NEW SET` and `OPEN SET` (same flows as the set menu). PLAY shows it; SETUP and GAMES still work; the rail stays.
+- Undo/redo keys (exist in the top strip): unlit with `aria-disabled` per `history_state`; click / Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z → `undo`/`redo`; a non-null result replaces `currentSet` and confirms `Undone` / `Redone`. `refreshHistory()` (debounced 100 ms) runs after every edit command and after undo/redo.
+- Status strip (mockup JS 881–901): remove the `SAVE` key. Order: LAUNCHPAD lamp, LCXL lamp, AUDIO lamp, audio LCD, `DROPS {n}` LCD (`audioStatus.dropouts ?? 0`; Task 8 fills it), set path LCD `middleTruncate(setPath, 48)` with the full path as `title`, save LED (`.lamp`: dim = idle/pending, `.ok` with a 600 ms `blink` class on `saved`, `.error` on `failed`; `aria-label` `Saved` / `Saving…` / `Save failed`). Every lamp is a button that opens SETUP (exists).
+- Keyboard (`App.svelte`: one `keydown` and one `keyup` on `window`; ignore events whose target is an input, textarea, select or contenteditable; ignore `event.repeat` for pad keys):
+
+  | Key | Action | Where |
+  |---|---|---|
+  | pad keys (`padForKey`) | press: `padInput({ note, pressed: true, source: 'screen' })` and select; keyup: release | Play only; not while the browser tree has focus |
+  | Space | play the selected pad (press/release like a pad key) | Play; grid focused or `document.activeElement === document.body` |
+  | Arrows | move the selection (clamped 0..7) | grid focused or nothing focused |
+  | PageUp / PageDown | bank − / + (clamped) | Play |
+  | Alt+1…8 | go to bank | Play |
+  | F2 | rename the active bank (via `LaunchpadPanel`'s bindable `renaming`); if focus is inside the mixer, rename that group (MixerStrip's existing rename) | Play |
+  | Delete | clear the selected pad (`clear_pad` from Task 4; until Task 4 lands, `remove_pad`) | Play |
+  | Ctrl+E / Ctrl+B | toggle the drawer on the editor / browser (browser: Task 5) | Play |
+  | Ctrl+K | fold the keys plate (Task 16) | Play |
+  | Ctrl+1 / Ctrl+, | PLAY / SETUP (Ctrl+2 TRAIN does nothing: blank cap) | everywhere |
+  | Ctrl+N / Ctrl+O | new / open set | everywhere |
+  | Ctrl+Z / Ctrl+Y, Ctrl+Shift+Z | undo / redo | everywhere |
+  | Esc | `if (!runEsc())`: full-screen game → exit; else on Play → STOP ALL | everywhere |
+
+  `preventDefault()` for every handled combination. Components register Esc handlers (menus, popovers, rename inputs, drag, learn) with `pushEsc`.
+- `App.svelte` refactor: replace the inline `tauri`/`invoke` with `api.ts`; delete `promptSetManagement`, `window.prompt` and `window.alert`. Add state: `startup`, `setPath`, `saveStatus`, `missing: MissingPad[]`, `history: { canUndo, canRedo }`, `confirmations`, `dismissed`. Listen to `save-status`. Load `get_startup`, `missing_samples` and `history_state` on mount.
+
+**Tests:**
+- `notices.test.ts`: (a) all inputs active → ids in the prio order of the table; (b) `dismissed: new Set(['backup'])` removes the backup row; (c) `missing: 1` → `1 sample missing`, `missing: 3` → `3 samples missing`; (d) backup text with `savedAt: '14:32'` and with `null`; (e) two confirmations keep insertion order at prio 11; (f) `launchpad: 'connected'`, `lcxl: 'connected'` and nothing else → `[]`.
+- `keymap.test.ts`: all 32 keys map to the right `{x, y}` (table-driven); `'Q'` equals `'q'`; `'9'`, `'p'`, `'.'` → null.
+- `format.test.ts`: a short path unchanged; a long path ≤ max with `…`; the last segment kept when it fits; a single long segment truncated in the middle.
+
+**Do not:** redesign the top strip; bring back a SAVE key; open the drawer on a pad press; use `window.confirm/alert/prompt` anywhere.
+
+**Done when:**
+- [ ] Tests first → PASS.
+- [ ] Preview at 1280×720: Play renders; the notice LCD shows the idle preview text; undo/redo unlit; the set menu opens and closes with Esc; keyboard keys light pads; no console errors.
+- [ ] Full verification + `npm run build`; commit `feat(ui): notices, set menu, power-on, undo keys and keyboard map`.
 
 ---
 
@@ -191,164 +381,321 @@ Texts exactly as the spec table (rows 1–13). Actions: `RECONNECT` (audio), `DI
 
 ### Task 4: Kit operations backend (drops, move / swap / copy, clear, locate)
 
+**Purpose.** The UI spec 5 rules, implemented once in Rust so every drop is one undo step.
+
 **Files:**
-- Create: `crates/lpd-core/src/kit/ops.rs`, test `crates/lpd-core/tests/kit_ops.rs`
-- Modify: `crates/lpd-core/src/kit/mod.rs`, `crates/lpd-core/src/kit/model.rs` (no `learn` field yet: Task 12 adds it and extends these ops so bindings follow moved pads), `src-tauri/src/state.rs`, `commands.rs`, `lib.rs`
+- Create: `crates/lpd-core/src/kit/ops.rs`, `crates/lpd-core/tests/kit_ops.rs`
+- Modify: `crates/lpd-core/src/kit/mod.rs` (export `ops`), `src-tauri/src/state.rs`, `commands.rs`, `lib.rs`, `src/App.svelte` (`remove_pad` → `clear_pad`)
 
 **Contracts:**
 ```rust
 pub const AUDIO_EXTENSIONS: [&str; 6] = ["wav", "aif", "aiff", "flac", "mp3", "ogg"];
-pub fn is_audio_path(p: &Path) -> bool;
-/// Target pad, then the next EMPTY pads in reading order: right along the row, then the row above
-/// (y + 1), from x = 0. Stops at the top-right pad. Returns positions for `n` files (≤ n).
+pub fn is_audio_path(p: &Path) -> bool;                   // extension in AUDIO_EXTENSIONS, case-insensitive
+pub const PRESETS: [[u8; 3]; 16] = [[63,0,0],[63,20,0],[63,40,0],[63,63,0],[30,63,0],[0,63,0],[0,63,25],[0,63,63],[0,30,63],[0,0,63],[25,0,63],[45,0,63],[63,0,63],[63,10,30],[63,63,63],[63,45,30]];
+/// Row defaults (UI spec 2.1): row y (0 = bottom) gets preset number [1,2,4,6,8,10,12,14][y] (1-based) → PRESETS[n-1].
+pub fn row_default_color(y: u8) -> [u8; 3];
+/// The target pad first (filled or empty), then the next EMPTY pads in reading order:
+/// x+1.. along row y, then row y+1 from x = 0, and so on up to row 7. At most n positions.
 pub fn drop_positions(bank: &Bank, x: u8, y: u8, n: usize) -> Vec<(u8, u8)>;
-pub fn row_default_color(y: u8) -> [u8; 3];     // presets 1,2,4,6,8,10,12,14 (1-based) of the 16 swatches, row 0 = bottom
-/// Filled pad: replace sample, reset trim, keep the rest. Empty pad: Pad::new with row colour, mix = row.
+/// Filled pad: replace sample, trim_start_ms = 0, trim_end_ms = None; keep colour, volume, pitch, mode, choke, mix.
+/// Empty pad: Pad::new(x, y, sample, row_default_color(y)) — 0 dB, 0 st, one-shot, no choke, mix = row.
 pub fn assign_sample(bank: &mut Bank, x: u8, y: u8, sample: String);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)] #[serde(rename_all = "camelCase")]
 pub enum PadMove { Move, Swap, Copy }
-/// from/to may be in different banks. Empty target + no Ctrl = Move; filled target + no Ctrl = Swap;
-/// Ctrl = Copy (overwrites). Returns the kind applied, or None when from is empty or from == to.
+/// copy = Ctrl held: copy onto the target (overwrites a filled target); the source stays.
+/// Not copy: empty target → Move; filled target → Swap. x/y of moved pads are rewritten to their new spot.
+/// None when the source is empty or source == target.
 pub fn move_pad(set: &mut Set, from: (usize, u8, u8), to: (usize, u8, u8), copy: bool) -> Option<PadMove>;
-pub fn clear_pad(set: &mut Set, bank: usize, x: u8, y: u8) -> bool;
+pub fn clear_pad(set: &mut Set, bank: usize, x: u8, y: u8) -> bool;   // false when already empty
 ```
-- `AppState::drop_files(bank, x, y, paths: Vec<String>) -> Result<DropReport, String>`: rejects non-audio paths (count them), imports each via `km.import_sample_file` (collision → `-2`, `-3`, already in `kit::import_sample`), assigns via `drop_positions` / `assign_sample` (first file onto the target replaces if filled; following files only onto empty pads), inserts decoded samples into router, **one** history record (key `None`), `touch()`. `DropReport { set: Set, imported: usize, leftover: usize, rejected: usize }` (serde camelCase).
-- Commands: `drop_files(bank: usize, x: u8, y: u8, paths: Vec<String>) -> Result<DropReport,String>`, `move_pad(from_bank: usize, from_x: u8, from_y: u8, to_bank: usize, to_x: u8, to_y: u8, copy: bool) -> Option<Set>` (JS: `{ fromBank, fromX, fromY, toBank, toX, toY, copy }`), `clear_pad(bank, x, y) -> Set` (replaces `remove_pad`; update the UI call), `locate_sample(bank, x, y, path) -> Result<Set,String>` (import the picked file and replace the pad's sample keeping trim — LOCATE is a re-import of the same sound).
-- Hold voices on drag start: UI calls `release_pad` itself (Task 6); nothing here.
+```rust
+// src-tauri
+#[derive(Serialize)] #[serde(rename_all = "camelCase")]
+pub struct DropReport { pub set: Set, pub imported: usize, pub leftover: usize, pub rejected: usize }
+```
 
-**Tests (`kit_ops.rs`):** reading-order positions across a row end and around filled pads; bank full → fewer positions; row default colours for y=0 and y=7; assign to filled keeps colour/volume/pitch/mode/choke/mix and resets trim; move to empty; swap; copy overwrites and leaves the source; cross-bank move; from empty → None; `is_audio_path` case-insensitive.
+**Behaviour:**
+- `AppState::drop_files(bank, x, y, paths)`: split `paths` into audio (`is_audio_path`) and rejected; `positions = drop_positions(bank, x, y, audio.len())`; `leftover = audio.len() − positions.len()`; import the first `positions.len()` files with `km.import_sample_file` (copies into `samples/` with the `-2`, `-3`… collision suffix — already in `kit::import_sample`) and insert each decoded `Arc<Sample>` into `router.samples_mut()`; then one `edit(None, |set| …assign_sample for each (position, relative path)…)`. A decode failure counts as rejected and is logged. Returns the new set. Nothing imported → no history step.
+- `move_pad` command → `edit(None, |set| ops::move_pad(...))`; returns `Some(set)` when something moved, else `None`.
+- `clear_pad` → `edit(None, …)`; returns the set.
+- `locate_sample(bank, x, y, path)`: import the file, then `edit(None, …)` replacing that pad's `sample` with the new relative path and **keeping the trim** (it is the same sound found again); remove the old path from `km.failed_samples`. Empty pad → `Err("Pad is empty")`.
+- Remove the `remove_pad` command and `AppState::remove_pad`. `App.svelte` calls `clear_pad({ bank, x, y })` and uses the returned set.
+- Undo never deletes imported files (UI spec 5: "an undone import leaves the copied file in samples/").
 
-- [ ] Tests first → implement ops → PASS; AppState methods + state unit test (drop of 3 files onto a bank with 1 free pad after the target → imported 2, leftover 1; use `tempfile` set dir and tiny WAVs written with `hound`)
-- [ ] Commands registered; full verification; commit `feat(core): pad drop, move, swap, copy and clear operations`
+**Tests (`kit_ops.rs`):**
+- `drop_positions` on an empty bank from (6, 0), n = 4 → `[(6,0),(7,0),(0,1),(1,1)]`.
+- With (7,0) and (0,1) filled: from (6,0), n = 3 → `[(6,0),(1,1),(2,1)]`.
+- A filled target is still first: target (2,2) filled, n = 2 → `[(2,2),(3,2)]`.
+- From (7,7), n = 3 → `[(7,7)]` (bank end).
+- `row_default_color(0) == [63,0,0]`, `(1) == [63,20,0]`, `(2) == [63,63,0]`, `(7) == [63,10,30]`.
+- `assign_sample` on a filled pad with trim 100/400, colour [0,0,63], volume −6, pitch 3, hold, choke 2, mix 5 → only the sample changes and the trim resets to 0/None.
+- `move_pad` to an empty pad → Move (source gone, target has the pad with the new x/y); onto a filled pad → Swap (both rewritten); `copy: true` onto a filled pad → Copy (both equal except x/y); cross-bank move; empty source → None; same spot → None.
+- `clear_pad` → true, then false.
+- `is_audio_path("A.WAV")` true, `"a.txt"` false, `"noext"` false.
+- `src-tauri` state test (style of `src-tauri/tests/app_state.rs`): temp set dir, three 10 ms WAVs written with `hound`, bank where (2,0) is the only empty pad after the target (1,0) and everything from (3,0) up is filled → dropping 3 files on (1,0) → imported 2, leftover 1; one undo restores the bank.
+
+**Do not:** build the drag UI here; handle learn bindings (Task 12 extends these ops); delete files on undo.
+
+**Done when:** [ ] tests first → PASS; [ ] commands registered, `remove_pad` gone; [ ] full verification; commit `feat(core): pad drop, move, swap, copy and clear operations`.
 
 ### Task 5: Sample browser and audition
 
+**Purpose.** UI spec 4.4, plus 7.3: "Audition plays a file once through the master bus, not through a pad."
+
 **Files:**
-- Create: `src/components/SampleBrowser.svelte`, `src/lib/tree.ts` (+ `tree.test.ts`)
-- Modify: `crates/lpd-core/src/audio/engine.rs` (+ audition bus), `crates/lpd-core/tests/audio_engine.rs`, `crates/lpd-core/tests/no_alloc.rs`, `src-tauri/src/router.rs`, `state.rs`, `commands.rs`, `lib.rs`, `src/App.svelte`
+- Create: `src/components/SampleBrowser.svelte`, `src/lib/tree.ts` + `src/lib/tree.test.ts`
+- Modify: `crates/lpd-core/src/audio/engine.rs`, `crates/lpd-core/src/audio/mod.rs`, `crates/lpd-core/tests/audio_engine.rs`, `crates/lpd-core/tests/no_alloc.rs`, `src-tauri/src/router.rs`, `state.rs`, `commands.rs`, `lib.rs`, `src/App.svelte`
 
 **Contracts:**
-- Engine: `Command::Audition { sample: Arc<Sample> }` plays the whole sample once at unity, centred, **summed into the master before the master gain/clipper, bypassing groups**; a new audition stops the previous (3 ms fade); `Command::StopAudition`. Uses one dedicated voice slot outside the 32-voice pool; pad id `AUDITION_PAD = u16::MAX` (no `VoiceStarted`/`VoiceEnded` events for it, so lights never react).
-- Router keeps the last auditioned `Arc<Sample>` (so the audio thread never frees it) and replaces it on the next audition.
-- Commands: `list_dir(path: String) -> Result<Vec<DirEntry>, String>` (`DirEntry { name, path, isDir }`, folders first then files, case-insensitive name order, only audio files by `is_audio_path`, hidden/system entries skipped); `audition_file(path: String) -> Result<(), String>` (decode on a worker via `std::thread::spawn`, then push); `stop_audition()`; `load_into_pad(bank, x, y, path) -> Result<DropReport,String>` = `drop_files` with one path.
-- Library folder: `get_config().libraryDir`; FOLDER… key → `pick_folder` → `set_library_dir`.
-- `tree.ts` (pure): `interface Node { name; path; isDir; depth; open?: boolean; children?: Node[] }`; `flatten(root: Node[]): Node[]` (visible rows), `keyNav(rows, activeIndex, key): { index, action?: 'open'|'close'|'audition'|'toggle'|'load' }` implementing ↑ ↓ → ← Space Enter (UI spec 4.4).
-- `SampleBrowser.svelte` (mockup browser markup): header × key, library path LCD, FOLDER… key; `role="tree"` list, 22 px rows, mono 12 px, ♪ marker on the auditioned file; click file = audition; folders lazy-load children via `list_dir`; keyboard per `keyNav`; Enter = `load_into_pad` on the selected pad (notice if none / result counts); rows are pointer-drag sources for Task 6 (expose `ondragstartfile(path, event)` prop).
-- Drawer: BROWSER tab live (Ctrl+B), one panel at a time with the editor (UI spec 4 side drawer). Preview: a fake tree (`samples/` names from the preview set).
+```rust
+// engine.rs
+pub const AUDITION_PAD: u16 = u16::MAX;
+// new Command variants:
+Command::Audition { sample: Arc<Sample> },   // plays the whole sample once, unity gain, centred
+Command::StopAudition,
+```
+- The engine keeps two audition `Voice` slots outside `voices`, so the fade-out of the old audition (3 ms) and the new start overlap without allocation. Audition voices render into a dedicated stereo bus that is added to the output **after** the group sum and **before** `master_gain` and the soft clipper. They emit no `VoiceStarted`/`VoiceEnded`. `StopAll` and `StopAudition` fade them over 5 ms.
+- `Router::audition(sample: Arc<Sample>)` pushes the command and keeps the last two auditioned `Arc`s alive in a field, so the audio thread never drops the last reference.
+```rust
+#[derive(Serialize)] #[serde(rename_all = "camelCase")]
+pub struct DirEntry { pub name: String, pub path: String, pub is_dir: bool }
+```
+- `list_dir(path)`: `std::fs::read_dir`; folders first, then audio files (`ops::is_audio_path`), each group sorted case-insensitively; skip names starting with `.` and entries with the Windows hidden or system attribute (`MetadataExt::file_attributes() & (0x2 | 0x4)`); errors → `Err(message)`.
+- `audition_file(path)`: decode on a `std::thread::spawn` worker (`kit::decode_file`), then `router.audition(...)`; a decode error → `Err` (the UI shows the error confirmation `Can't play {name}`).
+- `load_into_pad(bank, x, y, path)` = `drop_files(bank, x, y, vec![path])`.
 
-**Tests:** engine: audition output non-zero with all groups muted (proves bypass), a second audition fades the first (no step > threshold, reuse the click test helper), no events emitted; `no_alloc` covers `Command::Audition` handling + render. `tree.test.ts`: flatten with open/closed folders, keyNav for each key at edges.
+```ts
+// tree.ts
+export interface TreeNode { name: string; path: string; isDir: boolean; depth: number; open?: boolean; children?: TreeNode[] }
+export function flatten(nodes: TreeNode[]): TreeNode[];                  // visible rows, depth-first; children only under open folders
+export type TreeAction = 'open' | 'close' | 'toggle' | 'audition' | 'load' | 'parent';
+export function keyNav(rows: TreeNode[], index: number, key: string): { index: number; action?: TreeAction };
+// ArrowDown / ArrowUp: ±1 clamped. ArrowRight: closed folder → 'open'; open folder → index of its first child; file → nothing.
+// ArrowLeft: open folder → 'close'; otherwise → index of the parent row with action 'parent'. Space: folder → 'toggle', file → 'audition'.
+// Enter: folder → 'toggle', file → 'load'. Other keys: index unchanged, no action.
+```
 
-- [ ] Engine tests first → implement → PASS; tree tests → PASS
-- [ ] Commands + component + drawer tab; preview check (browser opens, keyboard moves, Enter shows notice); full verification + build; commit `feat: sample browser with audition`
+**UI (`SampleBrowser.svelte`; mockup markup 539, CSS 114–133 + 370, JS 1134–1170):**
+- Props: `{ libraryDir: string | null; selected: { bank: number; x: number; y: number } | null; onclose: () => void; onload: (path: string) => void; ondragfile: (path: string, e: PointerEvent) => void }`.
+- Header: `×` close key (`aria-label="Close browser"`), library path LCD (`middleTruncate(dir, 34)`, full path in `title`; `NO LIBRARY FOLDER` when null), `FOLDER…` key → `pick_folder({ title: 'Choose sample library folder', defaultDir: libraryDir })` → `set_library_dir({ dir })`.
+- Tree: `role="tree"`, `aria-activedescendant`, `tabindex="0"`; `.tree` with `.ti.folder` / `.ti.file` rows (22 px, mono 12 px; file rows show the extension in `.ext`); folder rows have `aria-expanded` and a `▸`/`▾` glyph; children load lazily with `list_dir` on the first open and are cached; `.ti.active` marks the keyboard cursor; `.ti.playing` (♪) marks the file last auditioned for 1.5 s or until another audition.
+- Click a file = audition it and make it active. Click a folder = toggle. Keyboard per `keyNav` (Space auditions, Enter loads into the selected pad via `onload`).
+- `pointerdown` on a file row calls `ondragfile(path, e)` (Task 6 turns it into a drag after 4 px; a click without movement still auditions).
+- No library folder: the text `Choose a library folder to browse samples.` and the FOLDER… key.
+- `App.svelte`: drawer state becomes `'editor' | 'browser' | null`; the BROWSER tab (`.dtab`, now a blank cap) becomes live: `class:on`, `role="tab"`, `aria-selected`, title `Sample browser (Ctrl+B)`. Ctrl+B toggles. One panel at a time. Esc closes the drawer (via `pushEsc` while it is open). `onload(path)` → `load_into_pad` for the selected pad → replace the set, confirm `Imported 1` (or the bank-full text from Task 6), refresh history. No selected pad → error confirmation `Select a pad first`.
+- Preview fallback: `list_dir` returns a fake tree with folders `Kicks`, `Snares`, `FX` and the preview set's sample names.
+
+**Tests:**
+- `audio_engine.rs`: (a) all 8 groups muted, an audition of a 0.5-amplitude 100-frame DC sample renders non-zero output (it bypasses groups); (b) master gain 0 → silent (the audition sits before the master); (c) a second audition while the first plays: no sample-to-sample step above the existing click-test threshold; (d) the event queue stays empty.
+- `no_alloc.rs`: handling `Audition` and rendering 2 blocks with an audition active does not allocate.
+- `tree.test.ts`: flatten with nested open and closed folders; keyNav for each key at the first row, the last row, a nested file (ArrowLeft → parent index), a closed folder and an open folder.
+
+**Do not:** route auditions through a pad or group; add a search box (spec: ask before adding); scan the library recursively up front.
+
+**Done when:** [ ] tests first → PASS; [ ] preview: the BROWSER tab opens the browser, the keyboard moves the cursor, Space marks ♪, Enter with no pad selected shows the error confirmation; [ ] full verification + build; commit `feat: sample browser with audition`.
 
 ### Task 6: Drag and drop
 
-**Files:**
-- Create: `src/lib/dnd.ts` (+ `dnd.test.ts`)
-- Modify: `src/components/PadGrid.svelte`, `LaunchpadPanel.svelte`, `SampleBrowser.svelte`, `PadEditor.svelte`, `src/App.svelte`, `src/styles/app.css` (ghost + dashed bezel + tag classes, copied from the mockup's drag styles)
+**Purpose.** UI spec 5 in the UI: pad drags, browser file drags, Explorer file drops.
 
-**Contracts (UI spec 5):**
+**Files:**
+- Create: `src/lib/dnd.ts` + `src/lib/dnd.test.ts`, `src/components/DragGhost.svelte`
+- Modify: `src/components/PadGrid.svelte`, `LaunchpadPanel.svelte`, `SampleBrowser.svelte`, `PadEditor.svelte`, `src/App.svelte`, `src/styles/app.css` (port `.pad.drop`, `.pad.nodrop`, `.tag`, `.scrib.drop`, `.editor.drop`, `.ghost` from mockup lines 150–165 and 341–342 if missing)
+
+**Contracts:**
 ```ts
 export interface Rect { left: number; top: number; width: number; height: number }
 export type DropTarget = { kind: 'pad'; x: number; y: number } | { kind: 'bank'; bank: number } | { kind: 'editor' } | null;
+/** Pads first, then banks, then the editor. Left/top edges inclusive, right/bottom exclusive. */
 export function hitTest(px: number, py: number, pads: { x: number; y: number; rect: Rect }[], banks: { bank: number; rect: Rect }[], editor: Rect | null): DropTarget;
-export function dropTag(source: 'files' | 'pad', target: DropTarget, targetFilled: boolean, ctrl: boolean, count: number): 'IMPORT' | `IMPORT ×${number}` | 'REPLACE' | 'MOVE' | 'SWAP' | 'COPY' | null;
-export const DRAG_THRESHOLD = 4; export const BANK_HOVER_MS = 400;
+export type DropTag = 'IMPORT' | `IMPORT ×${number}` | 'REPLACE' | 'MOVE' | 'SWAP' | 'COPY';
+export function dropTag(source: 'files' | 'pad', targetFilled: boolean, ctrl: boolean, count: number): DropTag;
+// files: count > 1 → `IMPORT ×${count}`; else filled → 'REPLACE', empty → 'IMPORT'.
+// pad: ctrl → 'COPY'; filled → 'SWAP'; empty → 'MOVE'.
+export const DRAG_THRESHOLD = 4;     // px; below = click
+export const BANK_HOVER_MS = 400;
 export function physicalToCss(p: { x: number; y: number }, dpr: number): { x: number; y: number };
+export function isAudioName(name: string): boolean;     // same extension list as Rust AUDIO_EXTENSIONS
+export function passedThreshold(dx: number, dy: number): boolean; // Math.hypot(dx, dy) >= DRAG_THRESHOLD
 ```
-- Pointer-based drags only (no HTML5 DnD). Pad drag starts after 4 px movement **after** the press sounded; on start call `release_pad` for hold voices; ghost = small pad in source colour + name following the pointer; target gets dashed white bezel + LCD tag (`dropTag`); Ctrl at drop = copy; drop calls `move_pad`; Esc or drop outside = cancel. Browser row drag: same ghost (file name), drop calls `drop_files` with one path; onto the editor = selected pad.
-- Hovering a side button / scribble strip 400 ms switches bank (`chooseBank`), drag continues.
-- Explorer drops: `listen('tauri://drag-over', { position })`, `listen('tauri://drag-drop', { paths, position })`, `listen('tauri://drag-leave')` (Tauri 2 window events; `position` is physical px → `physicalToCss`). Non-audio (by extension, `isAudioName` in `dnd.ts` mirroring `AUDIO_EXTENSIONS`) → red bezel on hovered pad + notice `Not an audio file`. Several files → `drop_files`; report `n files not imported — bank full` when `leftover > 0`; confirmation `✓ Imported n`.
-- Pad rects come from `PadGrid` (`bind:this` + `getBoundingClientRect` on drag start, refreshed on bank switch).
-- Every drop = one undo step (backend does it); after a drop replace `currentSet` with the returned set and refresh history state.
 
-**Tests (`dnd.test.ts`):** hitTest on pad/bank/editor/outside; dropTag table for all rows of UI spec 5 incl. `IMPORT ×3`; physicalToCss at dpr 1.5.
+**Behaviour (UI spec 5, exact):**
 
-- [ ] Tests first → implement → PASS
-- [ ] Wire pad drags, browser drags, Explorer drops, bank hover; preview check: drag a pad onto an empty pad in the preview set (preview applies the move locally using a TS port of `move_pad` rules from `dnd.ts`? **No** — keep it simple: preview shows ghost and tag, and drops are no-ops there)
-- [ ] Full verification + build; commit `feat(ui): drag and drop for pads, browser files and Explorer files`
+| Drag | Drop on | Result | Tag |
+|---|---|---|---|
+| Explorer/browser file | empty pad | copy to `samples/` (clash → `-2`, `-3`…); defaults: row colour, 0 dB, 0 st, ONE-SHOT, no choke, mix = row | IMPORT |
+| Explorer/browser file | filled pad | replace sample, reset trim; keep colour, volume, pitch, mode, choke, mix | REPLACE |
+| several files | pad | target pad, then the next **empty** pads in reading order; leftovers dropped with the notice `{n} files not imported — bank full` | IMPORT ×n |
+| pad | empty pad | move (all params) | MOVE |
+| pad | filled pad | swap | SWAP |
+| pad + Ctrl | any pad | copy (overwrites a filled target) | COPY |
+| anything | side button / scribble strip held 400 ms | switch to that bank, the drag continues | — |
+| non-audio file or folder | anywhere | not-allowed cursor, red bezel on the hovered pad, notice `Not an audio file` | — |
+| anything | outside targets, or Esc | cancel (no drag-to-delete) | — |
 
-### Task 7: Pad editor completion, pad context menu, grid accessibility
+- Pointer events only (no HTML5 DnD). Pad drag: the pad plays on `pointerdown` (exists). The drag starts when the pointer moves ≥ 4 px while held. At the start call `release_pad` for that pad (hold voices are released) and mark the press as consumed so `pointerup` sends no second release. The ghost (`DragGhost.svelte`: `.ghost.screen`, fixed, follows the pointer, `pointer-events: none`) shows a 22 px swatch in the source colour with a glow and the sample label. The hovered target pad gets `.drop` (dashed white bezel) and a `.tag` LCD with `dropTag(...)`. Ctrl is read live from each pointer event (`e.ctrlKey`), so pressing Ctrl mid-drag switches MOVE/SWAP → COPY. A drop on a pad → `move_pad({ fromBank, fromX, fromY, toBank: activeBank, toX, toY, copy })`; a non-null result replaces `currentSet`; the target pad gets selected.
+- Hovering a side button or scribble strip for 400 ms (`BANK_HOVER_MS`) shows `.scrib.drop` while waiting, then `chooseBank(i)`; the drag continues and the pad rects are re-read.
+- Browser drag: `SampleBrowser` calls `ondragfile(path, e)`; same machinery with source `files`, count 1, ghost label = file name. A drop on a pad → `drop_files({ bank: activeBank, x, y, paths: [path] })`; a drop on the editor (`.editor.drop` while hovered) targets the selected pad. A browser press without 4 px of movement stays a click (audition).
+- Explorer drops (Tauri 2 webview events): `listen('tauri://drag-enter', { paths, position })`, `listen('tauri://drag-over', { position })`, `listen('tauri://drag-drop', { paths, position })`, `listen('tauri://drag-leave')`. `position` is in physical px: convert with `physicalToCss(position, devicePixelRatio)`. Remember `paths` on enter. If none is audio (`isAudioName`): the hovered pad gets `.nodrop` (red bezel), the body gets `cursor: not-allowed`, and a drop shows the error confirmation `Not an audio file`. Otherwise the hovered pad shows `.drop` + the tag (`IMPORT ×n` for several files). Drop → `drop_files` → replace the set; confirm `Imported {imported}`; `leftover > 0` → error confirmation `{leftover} files not imported — bank full` (singular `1 file not imported — bank full`); `rejected > 0` and nothing imported → `Not an audio file`. Bank hover works for Explorer drags too.
+- Rects: `PadGrid` exposes `rects(): { x, y, rect }[]` (`getBoundingClientRect` of the pad elements, read at drag start and after a bank switch); `LaunchpadPanel` exposes bank rects (side button and scribble strip both count as bank `i`); `PadEditor` exposes its root rect while the drawer shows the editor.
+- Esc during a drag cancels (`pushEsc` while dragging); a drop outside every target cancels; nothing is deleted.
+- After each successful drop: `refreshHistory()` and `refreshMissing()`.
+- Preview: drags show the ghost and tags; drops call `invoke` (resolves `undefined`) and change nothing.
+
+**Tests (`dnd.test.ts`):** `hitTest` returns the pad for a point inside a pad rect, the bank for a scribble rect, the editor, and null outside; edges: left/top inclusive, right/bottom exclusive. `dropTag` for every row of the table incl. `IMPORT ×3`. `physicalToCss({x: 300, y: 150}, 1.5)` → `{x: 200, y: 100}`. `isAudioName('A.FLAC')` true, `'readme.md'` false. `passedThreshold(3, 0)` false, `(3, 3)` true.
+
+**Do not:** use HTML5 `draggable`; add drag-to-delete; open the drawer on drop; call `trigger_pad` during a drag.
+
+**Done when:** [ ] tests first → PASS; [ ] preview: dragging a pad shows the ghost and the MOVE/SWAP/COPY tags, Esc cancels, bank hover switches banks after 400 ms; [ ] full verification + build; commit `feat(ui): drag and drop for pads, browser files and Explorer files`.
+
+### Task 7: Pad editor completion, pad context menu, grid keyboard and labels
+
+**Purpose.** UI spec 4.1, 4.3 and 11.
 
 **Files:**
-- Create: `src/components/ContextMenu.svelte` (generic: items `{ label, shortcut?, disabled?, checked?, action }`, opens at pointer or at the focused control for Shift+F10 / Menu key, Esc closes, arrow keys move)
-- Modify: `src/components/PadEditor.svelte`, `PadGrid.svelte`, `LaunchpadPanel.svelte`, `src/App.svelte`
+- Modify: `src/components/PadEditor.svelte`, `PadGrid.svelte`, `LaunchpadPanel.svelte`, `src/App.svelte`, `src/lib/model.ts` + `model.test.ts`, `src-tauri/src/commands.rs` + `state.rs` (`update_pad` gains `key`)
 
-**Contracts (UI spec 4.1, 4.3, 11):**
-- Pad editor: replace the free-text SAMPLE path input with the spec layout: header `R4·C2`, name 16 px, `0.45 s · 44.1 kHz`; **missing sample box** (red `Sample missing: samples/…` + LOCATE… → `pick_file('Locate sample', AUDIO_EXTENSIONS)` → `locate_sample`) when the pad's sample is in `missing_samples()`; empty-pad text exactly: "Empty pad. Drop a sample here, drag one from the browser, or press Enter on a file in the browser."; editor is a drop target (Task 6). Trim: min 10 ms apart (already), clicks elsewhere audition (already). Knob drags send `update_pad` with history key `pad:{bank}:{x}:{y}:{field}` so a drag coalesces — add an optional `key` argument to the `update_pad` command (`update_pad(bank, pad, key: Option<String>)`; JS `{ bank, pad, key }`).
-- MIDI section: LEARN key (Task 12 makes it live; here render it with `aria-disabled` until Task 12) and the binding LCD placeholder hidden.
-- Pad grid: `role="grid"`, one Tab stop, arrows move selection, `aria-activedescendant`, pad labels per spec 11 ("Row 4, column 2, KICK_808, mix 4, choke off" / "…, empty" / "…, sample missing"); missing pad shows `!` glyph (steady with reduced motion); empty pad faint `+` on hover; selection bezel (exists).
-- Right-click pad (or Shift+F10 / Menu): Learn MIDI note… (Task 12; disabled until then), Clear pad (`clear_pad`), Show sample in Explorer (`reveal_path`).
-- Delete key / CLEAR key use `clear_pad` (undoable, confirmation `✓ Pad cleared`).
-- Hardware pad hit selects the pad (exists; keep).
+**Contracts:**
+- `update_pad(bank: usize, pad: Pad, key: Option<String>)`; JS `{ bank, pad, key }`; Rust passes `key.as_deref()` to `edit`. Knob and trim drags send `key: \`pad:${bank}:${x}:${y}:${field}\`` so one drag = one undo step; swatch clicks and mode/choke/mix keys send no key.
+- `model.ts`: `export function padAriaLabel(pad: Pad | null, x: number, y: number, groups: Group[], missing: boolean): string` → `Row 4, column 2, KICK 808, mix 4, choke off` / `Row 1, column 1, empty` / `Row 2, column 3, SNARE, mix 2, choke 1, sample missing` (row = y + 1, column = x + 1, name = `padLabel(sample).toUpperCase()`, mix = mixGroup + 1).
 
-**Tests:** extend `model.test.ts` with `padAriaLabel(pad | null, x, y, groups, missing)` (pure helper in `model.ts`).
+**Pad editor (mockup JS 1066–1133, CSS 160–180), top to bottom — exact:**
+1. Header: `R{y+1}·C{x+1}` (dim LCD), sample name 16 px (`padLabel(sample).toUpperCase()`, or `EMPTY`), `{length s} · {rate kHz}` (`0.45 s · 44.1 kHz`) when the peaks are known, `CLEAR` key (`clear_pad`, confirmation `Pad cleared`).
+2. Missing sample (the pad's sample is in `missing`): `.errbox` red box `Sample missing: {sample}` + a `LOCATE…` key → `pick_file({ title: 'Locate sample', extensions: ['wav','aif','aiff','flac','mp3','ogg'] })` → `locate_sample({ bank, x, y, path })` → replace the set, refresh missing and peaks.
+3. SAMPLE · TRIM: the waveform (exists; keep the drawing code); handles drag with the history key; min 10 ms apart; a click elsewhere auditions (exists). LCD `START x ms   END y ms`.
+4. COLOUR (exists: readout, 16 swatches 8×2, white ring on the current one, `+RGB` with three 0–63 knobs).
+5. VOLUME knob (−60…+6; −60 shows `−∞`), PITCH knob (±24 st, 1 st steps, Shift 0.1), MODE switch ONE-SHOT | HOLD (exists).
+6. CHOKE row OFF, 1–8; MIX GROUP row 1–8 with the group legend on the right (exists).
+7. MIDI: LEARN key with `aria-disabled="true"` and title `MIDI learn — not wired yet` until Task 12; no binding LCD yet.
+- **Remove** the free-text SAMPLE path input and `pathDraft`.
+- Empty pad: header `EMPTY` and exactly `Empty pad. Drop a sample here, drag one from the browser, or press Enter on a file in the browser.` The editor root is a drop target (Task 6).
+- Props gain `bank: number`, `missing: boolean`, `onlocate: () => void`, `onclear: () => void`; `onupdate(pad, key?)`.
 
-- [ ] Test first → helper → PASS; components; preview check (right-click menu opens/closes with Esc, arrows move selection); full verification + build; commit `feat(ui): pad editor missing-sample box, pad menu and grid keyboard`
+**Pad grid:**
+- `role="grid"` container with a single `tabindex="0"` stop and `aria-activedescendant` = the selected pad's element id (`pad-{x}-{y}`); rows `role="row"`, pads `role="gridcell"` with `aria-label={padAriaLabel(...)}` and `aria-selected`.
+- Arrows inside the grid move the selection (App's handler does it when the grid is focused); Space plays the selected pad.
+- Missing pad: a `!` glyph (`.miss`, top-right, white with a dark shadow) in addition to the LED blink; with reduced motion the glyph stays and the pad shows steady red (`@media (prefers-reduced-motion: reduce)` on `.pad.missing`).
+- Empty pad: a faint `+` centred on hover (`.pad.empty:hover::after { content: '+' }` in `--lcd-dim` at 40 %).
+- Right-click a pad (or Shift+F10 / ContextMenu key while the grid is focused; the menu then opens at the selected pad's rect): `ContextMenu` items `Learn MIDI note…` (disabled until Task 12), `Clear pad` with shortcut `Del` (filled pads only), `Show sample in Explorer` (filled pads only → `reveal_path({ path: pad.sample })`). The right-click selects the pad but does not play it.
+- The Delete key and the CLEAR key → `clear_pad`.
+
+**Tests:** `model.test.ts`: the three `padAriaLabel` examples above.
+
+**Do not:** bring back a typed path input; play a pad on right-click; change the waveform drawing.
+
+**Done when:** [ ] test first → PASS; [ ] preview: the right-click menu opens at the pad and closes with Esc; Shift+F10 on the focused grid opens it at the selected pad; arrows move the bezel; [ ] full verification + build; commit `feat(ui): pad editor missing-sample box, pad menu and grid keyboard`.
 
 ---
 
 ## Phase C — Audio and telemetry
 
-### Task 8: Engine taps, FFT and the telemetry stream
+### Task 8: Engine taps, FFT, telemetry stream, dropout counter
+
+**Purpose.** UI spec 4.8 and 7.3 "Telemetry stream"; engine spec 9 dropouts.
 
 **Files:**
-- Create: `crates/lpd-core/src/audio/taps.rs`, `crates/lpd-core/src/audio/fft.rs`, tests `crates/lpd-core/tests/audio_taps.rs`, `crates/lpd-core/tests/audio_fft.rs`, `src-tauri/src/telemetry.rs`
-- Modify: `crates/lpd-core/src/audio/{engine,mod}.rs`, `no_alloc.rs`, `src-tauri/src/audio.rs`, `state.rs`, `lib.rs`, `commands.rs`, `src/components/Telemetry.svelte`, `src/lib/activity.ts`, `src/App.svelte`
+- Create: `crates/lpd-core/src/audio/taps.rs`, `crates/lpd-core/src/audio/fft.rs`, `crates/lpd-core/tests/audio_taps.rs`, `crates/lpd-core/tests/audio_fft.rs`, `src-tauri/src/telemetry.rs`
+- Modify: `crates/lpd-core/src/audio/{engine,mod}.rs`, `crates/lpd-core/tests/no_alloc.rs`, `src-tauri/src/audio.rs`, `state.rs`, `lib.rs`, `commands.rs`, `src/components/Telemetry.svelte`, `src/components/MixerStrip.svelte` (fills only), `src/lib/activity.ts`, `src/App.svelte`, `src/lib/model.ts`
 
 **Contracts:**
 ```rust
 // taps.rs
 pub const SCOPE_CAPACITY: usize = 8192;
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Levels { pub master: [f32; 2], pub groups: [f32; 8] } // peak |x| since the last block, post-fader
-pub struct TapsTx { /* Producer<f32> mono, Producer<Levels> */ }
-pub struct Taps { pub scope: Consumer<f32>, pub levels: Consumer<Levels> }
+pub const LEVELS_CAPACITY: usize = 512;
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Levels { pub master: [f32; 2], pub groups: [f32; 8] }   // peak |x| over one rendered block
+pub struct Taps { pub scope: rtrb::Consumer<f32>, pub levels: rtrb::Consumer<Levels> }
 // engine.rs
-impl Engine { pub fn with_taps(sample_rate: u32) -> (Engine, Consumer<Event>, Taps); } // `new` keeps its signature (no taps)
+impl Engine { pub fn with_taps(sample_rate: u32) -> (Engine, rtrb::Consumer<Event>, Taps); }   // `new` unchanged, no taps
 ```
-- After the master stage, each block pushes the mono sum `(l+r)/2` of every frame into the scope queue (drop on full — `push` error ignored) and one `Levels` (master L/R peak, per-group post-fader/pan peak, 0 for muted/solo-silenced groups). No allocation.
+- In `render_block`, when taps exist: per group, the peak of its output contribution after low-pass, pan and gain (0 when muted or silenced by solo); master L/R peak after the soft clipper; push one `Levels` per block (ignore a full queue); push the mono sum `(l + r) / 2` of every output frame into the scope queue (stop pushing when full). No allocation.
 ```rust
 // fft.rs
-pub struct Fft2048; // precomputed twiddles + Hann window, allocated in new()
-impl Fft2048 { pub fn new() -> Self; pub fn magnitudes(&mut self, input: &[f32; 2048]) -> &[f32; 1024]; }
+pub const FFT_SIZE: usize = 2048;
 pub const BANDS: usize = 28;
-/// 28 log-spaced bands 40 Hz–16 kHz: max magnitude per band in dBFS (−100 floor); plus the loudest bin's frequency.
-pub fn bands(mags: &[f32; 1024], sample_rate: u32) -> ([f32; BANDS], f32);
-/// Index of the first rising zero crossing in the first half of `buf`, so a 1024 window fits after it.
+pub struct Fft { /* twiddles, Hann window, bit-reversal table, work buffers — all allocated in new() */ }
+impl Fft { pub fn new() -> Self; pub fn magnitudes(&mut self, input: &[f32; FFT_SIZE]) -> &[f32; FFT_SIZE / 2]; } // Hann-windowed, scaled |X|/(N/4) so a full-scale sine ≈ 1.0
+/// 28 log-spaced bands from 40 Hz to 16 kHz; each band = max magnitude of its bins in dBFS (floor −100);
+/// a band narrower than one bin takes the nearest bin. Second value: frequency of the loudest bin overall (0 when silent).
+pub fn bands(mags: &[f32; FFT_SIZE / 2], sample_rate: u32) -> ([f32; BANDS], f32);
+/// First index i in 1..buf.len()/2 with buf[i-1] < 0 <= buf[i]; 0 if none.
 pub fn trigger_index(buf: &[f32]) -> usize;
+pub fn to_dbfs(x: f32) -> f32;   // 20·log10(x), floor −100
 ```
-- `telemetry.rs`: a 60 Hz thread (spawned in `setup`) drains `Taps` into a 2048 ring, keeps max levels since the last frame, and — only while `AppState.telemetry_on` (AtomicBool) — emits `telemetry`:
-  `{ scope: number[1024] (from trigger_index, rounded to 1e-3), bands: number[28] (dBFS), peakHz: number, master: [l, r] (dBFS, −100 floor), groups: number[8] (linear peak 0..1) }`.
-  Command `set_telemetry(on: bool)`; the UI turns it on while the Play screen is shown **and** the window is visible (`document.visibilitychange`).
-- Dropouts (engine spec 9; UI notice 9): in `audio.rs`'s callback, measure the interval between callbacks with `Instant`; an interval > 1.8 × the buffer duration counts as a dropout (`AtomicU32` count + `AtomicU64` last-dropout ms since start). `get_audio_status` gains `dropouts: u32` and `lastDropoutAgoMs: Option<u64>`; the telemetry thread emits `audio-status` whenever the count changes. Command `reset_dropouts()`.
-- `audio.rs` uses `Engine::with_taps`; `AudioSystem` gains `taps: Taps`.
-- UI `Telemetry.svelte`: replace the STANDBY stand-ins with the real feed (scope trace + 3 afterglow traces, none with reduced motion; spectrum segments with falling bars ~12 %/frame and slow cream peak caps; `PEAK f` readout; L/R 36-segment meters −48…+3, falling 36 dB/s, 1.2 s hold, `PK x dB`); silent (master < −90 dBFS for 0.5 s) → flat trace + `STANDBY · PLAY A PAD`. Keep the raster/bit-crush drawing code; only the data source changes. Session clock `T+mm:ss.t`. The folded 30 px strip draws vertical L/R meters.
-- `activity.ts`: `setLevels(groups: number[])` feeds `energy[]` from the real per-channel peaks when a feed is present (hit-based estimate stays for the browser preview). Mixer `.f-fill` and MASTER L/R fills use the same feed (`--m` on the fader's own scale via `dbToPos`).
+- `src-tauri/src/telemetry.rs`: a thread spawned in `setup()` with a 16 ms period. It owns an `Fft` and a 2048-sample ring (latest samples). Each tick: drain `taps.scope` into the ring; drain `taps.levels`, keeping the per-channel max since the last frame; if `AppState.telemetry_on` (AtomicBool) is set, emit `telemetry` `{ scope, bands, peakHz, master, groups }` where `scope` = 1024 samples of the ring starting at `trigger_index(ring)`, rounded to 3 decimals; `bands` = dBFS ×28; `master` = `[dBFS L, dBFS R]`; `groups` = linear peaks 0..1. The taps live in `AppState.taps: Arc<Mutex<Option<Taps>>>` so Task 9 can swap them.
+- Command `set_telemetry(on: bool)`. The UI sends `true` while `mode === 'play'` and `document.visibilityState === 'visible'`, otherwise `false` (UI spec: nothing is sent while the window is hidden).
+- Dropouts (`audio.rs`): the output callback records `Instant::now()`; an interval between callbacks longer than `1.8 × frames / rate` is a dropout. The pure rule is `pub fn is_dropout(interval: Duration, frames: usize, rate: u32) -> bool`. The count (`AtomicU32`) and `last_dropout_ms` (`AtomicU64`, ms since stream start) live in an `Arc<AudioStats>` shared with `AppState`. The first callback never counts. `AudioStatus` gains `dropouts: u32` and `last_dropout_ago_ms: Option<u64>` (JSON `dropouts`, `lastDropoutAgoMs`), filled when read. The telemetry thread emits `audio-status` whenever the dropout count changes. `reset_dropouts()` zeroes the counter.
+- `audio.rs::start` uses `Engine::with_taps`; `AudioSystem` gains `taps: Taps` and `stats: Arc<AudioStats>`.
 
-**Tests:** `audio_fft.rs`: a 1 kHz sine at 48 kHz → loudest band contains 1 kHz and `peakHz` within ±25 Hz; silence → all bands −100; `trigger_index` on a sine finds a rising crossing. `audio_taps.rs`: render a sample through group 3 → `levels.groups[3] > 0`, others 0; muted group → 0; scope receives `frames` values. `no_alloc.rs`: `with_taps` engine render does not allocate.
+**UI:**
+- `Telemetry.svelte` (mockup JS 1661–1823, CSS 421–445): keep the existing raster/bit-crush pipeline, fonts and layout; replace only the data:
+  - Head: orange pill `SIGNAL`; clock `T+mm:ss.t` since app start; 4 beat lamps (Task 14 drives them; dark until then); fold ▸ (exists).
+  - Oscilloscope: trace from `scope` (near-white, 1.5 px with glow) plus 3 fading afterglow traces from the previous frames (none with reduced motion); readouts `CH1 · MASTER` and `{x} ms/div` with `x = 1024 / sampleRate × 1000 / 8`, one decimal (2.7 ms/div at 48 kHz; sample rate from `audioStatus`). Silent = master below −90 dBFS for 500 ms → flat trace + `STANDBY · PLAY A PAD`.
+  - Spectrum: 28 bars from `bands`, −72…0 dBFS mapped to 0…1 of the height; 4 px segments with 2 px gaps (raster); teal below 60 % of the height, amber to 85 %, red above; bars fall ~12 % of the height per frame; cream peak caps hold 400 ms then fall 1 % per frame; scale `100 / 1k / 10k`; readout `PEAK {f}` (`94 Hz`, `1.2 kHz`).
+  - Orbit radar: channel energy from `groups` (keeps the 110 ms half-life decay in `activity.ts`); outer ring and planet: Task 14.
+  - Master L/R: 36-segment meters −48…+3 dB (green < −9, amber to 0, red above), falling 36 dB/s, 1.2 s peak hold; scale −40 / −24 / −12 / −6 / 0; readout `PK {x} dB` (the larger hold value, one decimal, true minus).
+  - Folded strip (30 px): vertical L/R meters from the same data.
+  - Browser preview (no feed): keep today's STANDBY drawing.
+- `activity.ts`: add `export function setLevels(groups: number[]): void` — `energy[i] = max(energy[i], groups[i])`. The hit-based `hitGroup` stays for the preview and as the fallback when no feed arrived within 1 s; `App.svelte` stops calling `hitGroup` in `padInput` while a feed is live.
+- Mixer level fills (`.f-fill[data-group]`, exist): `--m` = `dbToPos` of the channel level in dB, i.e. on the fader's own scale; MASTER gets two fills (L left of the slot, R right) from `master` (mockup CSS 375–388). Colours come from the existing CSS (green to 0 dB, amber to +4, red above).
+- Top-strip chips (exist) keep reading `energy`.
+- Status strip `DROPS {n}` from `audioStatus.dropouts`; the AUDIO lamp is amber while `lastDropoutAgoMs < 10000` (re-evaluated every second); the notice input `dropoutRecent` uses the same rule.
 
-- [ ] Rust tests first → implement taps/fft → PASS; telemetry thread + dropout counter (unit-test the dropout rule as a pure fn `is_dropout(interval, buffer_frames, rate)`)
-- [ ] UI feed; preview keeps STANDBY; full verification + build; commit `feat: telemetry stream from engine taps, FFT and dropout counter`
+**Tests:**
+- `audio_fft.rs`: a 1 kHz full-scale sine at 48 kHz → `peakHz` within ±25 Hz of 1000; the band containing 1 kHz is the loudest and > −6 dBFS; silence → all bands −100 and `peakHz == 0`; `trigger_index` on a sine that starts at phase π/2 returns the first sample after the negative half-cycle; an all-positive buffer → 0; `to_dbfs(1.0) == 0`, `to_dbfs(0.0) == −100`.
+- `audio_taps.rs`: a DC sample on group 3 → `levels.groups[3] > 0` and every other group 0; the same with group 3 muted → 0; master peak > 0; after rendering 256 frames the scope consumer holds 256 values.
+- `no_alloc.rs`: a `with_taps` engine, trigger + render 4 blocks inside `assert_no_alloc`, also with the scope queue full.
+- `audio.rs` unit: `is_dropout(12 ms, 256, 48000)` true (threshold 9.6 ms), `is_dropout(6 ms, 256, 48000)` false.
 
-### Task 9: Audio controller and SETUP › AUDIO
+**Do not:** compute the FFT on the audio thread; send telemetry while the window is hidden or on another screen; change the telemetry look.
+
+**Done when:** [ ] tests first → PASS; [ ] full verification + build; commit `feat: telemetry stream from engine taps, FFT and dropout counter`.
+
+### Task 9: Audio controller, SETUP › AUDIO, SETUP as racks
+
+**Purpose.** UI spec 8 item 1 and 7.1 rows 2, 8, 9; engine spec 9 (device lost, ASIO fallback).
 
 **Files:**
-- Create: `src/components/SetupAudio.svelte`
-- Modify: `src-tauri/src/audio.rs`, `src-tauri/src/lib.rs`, `state.rs`, `router.rs`, `commands.rs`, `config.rs` (AudioPrefs), `src/components/SetupDisplay.svelte` → split: keep DISPLAY there; `src/App.svelte` setup screen becomes rack list AUDIO, MIDI DEVICES, MIDI LEARN, DISPLAY, LOG (UI spec 8)
+- Create: `src/components/SetupAudio.svelte`, `src/components/RackUnit.svelte` (wraps `Plate` with four registration marks and the orange pill title; mockup CSS 276–290, JS 1519–1546)
+- Modify: `src-tauri/src/audio.rs`, `lib.rs`, `state.rs`, `router.rs`, `commands.rs`, `config.rs`, `telemetry.rs`, `src/App.svelte`, `src/components/SetupDisplay.svelte` (DISPLAY rack only), `src/lib/model.ts`
 
 **Contracts:**
-- `cpal::Stream` is not `Send`: an **audio owner thread** holds the stream and receives `AudioRequest::{Start(AudioPrefs), Stop}` over `std::sync::mpsc`; replies with `Result<AudioStatus>`. On start it builds a new `Engine::with_taps`, hands the new `Producer<Command>` / `Consumer<Event>` to the router (`Router::replace_audio(tx, rx)`: re-sends mixer + keys settings, clears voice counts) and the new `Taps` to the telemetry thread (`Mutex<Option<Taps>>` swap).
-- Stream error callback (device lost) → status `stopped` + event `audio-status` with `state: "lost"`; notice 2 "Audio device lost" with RECONNECT → `audio_reconnect()` (restart with current prefs; live only when stopped).
-- ASIO: when prefs say `asio` but `asio_host()` fails, start WASAPI and set `asioFallback: true` in status (notice 8, DISMISS).
-- Commands: `audio_devices(backend: String) -> Vec<AudioDevice { name, isDefault, bufferSizes: Vec<u32> }>` (buffer sizes = powers of two 32…2048 inside the device's `SupportedBufferSize::Range`, or `[]` for Unknown = "auto" only), `asio_available() -> AsioInfo { available: bool, reason: Option<String> }` (not built / no driver), `set_audio(prefs: AudioPrefs) -> Result<AudioStatus,String>` (saves prefs to config), `audio_reconnect() -> Result<AudioStatus,String>`.
-- `AudioStatus` gains `backend`, `latency: { midiToBufferMs, outputMs, totalMs }` (midi→buffer = buffer / rate; output from `OutputCallbackInfo::timestamp().playback - callback`, stored as an AtomicU32 µs), `asioFallback`.
-- `SetupAudio.svelte` (mockup rack AUDIO): BACKEND switch ASIO | WASAPI (ASIO disabled with reason), DEVICE LCD select, BUFFER LCD select, LATENCY LCD `MIDI→BUFFER x · OUTPUT y · TOTAL z ms`, DROPOUTS counter + RESET + hint "Raise buffer size" when > 0, STREAM lamp + state + RECONNECT.
-- Status strip AUDIO LCD shows `backend · buffer · latency` (`WASAPI · 256 · 5.3 ms`); AUDIO lamp amber while a dropout happened in the last 10 s.
+- **Audio owner thread.** `cpal::Stream` is not `Send`, so one thread owns it: `pub struct AudioController { tx: mpsc::Sender<AudioRequest> }`, `enum AudioRequest { Start(AudioPrefs, mpsc::Sender<Result<AudioStatus, String>>), Stop }`. On `Start`: drop the old stream, build a new `Engine::with_taps`, start the stream, call `router.replace_audio(tx, rx)`, swap `AppState.taps` and `AppState.stats`, reply with the status. `lib.rs` starts it with `config.audio` at startup instead of calling `audio::start` directly (removes today's `_audio_stream` in `run()`).
+- `Router::replace_audio(&mut self, tx: Producer<Command>, rx: Consumer<Event>)`: swap the queues, clear voice counts and holds, re-send the mixer (`send_mixer`) and the keys settings (Task 15 fills a call site marked `// keys: Task 15`), nothing else.
+- Device lost: the stream error callback sets `AudioStats.lost` (AtomicBool) and logs it; the telemetry thread sees the flag and emits `audio-status` with `state: "lost"`. `audio_reconnect()` restarts with the current prefs, only when the state is `lost` or `stopped`; otherwise it returns the current status.
+- ASIO: prefs `backend == "asio"` but `asio_host()` fails → start WASAPI, set `asioFallback: true`, log it.
+```rust
+#[derive(Serialize)] #[serde(rename_all = "camelCase")]
+pub struct AudioDevice { pub name: String, pub is_default: bool, pub buffer_sizes: Vec<u32> }
+#[derive(Serialize)] #[serde(rename_all = "camelCase")]
+pub struct AsioInfo { pub available: bool, pub reason: Option<String> }   // reason: "Built without ASIO support" | "No ASIO driver found"
+pub fn buffer_choices(min: u32, max: u32) -> Vec<u32>;   // powers of two in 32..=2048 within [min, max]
+pub fn latency_ms(frames: u32, rate: u32) -> f32;        // frames / rate × 1000, rounded to one decimal
+```
+- `AudioStatus` (extended; camelCase): `state` (`"running" | "stopped" | "lost" | "error"`), `backend` (`"WASAPI" | "ASIO"`), `deviceName`, `sampleRate`, `bufferSize: Option<u32>`, `channels`, `dropouts`, `lastDropoutAgoMs`, `asioFallback: bool`, `latency: { midiToBufferMs, outputMs, totalMs }`. `midiToBufferMs = latency_ms(buffer, rate)` (buffer unknown → the callback's measured frame count); `outputMs` from `OutputCallbackInfo::timestamp()` (`playback.duration_since(&callback)`, stored as µs in `AudioStats.output_us`); `totalMs` = the sum.
+- Commands: `audio_devices(backend)` (WASAPI = `cpal::default_host()`, ASIO = `asio_host()`; each output device; `SupportedBufferSize::Range { min, max }` → `buffer_choices`, `Unknown` → `[]`), `asio_available()`, `set_audio(prefs)` (saves `config.audio`, restarts, returns the status), `audio_reconnect()`, `get_audio_status` (exists, now with the new fields). All `async`, waiting on the reply channel with a 5 s timeout.
 
-**Tests:** pure helpers unit-tested in `audio.rs`: `buffer_choices(min, max) -> Vec<u32>`; `latency_ms(buffer, rate)`. Router `replace_audio` test: after replace, commands go to the new queue and mixer commands were re-sent.
+**UI:**
+- SETUP becomes a single column of rack units (max 860 px, scrolls), in this order: AUDIO (this task), MIDI DEVICES (Task 10), KEYS (Task 16), MIDI LEARN (Task 12), DISPLAY (exists), LOG (Task 17). A rack appears when its task lands.
+- `RackUnit.svelte`: props `{ title: string; children }` → `.plate.rack-unit` with four registration marks (circle + crosshair in `--vec-dim`) and an `<h1>` with the orange pill marker (mockup).
+- `SetupAudio.svelte` (mockup 1519–1530), rows with a silk label on the left:
+  - `BACKEND`: two-position switch `ASIO | WASAPI`; ASIO `aria-disabled` with the title `asio_available().reason` when not available.
+  - `DEVICE`: LCD select (`select.lcd.screen`) of `audio_devices(backend)`; the default device is marked `(default)`.
+  - `BUFFER`: LCD select of the device's `bufferSizes` plus `AUTO` (null); empty list → only `AUTO`.
+  - `LATENCY`: LCD `MIDI→BUFFER {a} · OUTPUT {b} · TOTAL {c} ms`.
+  - `DROPOUTS`: readout LCD `{n}`, `RESET` key (`reset_dropouts`), hint `Raise buffer size` (`.lcd-dim`) when n > 0.
+  - `STREAM`: lamp (green running / amber recent dropout / red stopped or lost) + state text (`RUNNING`, `STOPPED`, `DEVICE LOST`) + `RECONNECT` key, `aria-disabled` unless lost or stopped.
+  - Any change → `set_audio({ prefs })` → the returned status replaces `audioStatus`.
+- Status strip audio LCD: `{backend} · {bufferSize ?? 'AUTO'} · {totalMs} ms` (e.g. `WASAPI · 256 · 5.3 ms`); stopped → `AUDIO STOPPED`; lost → `AUDIO LOST`.
+- Notices: `audioLost = audioStatus.state === 'lost'`; `asioFallback = audioStatus.asioFallback` (DISMISS adds `asio` to `dismissed`).
+- Listen to `audio-status`.
+- Preview: demo status `{ state: 'running', backend: 'WASAPI', deviceName: 'Speakers (Preview)', sampleRate: 48000, bufferSize: 256, channels: 2, dropouts: 0, lastDropoutAgoMs: null, asioFallback: false, latency: { midiToBufferMs: 5.3, outputMs: 10, totalMs: 15.3 } }` and two fake devices.
 
-- [ ] Tests first → implement owner thread + commands → PASS
-- [ ] Setup racks; preview shows the racks with demo data; full verification + build; commit `feat: audio device selection, reconnect and setup audio rack`
+**Tests:** `buffer_choices(64, 1024) == [64, 128, 256, 512, 1024]`; `buffer_choices(1, 4096) == [32, 64, …, 2048]`; `buffer_choices(100, 120) == []`; `latency_ms(256, 48000) == 5.3`. Router: after `replace_audio`, a trigger lands in the new queue, and the new queue starts with 8 `SetGroup` + 1 `SetMasterGain`.
+
+**Do not:** keep the stream on `run()`'s stack; restart the stream from the router thread; block the UI while restarting.
+
+**Done when:** [ ] tests first → PASS; [ ] app builds; [ ] preview SETUP shows the AUDIO and DISPLAY racks with registration marks; [ ] full verification + build; commit `feat: audio device selection, reconnect and setup audio rack`.
 
 ---
 
@@ -356,88 +703,156 @@ pub fn trigger_index(buf: &[f32]) -> usize;
 
 ### Task 10: Device registry, generic MIDI inputs, SETUP › MIDI DEVICES
 
+**Purpose.** Engine spec 7 ("All connected MIDI inputs are listened to"), UI spec 8 item 2, status lamps.
+
 **Files:**
 - Create: `src-tauri/src/devices.rs`, `src/components/SetupMidi.svelte`
-- Modify: `src-tauri/src/launchpad.rs` (report into the registry), `state.rs`, `router.rs`, `lib.rs`, `commands.rs`, `config.rs`, `src/App.svelte`, `src/components/SetupDisplay.svelte` (move the MIDI event log into SetupMidi; keep it — memory: the event log is shared with the game prototypes' diagnostics)
+- Modify: `src-tauri/src/launchpad.rs` (status into the registry), `state.rs`, `router.rs`, `lib.rs`, `commands.rs`, `config.rs`, `src/App.svelte`, `src/components/SetupDisplay.svelte` (move the MIDI section out), `src/lib/model.ts`
 
 **Contracts:**
 ```rust
-#[serde(rename_all = "camelCase")]
-pub struct MidiDevice { pub port: String, pub role: String /* "launchpad"|"lcxl"|"keys"|"other" */, pub status: String /* "connected"|"disconnected"|"busy"|"bootloader" */ }
-pub fn classify(port: &str, roles: &BTreeMap<String, String>) -> &'static str; // Launchpad MK2 prefix → launchpad; "Launch Control XL" → lcxl; config role or "Keystation" in the name → keys; else other
+#[derive(Serialize, Clone, Debug, PartialEq)] #[serde(rename_all = "camelCase")]
+pub struct MidiDevice { pub port: String, pub role: String, pub status: String }
+// role: "launchpad" | "lcxl" | "keys" | "other"; status: "connected" | "disconnected" | "busy" | "bootloader"
+pub fn classify(port: &str, roles: &BTreeMap<String, String>) -> &'static str;
+// lpd_core::devices::launchpad port match → "launchpad"; name contains "Launch Control XL" → "lcxl";
+// roles[port] == "keys" | "other" → that; name contains "Keystation" (case-insensitive) → "keys"; else "other".
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum MidiMsg { NoteOn { ch: u8, note: u8, vel: u8 }, NoteOff { ch: u8, note: u8 }, Cc { ch: u8, cc: u8, value: u8 }, PitchBend { ch: u8, value: i16 /* −8192..8191 */ } }
-pub fn parse(bytes: &[u8]) -> Option<MidiMsg>; // Note On vel 0 = NoteOff
+pub enum MidiMsg { NoteOn { ch: u8, note: u8, vel: u8 }, NoteOff { ch: u8, note: u8 }, Cc { ch: u8, cc: u8, value: u8 }, PitchBend { ch: u8, value: i16 } }
+pub fn parse(bytes: &[u8]) -> Option<MidiMsg>;
+// 0x9n vel > 0 → NoteOn; 0x9n vel 0 or 0x8n → NoteOff; 0xBn → Cc; 0xEn → PitchBend ((lsb | msb << 7) − 8192);
+// anything else (SysEx, running status, short messages) → None
+pub struct Registry { /* devices: Vec<MidiDevice> */ }
+impl Registry {
+    pub fn set(&mut self, port: &str, role: &str, status: &str) -> bool;   // true = changed
+    pub fn remove_absent(&mut self, present: &[String]) -> bool;
+    pub fn list(&self) -> Vec<MidiDevice>;
+}
 ```
-- A 2 s poll thread opens every input whose role is `keys` or `other` (Launchpad and LCXL ports belong to their own bridges), forwards parsed messages to `AppState::on_midi(port, role, msg)` (router queue via the existing router mutex; keep it short), and keeps the registry (`Arc<Mutex<Vec<MidiDevice>>>`) of **all** ports incl. Launchpad/LCXL status reported by their bridges. Emits `midi-devices` (full list) on change. Busy = connect error.
-- Router `on_midi`: in this task only `keys` role notes are forwarded as `keys-note` UI events `{ note, velocity, on }` (the synth comes in Task 15) and pitch bend / CC 1 as `keys-wheel` `{ pitch: −1..1, mod: 0..1 }`; learn hooks come in Task 12.
-- Commands: `midi_devices() -> Vec<MidiDevice>`, `set_midi_role(port: String, role: String)` (`keys` | `other`, saved in config).
-- `SetupMidi.svelte` (mockup rack MIDI DEVICES): table lamp · port · role (select for keys/other; fixed text for LAUNCHPAD / LCXL) · status (connected / disconnected / port busy / bootloader — run updater), plus the existing MIDI EVENT LOG below.
-- Status strip LAUNCHPAD and LCXL lamps from the registry (green connected / off absent / amber busy / red bootloader).
+- `devices.rs` thread (2 s poll, modelled on `launchpad.rs`): enumerate input ports with `midir`; connect every port classified `keys` or `other` that is not connected yet (connect error → status `busy`); keep the `MidiInputConnection`s in a map. Callback: `parse(bytes)` → `AppState::on_midi(&port, role, msg)`. Ports that disappeared leave the map and the registry. Launchpad and LCXL ports are **not** opened here; their bridges report their status into the shared `Arc<Mutex<Registry>>` (the Launchpad bridge reports `bootloader` when it detects it). Emit `midi-devices` with the full list whenever `set`/`remove_absent` report a change.
+- `AppState::on_midi(port, role, msg)` → `Router::on_midi(port, role, msg) -> Vec<UiEvent>`; the caller emits the events after releasing the lock. In this task, role `keys`: NoteOn/NoteOff → `UiEvent::KeysNote { note, velocity, on }` (event `keys-note`); PitchBend → `UiEvent::KeysWheel { pitch: value / 8192, mod }`; CC 1 → `UiEvent::KeysWheel { pitch, mod: value / 127 }` (the router keeps the last pitch and mod so each event carries both; event `keys-wheel`). Role `other`: nothing yet (Task 12). Every message also produces `UiEvent::MidiLog { text: "{port}: {msg:?}" }` (event `midi-log`).
+- Commands: `midi_devices()`, `set_midi_role(port, role)` (accepts `keys`/`other`, saves the config; the poll thread re-classifies on its next round).
 
-**Tests:** `classify` for each name family incl. `Launchpad MK2 16`, `Launch Control XL`, `Keystation 49 MK3`, a config override; `parse` for note on/off (incl. vel 0), CC, pitch bend centre/extremes, running status not supported → None, sysex → None.
+**UI:**
+- `SetupMidi.svelte` (mockup 1531–1536): rack `MIDI DEVICES` with a table: lamp · port · role · status. Lamp: green connected, off disconnected, amber busy, red bootloader. Role: fixed text `LAUNCHPAD` / `LCXL` for those; a two-position switch `KEYS | OTHER` for the rest (`set_midi_role`). Status text: `connected`, `disconnected`, `port busy`, `bootloader — run updater`. Empty list: `No MIDI devices found. Plug one in; the list refreshes every 2 s.` Below the table: the existing `MIDI EVENT LOG` list, moved unchanged from `SetupDisplay.svelte` and now also fed by `midi-log` (keep the 40-entry cap; the game prototypes' diagnostics rely on this log). The old `RETRY FRAME` key and the Launchpad-only status line go away.
+- Status strip LAUNCHPAD and LCXL lamps from the registry (`ok` connected, plain when disconnected or absent, `warn` busy, `error` bootloader). Notices keep `deviceState` from `launchpad-status`; the `lcxl` input comes from the registry (absent = `disconnected`).
+- `keysAbsent` notice input stays false here (Task 16 wires it).
+- Preview: registry demo `[{ port: 'Launchpad MK2', role: 'launchpad', status: 'connected' }, { port: 'Launch Control XL', role: 'lcxl', status: 'disconnected' }, { port: 'Keystation 49 MK3', role: 'keys', status: 'connected' }]`.
 
-- [ ] Tests first → implement → PASS; UI rack; full verification + build; commit `feat: MIDI device registry, roles and setup MIDI rack`
+**Tests:** `classify` for `Launchpad MK2`, `Launchpad MK2 16`, `2- Launchpad MK2`, `Launch Control XL`, `Keystation 49 MK3`, `Some Synth` (→ other) and `Some Synth` with a `keys` override; `parse` for `90 3C 64`, `90 3C 00`, `80 3C 40`, `B0 01 7F`, `E0 00 40` (→ 0), `E0 7F 7F` (→ 8191), `E0 00 00` (→ −8192), `F0 … F7` → None, `[0x3C, 0x64]` → None; `Registry::set` returns false for an identical update.
+
+**Do not:** open Launchpad or LCXL ports in `devices.rs`; play the keys instrument (Task 15); bind learn (Task 12).
+
+**Done when:** [ ] tests first → PASS; [ ] full verification + build; commit `feat: MIDI device registry, roles and setup MIDI rack`.
 
 ### Task 11: Launch Control XL
 
+**Purpose.** Engine spec 2.3, 6 (LCXL LEDs) and 7.1 mapping; UI spec 6: "Hardware LCXL moves update the screen at ~30 Hz … the value jumps to the hardware (no pickup)."
+
 **Files:**
-- Create: `crates/lpd-core/src/devices/lcxl.rs`, test `crates/lpd-core/tests/lcxl.rs`, `src-tauri/src/lcxl.rs`
+- Create: `crates/lpd-core/src/devices/lcxl.rs`, `crates/lpd-core/tests/lcxl.rs`, `src-tauri/src/lcxl.rs`
 - Modify: `crates/lpd-core/src/devices/mod.rs`, `src-tauri/src/router.rs`, `state.rs`, `lib.rs`, `src/App.svelte`
-
-**Contracts (engine spec 2.3, 7.1 — expected values, unverified until lp-probe):**
-```rust
-pub const PORT_PREFIX: &str = "Launch Control XL";
-pub fn is_lcxl_port(name: &str) -> bool;
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum LcxlEvent { Fader { ch: u8, value: u8 }, Knob { row: u8, ch: u8, value: u8 }, Button { row: u8, ch: u8, on: bool } } // ch/row 0-based
-pub fn decode(msg: &[u8]) -> Option<LcxlEvent>; // CC 77–84 faders; CC 13–20 / 29–36 / 49–56 knob rows 0/1/2; notes 41–44,57–60 row 0; 73–76,89–92 row 1; any MIDI channel
-pub enum LedColor { Off, Red, Green, Amber }
-pub fn led_value(c: LedColor) -> u8;            // Off 0x0C, Red 0x0F, Green 0x3C, Amber 0x3F
-pub fn led_index(row: u8, ch: u8) -> u8;        // row 0 (focus) 24 + ch, row 1 (control) 40 + ch
-pub fn led_message(template: u8, index: u8, value: u8) -> Vec<u8>; // F0 00 20 29 02 11 78 tt ii vv F7
-// mapping helpers (pure, in the same module)
-pub fn fader_db(value: u8) -> f32;   // p = value/127, UI fader law (mix.ts posToDb): p ≥ .75 → (p−.75)/.25×6; p < .75 → 40·log10(p/.75); 0 → −60 (−∞)
-pub fn knob_pan(value: u8) -> f32;   // −1..1, 64 → 0
-pub fn knob_pitch(value: u8) -> f32; // −12..12 rounded to 1 st, 64 → 0
-pub fn knob_lowpass(value: u8) -> f32; // log 200 Hz–20 kHz, 127 → 20000
-```
-- Bridge thread (2 s reconnect like `launchpad.rs`; status into the registry): decoded events → `Router::on_lcxl(ev)`: fader → group volume; knob rows → pan / pitch / lowpass; button row 0 press → toggle mute, row 1 press → toggle solo (release ignored). Mixer values: no history, `touch()` for autosave. LEDs: after each change and on connect, mute buttons amber when muted (else off), solo buttons green when soloed; template 0 (User 1).
-- UI: event `mixer-changed` `{ groups, masterDb }` throttled to ~30 Hz by the bridge (send at most every 33 ms, last value wins); `App.svelte` replaces `currentSet.mixer` on it (screen jumps to hardware; no pickup).
-- MIDI learn ignores LCXL messages ("LCXL controls are fixed in Part 1" — Task 12 shows it).
-
-**Tests (`lcxl.rs`):** decode every control family incl. channel 9 and an unknown CC → None; LED message bytes; fader law at 0, 95 (≈0 dB), 127 (+6); pan/pitch/lowpass endpoints. Router unit: a fader event changes group volume and sends `SetGroup`; button press toggles mute twice → back to false.
-
-- [ ] Tests first → implement → PASS; bridge + UI listener; full verification + build; commit `feat: Launch Control XL mixer mapping and LEDs`
-
-### Task 12: MIDI learn
-
-**Files:**
-- Create: `crates/lpd-core/src/kit/learn.rs`, test `crates/lpd-core/tests/kit_learn.rs`, `src/components/SetupLearn.svelte`, `src/lib/learn.ts` (+ test)
-- Modify: `crates/lpd-core/src/kit/{model,mod,ops}.rs` (Set gains `#[serde(default)] pub learn: Vec<Binding>`; `move_pad`/`clear_pad` keep bindings correct), `src-tauri/src/router.rs`, `state.rs`, `commands.rs`, `lib.rs`, `src/components/{Knob,Fader,MixerStrip,LaunchpadPanel,PadEditor,ContextMenu}.svelte`, `src/App.svelte`
 
 **Contracts:**
 ```rust
-#[serde(rename_all = "camelCase")]
-pub struct Binding { pub device: String, pub kind: LearnKind /* "note"|"cc" */, pub number: u8, pub target: Target }
-#[serde(rename_all = "camelCase")]
-pub enum Target { Pad { bank: u8, x: u8, y: u8 }, Param(String) }
-// serialises as {"pad":{"bank":0,"x":0,"y":0}} or {"param":"group.2.volume"} (parent spec 4.2 example extended with the bank)
-pub const PARAMS: … // ids: group.{0-7}.{volume,pan,pitch,lowpass,mute,solo}, master, bank.{0-7}.{humanize,flash,playState,ripple}, keys.volume, keys.mod, seq.play, seq.bpm, seq.swing, stopAll
-pub fn param_value(id: &str, cc: u8) -> Option<ParamValue>; // Continuous(f32 in the param's own unit: dB via fader law, pan −1..1, …) | Toggle (cc ≥ 64 rising edge = toggle)
-pub fn bind(learn: &mut Vec<Binding>, b: Binding); // one binding per source (device,kind,number): re-using moves it; one source per pad target too
-pub fn unbind(learn: &mut Vec<Binding>, index: usize);
+pub const PORT_NAME: &str = "Launch Control XL";
+pub fn is_lcxl_port(name: &str) -> bool;              // trimmed name contains PORT_NAME (case-sensitive)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LcxlEvent { Fader { ch: u8, value: u8 }, Knob { row: u8, ch: u8, value: u8 }, Button { row: u8, ch: u8, on: bool } } // ch, row 0-based
+/// Any MIDI channel. CC 77–84 → Fader ch 0–7; CC 13–20 → Knob row 0; 29–36 → row 1; 49–56 → row 2.
+/// Note 41–44 → Button row 0 ch 0–3, 57–60 → row 0 ch 4–7; 73–76 → row 1 ch 0–3, 89–92 → row 1 ch 4–7;
+/// Note On vel > 0 = on; Note On vel 0 or Note Off = off. Anything else → None.
+pub fn decode(msg: &[u8]) -> Option<LcxlEvent>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum LedColor { Off, Red, Green, Amber }
+pub fn led_value(c: LedColor) -> u8;                  // Off 0x0C, Red 0x0F, Green 0x3C, Amber 0x3F
+pub fn led_index(row: u8, ch: u8) -> u8;              // row 0 (track focus) 24 + ch; row 1 (track control) 32 + ch
+pub fn led_message(template: u8, index: u8, value: u8) -> Vec<u8>; // F0 00 20 29 02 11 78 <template> <index> <value> F7
+pub fn fader_db(value: u8) -> f32;    // p = value/127; p ≥ .75 → (p − .75)/.25 × 6; 0 < p < .75 → max(−60, 40·log10(p/.75)); p = 0 → −60
+pub fn knob_pan(value: u8) -> f32;    // (value − 64) / 63 clamped to −1..1 (0 → −1, 64 → 0, 127 → 1)
+pub fn knob_pitch(value: u8) -> f32;  // round((value − 64) / 63 × 12) clamped to ±12
+pub fn knob_lowpass(value: u8) -> f32; // 200 × 100^(value/127): 0 → 200, 127 → 20000
+pub const USER_TEMPLATE: u8 = 0;
 ```
-- `Target::Pad` follows the sound on move/swap (`ops::move_pad` rewrites targets); copy does not duplicate; clear removes the pad's binding.
-- Router: `arm_learn(target: LearnTarget)` where `LearnTarget = Pad{…} | Param(String)`; `cancel_learn()`. While armed, the next Note On (pad target) or CC (param target) from a `keys`/`other` device binds (history record key `None`, `touch()`), emits `learn-bound` `{ binding }` and disarms; LCXL/Launchpad messages are ignored while armed and emit `learn-ignored` once (`LCXL controls are fixed in Part 1`). Not armed: notes matching a pad binding → `trigger_pad_in(bank, …)` (select on screen if in the current bank: emit `pad-hit` `{ bank, x, y }` which the UI treats as a hardware hit — **no** `trigger_pad` from the UI), note off → release; CCs matching a param binding → apply (same code paths as the UI commands; param changes emit `mixer-changed` / `set-changed` throttled 30 Hz so the screen follows).
-- Commands: `arm_learn(target: LearnTargetDto)` (JS `{ target: { pad: { bank, x, y } } }` or `{ target: { param: 'group.2.volume' } }`), `cancel_learn()`, `unbind(index: usize) -> Set`.
-- UI: right-click (or Shift+F10 / Menu) on any Knob / Fader / key with a param id (`learnId` prop) → `ContextMenu` with Learn MIDI CC / Reset; armed control outline blinks amber (`.learning`, steady with reduced motion); bound controls show a 6 px amber dot (`.bound`); notice row 1 while armed ("Move a control on any MIDI device · Esc cancels" / pads "Hit a key or pad…"); Esc cancels (esc stack). Pad editor LEARN key lit amber while waiting; when bound LCD `NOTE 36 · device` + × (unbind). Pad context menu "Learn MIDI note…" enabled. Confirmation `✓ Learned NOTE 36 → R1·C1`.
-- `learn.ts`: `bindingLabel(b, set)` → `"Keystation 49 · CC 21 → 3 TOMS · VOLUME"`, `boundIds(set): Set<string>` (param ids + `pad:b:x:y`).
-- `SetupLearn.svelte`: list `source → target` with × per row; empty text exactly: "No bindings. Right-click any knob, fader or key → Learn MIDI CC. Pads: LEARN in the pad editor."
+- `src-tauri/src/lcxl.rs`: a bridge thread modelled on `launchpad.rs` (2 s reconnect, input + output found by `is_lcxl_port`, `busy` on a connect error, status into the registry and `logfile::log`). Input → `AppState::on_lcxl(ev)` → `Router::on_lcxl(ev) -> bool` (changed): Fader → group `volume_db = fader_db`; Knob row 0 → `pan`, row 1 → `pitch_semitones`, row 2 → `lowpass_hz`; Button row 0 `on` → toggle `mute`; row 1 `on` → toggle `solo`; releases ignored. Uses `Router::update_group` (no history) + `touch()`.
+- LEDs: on (re)connect and whenever mute/solo differs from the last sent state (the bridge compares every 16 ms tick, so screen changes show too), send for ch 0–7: row 0 = Amber if muted else Off; row 1 = Green if soloed else Off, with `led_message(USER_TEMPLATE, led_index(row, ch), led_value(c))`.
+- `mixer-changed` `{ groups, masterDb }`: the bridge emits it at most every 33 ms after a hardware change, trailing edge (the last value is always sent). `App.svelte` replaces `currentSet.mixer` with it.
 
-**Tests:** `kit_learn.rs`: serde round-trip of both target kinds; `bind` moves a re-used source; `param_value` for volume (127 → +6), pan (0 → −1), toggles; ops: move/swap rewrites pad targets, copy does not, clear removes; an old set.json without `learn` still loads. Router: armed + CC from `other` binds and disarms; CC from LCXL while armed is ignored; bound note triggers the pad. `learn.test.ts`: labels.
+**Tests (`lcxl.rs`):** decode `B0 4D 40` → Fader ch 0 value 64; `B8 54 7F` (MIDI channel 9) → Fader ch 7; `B0 0D 00` → Knob row 0 ch 0; `B0 24 7F` → Knob row 1 ch 7; `B0 38 01` → Knob row 2 ch 7; `90 29 7F` → Button row 0 ch 0 on; `90 3C 7F` → Button row 0 ch 7 on; `90 59 00` → Button row 1 ch 4 off; `80 4C 00` → Button row 1 ch 3 off; `B0 15 10` → None (CC 21 unmapped); `led_message(0, 24, 0x3F) == [0xF0,0x00,0x20,0x29,0x02,0x11,0x78,0x00,0x18,0x3F,0xF7]`; `fader_db(0) == −60`, `fader_db(127) == 6`; `knob_pan(64) == 0`, `knob_pan(127) == 1`, `knob_pan(0) == −1`; `knob_pitch(0) == −12`; `knob_lowpass(127) == 20000`, `knob_lowpass(0) == 200`. Router unit: a Fader event sets the group volume and pushes one `SetGroup`; two Button row 0 presses → mute true, then false; a release changes nothing.
 
-- [ ] Tests first → implement → PASS; UI; full verification + build; commit `feat: MIDI learn for pads and on-screen controls`
+**Do not:** let LCXL messages reach MIDI learn (Task 12 ignores them); add pickup / soft takeover (spec: ask before adding); record LCXL moves in history.
+
+**Done when:** [ ] tests first → PASS; [ ] full verification + build; commit `feat: Launch Control XL mixer mapping and LEDs`.
+
+### Task 12: MIDI learn
+
+**Purpose.** UI spec 8.1, 8 item 3, 4.3 item 7 and 4.5 (right-click Learn / Reset); engine spec 7.
+
+**Files:**
+- Create: `crates/lpd-core/src/kit/learn.rs`, `crates/lpd-core/tests/kit_learn.rs`, `src/components/SetupLearn.svelte`, `src/lib/learn.ts` + `src/lib/learn.test.ts`
+- Modify: `crates/lpd-core/src/kit/{model,mod,ops}.rs`, `src-tauri/src/router.rs`, `state.rs`, `commands.rs`, `lib.rs`, `src/components/{Knob,Fader,MixerStrip,LaunchpadPanel,PadEditor,PadGrid}.svelte`, `src/App.svelte`, `src/lib/model.ts`
+
+**Contracts:**
+```rust
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)] #[serde(rename_all = "camelCase")]
+pub struct Binding { pub device: String, pub kind: LearnKind, pub number: u8, pub target: Target }
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)] #[serde(rename_all = "camelCase")]
+pub enum LearnKind { Note, Cc }
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)] #[serde(rename_all = "camelCase")]
+pub enum Target { Pad { bank: u8, x: u8, y: u8 }, Param(String) }
+// JSON: {"pad":{"bank":0,"x":0,"y":0}} or {"param":"group.2.volume"}
+// Set gains: #[serde(default)] pub learn: Vec<Binding>
+pub fn is_param(id: &str) -> bool;  // the ids in the table below
+pub enum ParamValue { Continuous(f32), Toggle }
+/// CC value → parameter value, per the table below.
+pub fn param_value(id: &str, cc: u8) -> Option<ParamValue>;
+/// Removes any binding with the same (device, kind, number) AND any binding with the same target, then pushes b.
+pub fn bind(learn: &mut Vec<Binding>, b: Binding);
+pub fn unbind(learn: &mut Vec<Binding>, index: usize) -> bool;
+pub fn retarget_pad(learn: &mut Vec<Binding>, from: (u8, u8, u8), to: Option<(u8, u8, u8)>); // (bank, x, y); None = remove
+```
+Param ids and mappings (exact):
+
+| id | value |
+|---|---|
+| `group.{0-7}.volume` | dB, `lcxl::fader_db` law |
+| `group.{0-7}.pan` | `lcxl::knob_pan` |
+| `group.{0-7}.pitch` | `lcxl::knob_pitch` |
+| `group.{0-7}.lowpass` | `lcxl::knob_lowpass` |
+| `group.{0-7}.mute`, `group.{0-7}.solo` | Toggle |
+| `master` | dB, fader law |
+| `bank.{0-7}.humanize` | 0..6 dB, step 0.5 |
+| `bank.{0-7}.flash`, `.playState`, `.ripple` | Toggle |
+| `keys.volume` | −40..+6 dB, linear |
+| `keys.mod` | 0..1 |
+| `seq.play` | Toggle |
+| `seq.bpm` | 60..200, integer |
+| `seq.swing` | 50..75, integer |
+| `stopAll` | Toggle |
+
+Toggle: the router fires when the CC value crosses from < 64 to ≥ 64 (it keeps the last value per binding).
+- Ops (Task 4 functions extended): `move_pad` Move → `retarget_pad(from → to)`; Swap → exchange the two pads' bindings; Copy → unchanged (a copy does not duplicate the binding); `clear_pad` → `retarget_pad(pad, None)`.
+- Router state `learn_armed: Option<LearnTarget>` with `LearnTarget = Pad { bank, x, y } | Param(String)`. `arm_learn` replaces any armed target. While armed, from a `keys`/`other` device: a Note On (pad target) or a CC (param target) binds via `edit(None, |set| bind(...))`, disarms, and returns `UiEvent::LearnBound(binding)`. Launchpad/LCXL input while armed is not bound and yields `UiEvent::LearnIgnored(reason)` once per arm, reason `LCXL controls are fixed in Part 1` (LCXL) or `Launchpad pads are fixed` (Launchpad); the Launchpad pad still plays and the LCXL still moves the mixer. A note while a param is armed, or a CC while a pad is armed, is ignored silently.
+- Not armed: a Note On matching a `Note` binding to a pad → `trigger_pad_in(bank, x, y, vel / 127)`, the painter flash when the bank is active, and `UiEvent::PadHit { bank, x, y }` (the UI selects the pad when `bank === activeBank` and **never** calls `trigger_pad`); Note Off → `release_pad_in`. A note bound to a pad does not reach the keys instrument. A CC matching a param binding → applied through the same functions the UI commands use (group values via `update_group` without history; bank/keys/seq params via `edit` with key `learn:{id}` so a sweep coalesces), then `UiEvent::MixerChanged` or `UiEvent::SetChanged`, each throttled to 33 ms.
+- Commands: `arm_learn(target: LearnTargetDto)` with `#[serde(rename_all = "camelCase")] enum LearnTargetDto { Pad { bank: u8, x: u8, y: u8 }, Param(String) }` (JS `{ target: { pad: { bank, x, y } } }` or `{ target: { param: 'group.2.volume' } }`), `cancel_learn()`, `unbind(index) -> Set` (via `edit`, undoable).
+
+**UI:**
+- `learn.ts`: `paramLabel(id, set)` → `3 TOMS · VOLUME` (groups: `groupLegend` + `VOLUME|PAN|PITCH|LPF|MUTE|SOLO`), `MASTER`, `BANK 2 · HUMANIZE` (and `· FLASH|PLAY|RIPPLE`), `KEYS · VOLUME`, `KEYS · MOD`, `SEQ · PLAY|BPM|SWING`, `STOP ALL`; `targetLabel(target, set)` (pads: `B{bank+1} R{y+1}·C{x+1} · {SAMPLE}`); `bindingLabel(b, set)` → `{device} · {NOTE|CC} {number} → {targetLabel}`; `boundIds(set): Set<string>` (param ids and `pad:{bank}:{x}:{y}`); `noteBoundTo(set, note): { bank: number; x: number; y: number } | null` (Task 16 uses it for key dots; matches any device).
+- `Knob`, `Fader` and latching keys that map to a param get a `learnId?: string` prop. Right-click (`contextmenu` with `preventDefault`) or Shift+F10 / ContextMenu key while focused → `ContextMenu` items `Learn MIDI CC` and `Reset` (Reset = the double-click default; keys have no Reset). Learn → `arm_learn({ target: { param: learnId } })`; the control gets `.learning` (mockup CSS 188: amber outline blinking with `steps(1)` every 0.5 s; reduced motion: a steady 2 px `--warn` ring) until bound or cancelled. Bound controls get `.learned` (a 6 px amber dot top-right, mockup CSS 187); give the control `position: relative`.
+- `learnId`s to wire: mixer PAN/PITCH/LPF knobs (`group.{i}.pan|pitch|lowpass`), faders (`group.{i}.volume`; MASTER `master`), MUTE/SOLO keys (`group.{i}.mute|solo`), bank strip FLASH/PLAY/RIPPLE keys (`bank.{b}.flash|playState|ripple`), HUMANIZE knob (`bank.{b}.humanize`), the Launchpad panel's STOP ALL key (`stopAll`). The keys plate (Task 16) and the sequencer (Task 14) wire theirs.
+- Pad learn: the pad editor's `LEARN` key becomes live (lit amber while waiting) and the pad menu's `Learn MIDI note…` is enabled; both call `arm_learn({ target: { pad: { bank, x, y } } })`. When bound, the editor MIDI row shows `.learn-lcd` `NOTE {n} · {device}` and a `×` key (`aria-label="Clear MIDI binding"`) → `unbind({ index })`.
+- Notice row 1 (`learnArmed: 'cc' | 'note'`) while armed; Esc cancels (`pushEsc` → `cancel_learn`). `learn-bound` → clear the armed state, replace the set, confirm `Learned {bindingLabel}`, refresh history. `learn-ignored` → error confirmation with the reason.
+- `pad-hit` → treated like a hardware hit: when `bank === activeBank`, `padInput({ note: (y + 1) * 10 + x + 1, pressed: true, source: 'hardware' })` (selects + activity), then a matching release after 120 ms for the screen's pressed state.
+- `set-changed` → replace `currentSet`.
+- `SetupLearn.svelte` (rack `MIDI LEARN`, mockup 1537–1541): one row per binding, `{device} · {NOTE|CC} {n}` → `{targetLabel}`, with a `×` key (`unbind`). Empty text exactly: `No bindings. Right-click any knob, fader or key → Learn MIDI CC. Pads: LEARN in the pad editor.`
+
+**Tests:**
+- `kit_learn.rs`: serde of both target kinds matches the JSON above; an old set.json without `learn` loads with `learn == []`; `bind` with a reused (device, kind, number) moves it (one binding left, with the new target); `bind` to an already-bound target replaces the old source; `param_value("group.0.volume", 127)` = Continuous(6.0); `("group.0.pan", 0)` = Continuous(−1.0); `("seq.bpm", 127)` = Continuous(200.0); `("group.3.mute", 100)` = Toggle; `is_param("group.8.volume")` false; ops: Move retargets, Swap exchanges, Copy leaves one binding, clear removes it.
+- Router unit: armed Param + CC from an `other` device → binding added, disarmed, `LearnBound`; armed + an LCXL fader → `LearnIgnored` and no binding; not armed + a bound Note On → a Trigger in the audio queue + `PadHit`; a bound CC on `group.1.volume` changes the group; toggle fires only on the rising edge (values 0, 100, 120, 10, 90 → two toggles).
+- `learn.test.ts`: `paramLabel` for a group, master and bank humanize; `bindingLabel` for a CC binding and a pad binding.
+
+**Do not:** let learn override the LCXL defaults; bind from the Launchpad; bind anything in the browser preview (arming shows the notice; nothing binds).
+
+**Done when:** [ ] tests first → PASS; [ ] preview: right-click a mixer knob → menu → Learn shows the notice and the blinking outline; Esc cancels; [ ] full verification + build; commit `feat: MIDI learn for pads and on-screen controls`.
 
 ---
 
@@ -445,131 +860,244 @@ pub fn unbind(learn: &mut Vec<Binding>, index: usize);
 
 ### Task 13: Sequencer engine (model, timing, clock, record)
 
-**Files:**
-- Create: `crates/lpd-core/src/seq.rs`, test `crates/lpd-core/tests/seq.rs`, `src-tauri/src/sequencer.rs`
-- Modify: `crates/lpd-core/src/lib.rs`, `crates/lpd-core/src/kit/model.rs` (`#[serde(default)] pub pattern: Pattern`), `crates/lpd-core/src/kit/ops.rs` (clear/move keep lanes pointing at pads: lanes follow move/swap like learn bindings; cleared pad → lane stays, shows EMPTY), `src-tauri/src/router.rs`, `state.rs`, `commands.rs`, `lib.rs`
-
-**Contracts (UI spec 4.7, 7.3):**
-```rust
-#[serde(rename_all = "camelCase", default)]
-pub struct Pattern { pub lanes: Vec<Lane>, pub length: u8 /* 4|8|16|32 */, pub bpm: f32 /* 60–200 */, pub swing: f32 /* 50–75 % */ }
-#[serde(rename_all = "camelCase")]
-pub struct Lane { pub bank: u8, pub x: u8, pub y: u8, pub mute: bool, pub steps: Vec<u8> /* 32 values: 0 off, 1 on (vel 90), 2 accent (vel 127) */ }
-impl Default for Pattern { /* no lanes, 16, 100, 50 */ }
-pub fn step_duration(bpm: f32) -> f64;                    // 16th notes: 60 / bpm / 4 seconds
-/// Start time of step `i` (0-based) from the loop start, swing delaying odd steps by (swing−50)/50 × step.
-pub fn step_time(i: usize, bpm: f32, swing: f32) -> f64;
-/// Record rule: (step to write, fire_now). A hit more than half a step after step i's time writes i+1 and the
-/// clock must not fire step i+1 again on this pass (fire_now = false means "already played live").
-pub fn nearest_step(t_in_loop: f64, length: usize, bpm: f32, swing: f32) -> (usize, bool);
-pub fn set_length(p: &mut Pattern, new_len: u8); // growing fills the new steps with repeats of the old length when they are all empty; shrinking keeps hidden steps
-pub fn add_lane(p: &mut Pattern, bank: u8, x: u8, y: u8) -> Result<(), &'static str>; // "already there"
-pub const VEL_ON: u8 = 90; pub const VEL_ACCENT: u8 = 127;
-```
-- Clock thread (`sequencer.rs`): while playing, sleeps until 1 ms before the next step time then spins; at each step fires every unmuted lane with a step value via `Router::trigger_pad_in(bank, x, y, vel/127)` and `painter.on_pad_hit` **only if that bank is the active bank** (LEDs show the active bank); hold-mode pads get `release` after 90 % of a step; position event `seq-position` `{ playing, step, length, bpm, stepStartedMs }` at ~30 Hz and on every step. Timing deviation from "sample-accurate" (UI spec 4.7): ≤ 1 ms jitter from the spin-wait; documented in a code comment.
-- Record: `rec` armed + playing; every live pad hit (screen, Launchpad, computer keys, learned notes — i.e. every `trigger_pad_in` that is not from the clock) is written via `nearest_step` (accent kept, never removes steps; pad without a lane gets one); the whole take is one history record (record on arm-start; subsequent writes don't record); emits `set-changed` (throttled 30 Hz) so the UI redraws lanes.
-- Esc / STOP ALL / Launchpad Mixer button also stop the sequencer.
-- Commands: `seq_play(play: bool)`, `seq_rec(armed: bool)` (arming starts playback), `seq_update(pattern: Pattern, key: Option<String>) -> Set` (all pattern edits; history key for coalescing BPM/swing drags; `CLEAR` = all steps 0, undoable), `seq_add_lane(bank, x, y) -> Result<Set,String>` (errors "Pad is empty" / "Lane already there"), `seq_audition_step(bank, x, y)` = trigger while stopped.
-
-**Tests (`seq.rs`):** step_duration at 120 BPM = 0.125 s; swing 50 → even spacing, swing 75 → odd steps delayed by half a step; nearest_step early/late/wrap at loop end; set_length 16→32 copies, 32→16 keeps steps; add_lane duplicate error; serde: old set.json without `pattern` loads with default. Clock: pure fn `due_steps(prev_t, now_t, …) -> Vec<usize>` tested for a jump spanning two steps and the loop wrap.
-
-- [ ] Tests first → implement → PASS; clock + record + commands; full verification; commit `feat: step sequencer clock, pattern model and record`
-
-### Task 14: Sequencer UI and telemetry tie-ins
+**Purpose.** UI spec 4.7 and 7.3: the pattern lives in set.json, the router runs the clock, the UI gets the position at ~30 Hz, recording follows the nearest-step rule.
 
 **Files:**
-- Modify: `src/components/SequencerPlate.svelte` (functional; drop `unfitted`), `src/App.svelte`, `src/lib/layout.ts` (lanes from the pattern, folded sequencer = 28 px giving height back to pads; keys fold too — UI spec 4 height split), `src/lib/layout.test.ts`, `src/components/Telemetry.svelte` (beat lamps, orbit step ring + playhead planet, `STEP n/len · BPM` / `IDLE · BPM`)
-- Create: `src/lib/seq.ts` (+ `seq.test.ts`)
+- Create: `crates/lpd-core/src/seq.rs`, `crates/lpd-core/tests/seq.rs`, `src-tauri/src/sequencer.rs`
+- Modify: `crates/lpd-core/src/lib.rs`, `crates/lpd-core/src/kit/{model,ops}.rs`, `src-tauri/src/router.rs`, `state.rs`, `commands.rs`, `lib.rs`, `launchpad.rs` (the Mixer top button also stops the sequencer), `src/lib/model.ts`
 
 **Contracts:**
-- Plate per UI spec 4.7 / mockup `#seq`: PLAY/STOP round key (green ■ while playing), REC ● (red when armed), BPM LCD 60–200 and SWING LCD 50–75 % (drag up/down, wheel, arrows, double-click resets 100 / 50 %), STEPS switch 4|8|16|32, `+ LANE` (selected pad; notices from the error), `CLEAR`, fold ▾ → 28 px strip `▸ SEQUENCER  5 lanes · 16 steps · 100 BPM`.
-- Lanes: colour bar in pad colour, LCD `bank·SAMPLE` (bright when it is the selected pad; click = go to that bank and select), `M` mute (amber), `×` remove; cleared pad → `EMPTY` dim italics. Steps: click on/off, right-click or Shift+click accent, drag paints the same value; switched on while stopped → `seq_audition_step`. Playhead orange outline from `seq-position`, interpolated with `stepStartedMs` for the orbit planet. Lanes 14–24 px; under 14 px the body scrolls.
-- All edits go through `seq_update` (optimistic local update, server set replaces on return).
-- `seq.ts`: `paint(steps, from, value)`, `cycleOnClick(v, accent)`, `foldSummary(pattern) -> "5 lanes · 16 steps · 100 BPM"`.
-- `layout.ts`: input gains `keysFolded`, `seqFolded`; a folded plate costs 28 px and returns the rest to the pads; tests for 1280×720 with the sequencer folded → pads 51, both folded → 55 (UI spec 4 figures; adjust only if the existing solver's open-plate numbers also differ from the spec today — then match the current solver's behaviour and note it).
+```rust
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)] #[serde(rename_all = "camelCase", default)]
+pub struct Pattern { pub lanes: Vec<Lane>, pub length: u8, pub bpm: f32, pub swing: f32 }
+impl Default for Pattern { fn default() -> Self { Pattern { lanes: vec![], length: 16, bpm: 100.0, swing: 50.0 } } }
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)] #[serde(rename_all = "camelCase")]
+pub struct Lane { pub bank: u8, pub x: u8, pub y: u8, pub mute: bool, pub steps: Vec<u8> }   // always MAX_STEPS values: 0 off, 1 on, 2 accent
+pub const MAX_STEPS: usize = 32;
+pub const VEL_ON: u8 = 90;
+pub const VEL_ACCENT: u8 = 127;
+pub const LENGTHS: [u8; 4] = [4, 8, 16, 32];
+pub fn step_duration(bpm: f32) -> f64;                       // 16th notes: 60 / bpm / 4 seconds
+/// Start of step i (0-based) from the loop start: i × d, plus (swing − 50) / 50 × d for odd i (swing 75 → odd steps half a step late).
+pub fn step_time(i: usize, bpm: f32, swing: f32) -> f64;
+pub fn loop_duration(length: usize, bpm: f32) -> f64;        // length × d
+/// Record rule (UI spec 4.7). i = the last step whose time is ≤ t (t in [0, loop)). If t − step_time(i) is more than
+/// half a step, the hit belongs to the next step: returns (i + 1, true), wrapping to (0, true) after the last step;
+/// `true` = "already played live", the clock must not fire that step on this pass. Otherwise (i, false): step i has
+/// already fired this pass, so nothing is doubled.
+pub fn nearest_step(t: f64, length: usize, bpm: f32, swing: f32) -> (usize, bool);
+/// Steps whose time falls in (prev, now] (seconds since loop start; now may pass the loop end): in order, wrapping.
+pub fn due_steps(prev: f64, now: f64, length: usize, bpm: f32, swing: f32) -> Vec<usize>;
+/// Growing: in every lane whose steps from the old length on are all 0, fill the new steps with repeats of the old
+/// length; other lanes keep their steps. Shrinking only changes `length` (hidden steps are kept).
+pub fn set_length(p: &mut Pattern, new_len: u8);
+pub fn add_lane(p: &mut Pattern, bank: u8, x: u8, y: u8) -> Result<(), &'static str>; // Err("Lane already there")
+pub fn clear_steps(p: &mut Pattern);                          // all steps 0, lanes kept
+// Set gains: #[serde(default)] pub pattern: Pattern
+```
+- Ops: `move_pad` Move/Swap retarget lanes like learn bindings (a lane follows its sound); Copy adds no lane; `clear_pad` keeps the lane (the UI shows `EMPTY`; the clock skips it because the pad has no sample).
+- Clock thread (`sequencer.rs`), shared state `AppState.seq: Arc<Mutex<SeqState>>` with `SeqState { playing: bool, rec: bool, started: Instant, last_t: f64, skip: HashSet<(usize, usize)> /* (lane, step) */, releases: Vec<(Instant, usize, u8, u8)> /* (when, bank, x, y) */ }`:
+  - On start: `started = now`, `last_t = −1e-9` (so step 0 fires immediately).
+  - While playing, loop: `now_t = started.elapsed()` in seconds, taken modulo the loop (fold `started` forward by whole loops); for each step in `due_steps(last_t, now_t, …)` and each unmuted lane whose step value is non-zero and `(lane, step)` is not in `skip`: `router.trigger_pad_in(bank, x, y, vel / 127)` with vel `VEL_ON` or `VEL_ACCENT`; when `bank == router.bank()` also `painter.on_pad_hit(x, y, now)`; hold-mode pads get a release scheduled at 90 % of a step. After a step has passed, remove its `skip` entries. Sleep until 1 ms before the next step time, then spin (`std::hint::spin_loop`) — D3, comment the deviation in code.
+  - Emit `seq-position` `{ playing, rec, step, length, bpm, msIntoStep }` on every step and at least every 33 ms while playing; when stopped, one event with `playing: false, step: 0, msIntoStep: 0`.
+  - Tempo, swing and length edits while playing apply from the next step: recompute `started` so the current step index and its progress are preserved.
+- Record (`rec && playing`): every pad trigger that is **not** from the clock (screen, Launchpad, computer keys, learned notes) passes through `Router::trigger_pad_in`, which reports `(bank, x, y)` to a record hook installed by the sequencer: `t` = loop position, `(step, already) = nearest_step(t, …)`; lane = the existing lane for that pad, else a new one (`add_lane`); `steps[step] = max(steps[step], 1)` (an accent stays; recording never lowers or removes steps); if `already`, insert `(lane, step)` into `skip`. The take is one undo step: arming REC calls a new `AppState::begin_take()` that runs `history.record(&router.set().clone(), None, now)` directly (`edit` would record nothing, because the set has not changed yet); later writes go through `router.set_mut()` + `touch()`; emit `set-changed` throttled to 33 ms.
+- Stop paths: `stop_all` (screen ■, Esc, Launchpad Mixer CC 111) also stops the sequencer (`playing = false`; REC stays armed).
+- Commands:
+  - `seq_play(play)`: start from step 0 / stop.
+  - `seq_rec(armed)`: arming starts playback if stopped and records the take's history step; disarming leaves playback running.
+  - `seq_update(pattern, key)`: validate (length in `LENGTHS`, bpm clamped 60–200, swing clamped 50–75, every lane exactly 32 steps with values ≤ 2, lanes point at valid bank/x/y), then `edit(key, |set| set.pattern = pattern)`; return the set. The UI sends keys `seq:bpm`, `seq:swing`, `seq:paint` for drags.
+  - `seq_add_lane(bank, x, y)`: `Err("Pad is empty")` when the pad has no sample; `Err("Lane already there")`; else `edit(None, add_lane)`.
+  - `seq_audition_step(bank, x, y)`: `trigger_pad_in(bank, x, y, VEL_ON / 127)` only when stopped (no-op while playing); not recorded.
 
-**Tests:** `seq.test.ts`, extended `layout.test.ts`.
+**Tests (`seq.rs`):** `step_duration(120.0) == 0.125`; `step_time(1, 120, 50) == 0.125`; `step_time(1, 120, 75) == 0.1875`; `step_time(2, 120, 75) == 0.25`; `nearest_step(0.01, 16, 120, 50) == (0, false)`; `nearest_step(0.07, 16, 120, 50) == (1, true)`; `nearest_step(0.124, 16, 120, 50) == (1, true)`; `nearest_step(0.126, 16, 120, 50) == (1, false)`; `nearest_step(1.99, 16, 120, 50) == (0, true)` (loop 2.0 s, step 15 at 1.875, 0.115 s late → next pass's step 0); `due_steps(-1e-9, 0.26, 16, 120, 50) == [0, 1, 2]`; `due_steps(0.0, 0.26, …) == [1, 2]`; `due_steps(1.9, 2.01, …)` → `[0]` with the window crossing the loop end (normalise: pass `now` beyond the loop and expect wrapping); `set_length` 16→32 copies steps 0–15 into 16–31 when 16–31 are all 0 and keeps them otherwise; 32→16→32 keeps the hidden steps; `add_lane` twice → Err; an old set.json without `pattern` loads the default; ops: Move/Swap retarget lanes, clear keeps the lane.
 
-- [ ] Tests first → implement → PASS; preview: sequencer edits work locally (preview applies `seq_update` locally since invoke resolves undefined — keep the optimistic local state), playhead does not move in preview; full verification + build; commit `feat(ui): working step sequencer plate`
+**Do not:** run the clock in the UI; fire hidden steps (index ≥ length); remove steps while recording; record auditions or sequencer-fired hits.
+
+**Done when:** [ ] tests first → PASS; [ ] full verification; commit `feat: step sequencer clock, pattern model and record`.
+
+### Task 14: Sequencer UI, fold strips, telemetry beat lamps and orbit
+
+**Purpose.** UI spec 4.7 (header, lanes, steps, playhead, fold), 4 (height split with folded plates) and 4.8 (beat lamps, orbit ring).
+
+**Files:**
+- Modify: `src/components/SequencerPlate.svelte` (functional; remove `unfitted` and the `NOT FITTED · PART 2` text), `src/App.svelte`, `src/lib/layout.ts` + `layout.test.ts`, `src/components/Telemetry.svelte`, `src/lib/model.ts`
+- Create: `src/lib/seq.ts` + `src/lib/seq.test.ts`, `src/components/NumLcd.svelte` (mockup JS 1376–1386: LCD value; drag up/down, wheel, arrows, double-click resets; `role="slider"`, `aria-valuetext`, optional `learnId`)
+
+**Contracts:**
+```ts
+// seq.ts (pure)
+export type StepValue = 0 | 1 | 2;
+export function clickValue(current: StepValue, accent: boolean): StepValue; // click: 0 → 1, 1 | 2 → 0; accent (right-click or Shift+click): 2 → 0, else → 2
+export function paint(steps: StepValue[], index: number, value: StepValue): StepValue[]; // a copy with steps[index] = value
+export function foldSummary(lanes: number, length: number, bpm: number): string;        // "5 lanes · 16 steps · 100 BPM" ("1 lane")
+export function laneLabel(bank: number, sample: string | null): string;                  // (0, 'samples/kick_808.wav') → "1·KICK_808"; null → "EMPTY"
+export const BPM = { min: 60, max: 200, def: 100 };
+export const SWING = { min: 50, max: 75, def: 50 };
+/** Same rule as Rust seq::set_length: growing fills a lane's new steps with repeats of the old length only when
+ *  that lane's steps from the old length on are all 0; shrinking only changes `length`. Returns a new pattern. */
+export function setLength(p: Pattern, n: 4 | 8 | 16 | 32): Pattern;
+```
+- `layout.ts`: `PlayLayoutInput` gains `keysFolded: boolean` and `seqFolded: boolean`. A folded plate is 28 px tall and its saved height goes back to the pads (pads still ≤ 112 px). `lanes` = the pattern's lane count (min 1). Spec figures at 1280×720: sequencer folded → pads 51; keys and sequencer folded → pads 55. Write the tests with the same bay size the existing `layout.test.ts` uses for 1280×720. If the existing solver's open-plate result already differs from the spec table, keep the same offset for the folded cases, name it in the test, and report it; do not retune the open case.
+
+**UI (mockup markup 533, CSS 246–275 + 399–407, JS 1353–1451):**
+- Header (22 px; left block 223 px): PLAY/STOP `.key.round` (▶; green ■ while playing; `aria-pressed`; `learnId="seq.play"`), REC `.key.round` ● (red when armed; `aria-pressed`), `BPM` `NumLcd` 60–200 (default 100, `learnId="seq.bpm"`), `SWING` `NumLcd` 50–75 shown as `50%` (default 50, `learnId="seq.swing"`); `STEPS` `.switch` 4 | 8 | 16 | 32 (`role="radiogroup"`; applies `setLength` from `seq.ts`, then `seq_update` with no key); `+ LANE` (selected pad → `seq_add_lane`; errors as error confirmations; success `Lane added`); `CLEAR` (all steps 0 via `seq_update` with no key; undoable); spacer; fold ▾.
+- Folded: a 28 px strip `▸ SEQUENCER  {foldSummary}`; clicking it or ▸ unfolds.
+- Lanes: colour bar (`.sw`, pad colour via `ledToCss`), LCD `laneLabel` (bright `--lcd` when the lane's pad is the selected pad; `EMPTY` in dim italics when the pad is gone); clicking the LCD = `chooseBank(lane.bank)` + select the pad; `M` key (amber `.on` when muted; `seq_update`), `×` key (remove the lane; `seq_update`).
+- Steps: `length` cells sharing the width, 2 px gaps, every 4th cell `.beat` (lighter). On = pad colour at 48 % over ink with a 1 px outline in the pad colour; accent = full colour + glow (mockup classes). Click → `clickValue(v, e.shiftKey)`; right-click → `clickValue(v, true)`; press + drag paints the value chosen on the first cell across the cells under the pointer (pointer capture on the lane body, hit-test cells by x); one `seq_update` per changed cell with key `seq:paint` (one stroke = one undo step). A step switched on while stopped → `seq_audition_step`.
+- Playhead: `.st.ph` (orange outline + glow; lit cells brighten) on column `step` from `seq-position`.
+- Lane heights from `--lh` (14–24 px); when the lanes need more height than the body has, the body scrolls (`overflow-y: auto`).
+- All edits are optimistic: update local `currentSet.pattern`, call the command, replace with the returned set.
+- `App.svelte`: listen to `seq-position` → `seqPos` state. Fold state `seqFolded` in localStorage `lpd.seq.folded`.
+- Telemetry: beat lamps = quarter notes of the running sequencer (`Math.floor(step / 4) % 4`), downbeat lamp cream, others orange, all dark when stopped. Orbit outer ring: one tick per step of `length` (beat ticks longer; ticks of steps where any lane has a hit in amber); playhead planet (cream dot, orange tail) at angle `(step + msIntoStep / stepMs) / length × 2π` from the top, interpolated per frame from the last event; stopped: planet parked at the top, readout `IDLE · {bpm} BPM`; playing: `STEP {step + 1}/{length} · {bpm} BPM`.
+- Preview: the plate edits a local pattern (starts empty; `+ LANE` adds the selected pad when it has a sample); PLAY does nothing.
+
+**Tests:** `seq.test.ts`: `clickValue` table (0→1, 1→0, 2→0; accent 0→2, 1→2, 2→0); `paint` does not mutate its input; `foldSummary(1, 8, 120) == "1 lane · 8 steps · 120 BPM"`; `laneLabel(0, 'samples/kick_808.wav') == "1·KICK_808"`, `laneLabel(2, null) == "EMPTY"`; `setLength` 16→32 copies steps 0–15 into 16–31 for an empty tail and keeps a non-empty tail, 32→16→32 keeps hidden steps, input not mutated. `layout.test.ts`: the two fold cases.
+
+**Do not:** keep the `unfitted` class or the `NOT FITTED · PART 2` text; run a UI timer to advance steps; send a command per pixel of mouse movement (only when the cell changes).
+
+**Done when:** [ ] tests first → PASS; [ ] preview at 1280×720: add lanes, paint steps and accents, fold/unfold, 32 steps; [ ] full verification + build; commit `feat(ui): working step sequencer plate`.
 
 ### Task 15: Keys instrument engine (built-in synth + SoundFont)
 
+**Purpose.** UI spec 4.6 (engine part) and 7.3 (keys); engine spec 3.1 `instrument`; decisions D1 and D5.
+
 **Files:**
-- Create: `crates/lpd-core/src/instrument/{mod,basic,soundfont}.rs`, tests `crates/lpd-core/tests/instrument_basic.rs`
-- Modify: `Cargo.toml` (workspace dep `rustysynth = "1"`), `crates/lpd-core/Cargo.toml`, `crates/lpd-core/src/lib.rs`, `crates/lpd-core/src/audio/engine.rs`, `no_alloc.rs`, `crates/lpd-core/src/kit/model.rs` (`#[serde(default)] pub keys: KeysSettings`), `src-tauri/src/{router,state,commands,lib,config}.rs`
+- Create: `crates/lpd-core/src/instrument/mod.rs`, `basic.rs`, `soundfont.rs`, `crates/lpd-core/tests/instrument_basic.rs`
+- Modify: `Cargo.toml` (workspace dep `rustysynth = "1"`), `crates/lpd-core/Cargo.toml`, `crates/lpd-core/src/lib.rs`, `crates/lpd-core/src/audio/engine.rs`, `crates/lpd-core/tests/no_alloc.rs`, `crates/lpd-core/tests/audio_engine.rs`, `crates/lpd-core/src/kit/model.rs`, `src-tauri/src/{router,state,commands,lib,audio}.rs`
 
 **Contracts:**
 ```rust
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum KeysSound { Piano, EPiano, Organ, SynthPad, SynthLead, SynthBass }
-#[serde(rename_all = "camelCase", default)]
-pub struct KeysSettings { pub sound: KeysSound /* EPiano */, pub volume_db: f32 /* −6, range −40…+6 */, pub output: Option<u8> /* None = master, Some(ch) */ }
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)] #[serde(rename_all = "camelCase")]
+pub enum KeysSound { Piano, #[default] EPiano, Organ, SynthPad, SynthLead, SynthBass }
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)] #[serde(rename_all = "camelCase", default)]
+pub struct KeysSettings { pub sound: KeysSound, pub volume_db: f32, pub output: Option<u8> }   // default EPiano, −6.0, None (= master)
+// Set gains: #[serde(default)] pub keys: KeysSettings
 pub trait Instrument: Send {
     fn note_on(&mut self, note: u8, velocity: u8);
     fn note_off(&mut self, note: u8);
-    fn pitch_bend(&mut self, semitones: f32);   // ±2 st
-    fn modulation(&mut self, depth: f32);       // 0..1 vibrato
+    fn pitch_bend(&mut self, semitones: f32);    // −2..2, applies to held notes live
+    fn modulation(&mut self, depth: f32);        // 0..1 → vibrato depth up to ±0.5 st at 5.5 Hz
     fn set_sound(&mut self, sound: KeysSound);
-    fn all_notes_off(&mut self);
-    /// Add into l/r (len ≤ MAX_BLOCK). Must not allocate.
+    fn all_notes_off(&mut self);                 // fast 5 ms release
+    /// Adds into l/r (same length ≤ MAX_BLOCK). Never allocates.
     fn render_add(&mut self, l: &mut [f32], r: &mut [f32]);
 }
-pub struct BasicKeys; // 16-voice poly, preallocated; per sound: Piano = decaying additive (1,2,3 harmonics) fast decay; EPiano = 2-op FM sine, bell attack; Organ = drawbar sines 1/2/3/4, no release (stops at once); SynthPad = 3 detuned saws, slow attack 300 ms, release 1.2 s; SynthLead = square + slight saw, release 150 ms; SynthBass = saw one octave down through a one-pole low-pass, release 80 ms. Velocity → level. Oldest voice stolen at 16.
-impl BasicKeys { pub fn new(sample_rate: u32) -> Self; }
-pub struct SoundFontKeys; // rustysynth::Synthesizer; GM programs: Piano 0, EPiano 4, Organ 16, SynthPad 89, SynthLead 81, SynthBass 38; channel 0; pitch bend range ±2 (RPN 0)
+pub const KEYS_VOICES: usize = 16;
+pub struct BasicKeys { /* 16 voices, preallocated */ }
+impl BasicKeys { pub fn new(sample_rate: u32) -> Self; pub fn active_voices(&self) -> usize; }
+pub struct SoundFontKeys { /* rustysynth::Synthesizer + two scratch buffers of MAX_BLOCK */ }
 impl SoundFontKeys { pub fn load(path: &Path, sample_rate: u32) -> anyhow::Result<Self>; }
+pub fn gm_program(sound: KeysSound) -> u8;       // Piano 0, EPiano 4, Organ 16, SynthPad 89, SynthLead 81, SynthBass 38
 ```
-- Engine: `Command::KeysNoteOn{note, vel}`, `KeysNoteOff{note}`, `KeysPitch(f32)`, `KeysMod(f32)`, `KeysSound(KeysSound)`, `KeysRoute { gain: f32, group: Option<u8> }`, `SetInstrument(Box<dyn Instrument>)`. The engine owns `Option<Box<dyn Instrument>>`; `SetInstrument` swaps and **returns the old box through a `trash` queue** (`Producer<Box<dyn Instrument>>`, capacity 4) so the audio thread never frees it; the router drains and drops it. Keys render into a keys buffer × gain, then add into the chosen group's buffers **before** group processing (so the channel's fader/pan/pitch?/low-pass/mute/solo apply — pitch offset of a group does not apply to the synth; note it), or into the master sum when `group == None`. `Engine::with_taps` creates a `BasicKeys` by default (allocation at construction is fine). Channel energy: keys routed to a group count in `Levels.groups` automatically.
-- Router: on `keys` role notes not bound to a pad → keys commands; pitch bend → `KeysPitch(value/8192 × 2)`; CC 1 → `KeysMod(v/127)`; sends `KeysRoute`/`KeysSound` from `set.keys` on load / change / `replace_audio`.
-- SoundFont: `config.soundfont` set → load on a worker thread at startup and on `set_soundfont` (Task 2 command) → `SetInstrument`; load error → notice text via event `keys-status` `{ engine: "builtin"|"soundfont", name, error? }`; cleared → back to `BasicKeys`.
-- Commands: `keys_note(note: u8, velocity: u8, on: bool)` (screen keys; router also emits `keys-note` for the mirror of hardware notes in Task 10), `keys_pitch(value: f32)`, `keys_mod(value: f32)`, `set_keys(settings: KeysSettings) -> Set` (history key `keys`), `keys_status() -> KeysStatus`.
+`BasicKeys` voice recipes (per voice: phase accumulators and an ADSR; velocity gain = (vel/127)²; output × 0.25 headroom; the same signal on both sides):
 
-**Tests (`instrument_basic.rs`):** each sound renders non-silent after note_on and decays; Organ silent within 5 ms of note_off; SynthPad still sounding 200 ms after note_off; 17 notes steal the oldest (16 voices max); pitch bend +2 st raises a held note's measured period (zero-crossing count) by ≈12 %; `no_alloc.rs`: note_on/off + render with BasicKeys inside `assert_no_alloc`. Engine: keys routed to a muted group are silent; routed to master are audible with all groups muted; `SetInstrument` sends the old box to the trash queue. SoundFont: no `.sf2` on the machine — test only that `load` of a missing path returns an error (no network fetches in tests).
+| Sound | Oscillator | Envelope A / D / S / R | Notes |
+|---|---|---|---|
+| Piano | sines at 1×, 2×, 3× (amps 1, 0.5, 0.25) | 2 ms / 1.2 s to 0 / 0 / 250 ms | decays while held |
+| EPiano | 2-op FM: carrier sine, modulator at 1× with index 1.5 decaying to 0.2 over 400 ms | 2 ms / 1.5 s / 0.3 / 400 ms | |
+| Organ | sines 1×, 2×, 3×, 4× (amps 1, 0.7, 0.4, 0.25) | 5 ms / 0 / 1 / 5 ms | stops at once on note off |
+| SynthPad | 3 saws detuned −7, 0, +7 cents (PolyBLEP) | 300 ms / 0 / 1 / 1.2 s | rings on |
+| SynthLead | square (PolyBLEP) + 0.3 × saw | 5 ms / 200 ms / 0.7 / 150 ms | |
+| SynthBass | saw one octave below the note through a one-pole low-pass at 800 Hz | 3 ms / 300 ms / 0.6 / 80 ms | |
 
-- [ ] Tests first → implement BasicKeys + engine wiring → PASS; SoundFontKeys; router + commands; full verification; commit `feat(core): keys instrument with built-in synth and SoundFont support`
+Voice stealing: when all 16 voices are busy, the oldest one is reused (its envelope restarts from its current level). Re-hitting a held note reuses that note's voice.
+- `SoundFontKeys`: `SoundFont::new(&mut File)` + `Synthesizer::new(&Arc<SoundFont>, &SynthesizerSettings::new(rate as i32))` with `maximum_polyphony = 32`. On load and on `set_sound`: program change `gm_program` on channel 0 (`process_midi_message(0, 0xC0, program, 0)`). Pitch bend range ±2 via RPN 0 (CC 101 = 0, CC 100 = 0, CC 6 = 2, CC 38 = 0). `pitch_bend(st)` → `0xE0` with value `8192 + st / 2 × 8191`; `modulation(d)` → CC 1 = `d × 127`; `render_add` renders into the scratch buffers (`synth.render(&mut sl[..n], &mut sr[..n])`) and adds them.
+- Engine: commands `KeysNoteOn { note: u8, velocity: u8 }`, `KeysNoteOff { note: u8 }`, `KeysPitch(f32)`, `KeysMod(f32)`, `KeysSound(KeysSound)`, `KeysAllOff`, `KeysRoute { gain: f32, group: Option<u8> }`, `SetInstrument(Box<dyn Instrument>)`. `Engine` holds `instrument: Box<dyn Instrument>` (default `BasicKeys::new(rate)` in `new` and `with_taps`), `keys_gain` (default `db_to_gain(−6.0)`), `keys_group: Option<u8>`, and `trash: Producer<Box<dyn Instrument>>` (capacity 4) whose `Consumer` the host takes once with `Engine::take_trash(&mut self) -> Option<Consumer<Box<dyn Instrument>>>`. `SetInstrument(new)`: `let mut old = mem::replace(&mut self.instrument, new); old.all_notes_off();` then push `old` into the trash (queue full → `mem::forget(old)` rather than freeing it on the audio thread). Render: the instrument renders into `keys_l`/`keys_r` (preallocated `MAX_BLOCK`), scaled by `keys_gain`. `keys_group = Some(g)` → added into `groups[g].buf_l/buf_r` **before** group processing (the channel's low-pass, pan, gain, mute, solo and level tap apply; D5: the group pitch does not); `None` → added to the master sum after the groups and before master gain and clip, like auditions.
+- Router: `on_midi` for role `keys`: a note not bound to a pad (Task 12 check) → `KeysNoteOn`/`KeysNoteOff` + the `keys-note` event; PitchBend → `KeysPitch(value / 8192 × 2)`; CC 1 → `KeysMod(value / 127)` (and `keys-wheel`). `send_keys()` pushes `KeysSound(set.keys.sound)` + `KeysRoute { gain: db_to_gain(set.keys.volume_db), group: set.keys.output }`; it is called from `set_current_set`, `install_set`, `replace_audio` (the Task 9 call site) and after `set_keys`. The router drains the trash in `poll_audio_events` (the drop happens on the router thread).
+- SoundFont lifecycle (`state.rs`): `set_soundfont(path)` (the Task 2 command, now real) saves the config. `None` → `SetInstrument(BasicKeys::new(rate))`, status `{ engine: "builtin", name: "BUILT-IN", error: null }`. `Some(p)` → a worker thread runs `SoundFontKeys::load(p, rate)` → `SetInstrument`, status `{ engine: "soundfont", name: <file stem uppercased>, error: null }`; a load error keeps the current instrument, status `{ engine: "builtin", name: "BUILT-IN", error: "Couldn't load {file}: {err}" }`. Emit `keys-status`. At startup, when `config.soundfont` is set, load it the same way after audio starts; after an audio restart (Task 9) set the instrument again (reload the `.sf2` for the new sample rate).
+- Commands: `keys_note(note, velocity, on)` (screen keys; also emits `keys-note` so the mirror shows it), `keys_pitch(value)` (−1..1 → ±2 st), `keys_mod(value)` (0..1), `set_keys(settings)` → `edit(Some("keys"), |set| set.keys = settings)` then `send_keys()`, returns the set; `keys_status()`.
 
-### Task 16: Keys plate UI, mixer channel inputs, SETUP keys sound
+**Tests (`instrument_basic.rs`; render with a helper that calls `render_add` into zeroed buffers at 48 kHz):**
+- Every sound: note 60, velocity 100 → RMS of the first 50 ms > 0.01.
+- Piano held for 2 s → RMS of the last 50 ms < 10 % of the first 50 ms.
+- Organ: 5 ms after note off, RMS < 1 % of the held level.
+- SynthPad: 200 ms after note off, still > 10 % of the held level.
+- 17 note-ons (60..76) → `active_voices() <= 16`, and note 60's voice was stolen.
+- Pitch bend +2 st on a held Organ note raises the zero-crossing rate by 12.2 % ± 1 %.
+- Velocity 127 is louder than velocity 30.
+- `audio_engine.rs`: keys routed to group 2 with group 2 muted → silent; routed to the master with all groups muted → audible; `KeysRoute` gain 0 → silent; `SetInstrument` puts the old box into the trash consumer.
+- `no_alloc.rs`: `KeysNoteOn`, `KeysPitch`, 4 rendered blocks with `BasicKeys`, and `SetInstrument` (box created outside the guard) — no allocation inside the guard.
+- `SoundFontKeys::load("does-not-exist.sf2", 48000)` → Err. No network, no `.sf2` fixtures.
+- Router unit: a `keys` NoteOn not bound to a pad → `KeysNoteOn` in the audio queue; bound to a pad → a Trigger instead.
+
+**Do not:** allocate or drop boxes on the audio thread; bundle or download a SoundFont; route keys through pads; apply the group pitch to the keys.
+
+**Done when:** [ ] tests first → PASS; [ ] full verification; commit `feat(core): keys instrument with built-in synth and SoundFont support`.
+
+### Task 16: Keys plate UI, mixer channel inputs, SETUP › KEYS
+
+**Purpose.** UI spec 4.6 (plate), 6 "Channel inputs", and the SETUP part of D1.
 
 **Files:**
-- Modify: `src/components/KeysPlate.svelte` (functional; drop `unfitted`), `src/components/MixerStrip.svelte` (channel menu, keys dot), `src/App.svelte`, `src/components/SetupAudio.svelte` (or a small KEYS rack inside SetupMidi: SOUNDFONT LCD + LOAD… / CLEAR keys, engine status line — put it as rack **KEYS** after MIDI DEVICES)
-- Create: `src/lib/keys.ts` (+ `keys.test.ts`)
+- Modify: `src/components/KeysPlate.svelte` (functional; remove `unfitted`, `aria-hidden` on interactive parts, and the `NOT FITTED` / `PART 2` texts), `src/components/MixerStrip.svelte`, `src/App.svelte`, `src/lib/model.ts`, `src-tauri/src/commands.rs` + `state.rs` + `lib.rs` (thin `trigger_pad_in` / `release_pad_in` commands)
+- Create: `src/lib/keys.ts` + `src/lib/keys.test.ts`, `src/components/Wheel.svelte`, `src/components/SetupKeys.svelte`
 
-**Contracts (UI spec 4.6, 6 channel inputs):**
-- Keybed: 88 keys A0–C8, `C n` labels, lit 49-key window per octave (UI state `octave` −1…+2, persisted in localStorage `lpd.keys.octave`), outside keys dimmed but playable; mouse press = note on (lower on the key = louder, velocity 30–127), slide = glissando, release = note off; pressed keys light in the sound's colour (learned keys: the pad's colour + a dot on keys learned to a pad: `boundIds` from Task 12 gives the notes). Hardware notes mirrored from `keys-note`.
-- Controls (176 px): status lamp (Keystation connected from the registry), sound LCD in the sound's colour (click / Enter / Space = menu with the six sounds, current ticked), volume LCD dB (−40…+6, default −6; drag, wheel, arrows, double-click resets), fold ▾ (Ctrl+K) → 28 px strip `▸ KEYS ● KEYSTATION 49`; row 2 octave − / + with range LCD (`C2–C6`), output LCD `→ MASTER` / `→ 8 VOX` (menu MASTER + 8 channels); row 3 `LAST` LCD `E4 · VEL 90` (hidden under 68 px keybed). Keystation unplugged → info notice "Keystation 49 not connected — on-screen keys still play" (add as an info row to `notices.ts`, lowest priority, with a test).
-- Wheels: PITCH spring-loaded (returns to centre on release, ±2 st, `keys_pitch`), MOD stays (`keys_mod`, learnable id `keys.mod`); draggable + arrow keys; mirror `keys-wheel`.
-- Sound colours (`keys.ts`): `SOUND_COLORS` per sound (pick from `LAUNCHPAD_PALETTE`), `SOUND_LABELS` (`PIANO`, `E.PIANO`, `ORGAN`, `SYNTH PAD`, `SYNTH LEAD`, `SYNTH BASS`), `noteName(n)` (`C4` = 60, `C#4`), `velocityFromY(y, h)` (30–127), `windowRange(octave)` → `[36 + 12·oct, 84 + 12·oct]`, `rangeLabel(octave)`.
-- Mixer channel scribble click / right-click → menu: `Pads: n in group k (pad editor › MIX GROUP)` (info, disabled), `✓ Keys: E.PIANO` (toggle routing to this channel; if routed elsewhere show `Keys: on 3 TOMS`), `Rename… F2`. Double-click still renames. Channel carrying the keys shows a dot in the sound's colour; tooltip lists inputs.
-- Layout: `keysFolded` from Task 14's solver input.
+**Contracts:**
+```ts
+// keys.ts
+export const SOUNDS = ['piano', 'ePiano', 'organ', 'synthPad', 'synthLead', 'synthBass'] as const;
+export type KeysSound = typeof SOUNDS[number];
+export const SOUND_LABELS: Record<KeysSound, string> = { piano: 'PIANO', ePiano: 'E.PIANO', organ: 'ORGAN', synthPad: 'SYNTH PAD', synthLead: 'SYNTH LEAD', synthBass: 'SYNTH BASS' };
+export const SOUND_COLORS: Record<KeysSound, [number, number, number]> = { piano: [63,63,63], ePiano: [63,40,0], organ: [63,20,0], synthPad: [25,0,63], synthLead: [0,63,25], synthBass: [0,30,63] };
+export function noteName(n: number): string;               // 60 → "C4", 61 → "C#4", 21 → "A0", 108 → "C8"
+export function velocityFromY(y: number, height: number): number; // y from the key top: top → 30, bottom → 127, linear, rounded, clamped
+export function windowRange(octave: number): [number, number];     // [36 + 12·oct, 84 + 12·oct], octave clamped to −1…+2
+export function rangeLabel(octave: number): string;                 // 0 → "C2–C6", −1 → "C1–C5", 2 → "C4–C8"
+export function outputLabel(output: number | null, groups: Group[]): string; // null → "→ MASTER"; 7 → "→ 8 VOX" (index + 1 and the group name, max 8 characters)
+```
+- Commands `trigger_pad_in(bank, x, y)` / `release_pad_in(bank, x, y)`: `AppState` calls `Router::trigger_pad_in(bank, x, y, 1.0)` (+ the painter hit when `bank` is the active bank) / `Router::release_pad_in`.
 
-**Tests:** `keys.test.ts` for noteName (21 → A0, 60 → C4, 108 → C8, 61 → C#4), velocityFromY bounds, windowRange/rangeLabel at −1 and +2; `notices.test.ts` Keystation row.
+**Keys plate (mockup markup 532, CSS 214–245 + 389–398, JS 1226–1352):**
+- Keybed: 88 keys A0–C8; white keys share the width (52), black keys 60 % of a white key wide and 62 % tall (exists); `C n` label on every C (exists). The lit 49-key window is `windowRange(octave)`, marked by the bright orange bar in the felt strip (exists; now moves with `octave`); keys outside are dimmed but playable.
+- Mouse: `pointerdown` on a key → `keys_note({ note, velocity: velocityFromY(...), on: true })`; sliding onto another key while held (pointer capture on the keybed; hit-test by x and the black-key area) → note off the old one, note on the new one (glissando); `pointerup`/`pointercancel` → note off. A key bound to a pad (`noteBoundTo(set, note)` from Task 12) plays the pad instead: `trigger_pad_in({ bank, x, y })` on press and `release_pad_in({ bank, x, y })` on release, and selects the pad when `bank === activeBank`; it does not call `keys_note`.
+- Pressed keys light in `SOUND_COLORS[sound]` (bound keys: in the pad colour). Keys bound to a pad carry a small dot in the pad colour near the bottom. Hardware notes from `keys-note` light the same way.
+- Controls (176 px column):
+  - Row 1: status lamp (green when a `keys` device is connected); sound LCD in the sound colour (`SOUND_LABELS`; click / Enter / Space opens a `ContextMenu` with the six sounds, the current one ticked → `set_keys`); volume `NumLcd` (−40…+6 dB, default −6, shows `−6`; `learnId="keys.volume"`); fold `▾` (Ctrl+K).
+  - Row 2: octave `−` / `+` keys with the range LCD (`rangeLabel`); output LCD `outputLabel` (click = menu `MASTER` + the 8 channels by `groupLegend`, current ticked → `set_keys`).
+  - Row 3: `LAST` silk + LCD `{noteName} · VEL {v}` of the last note (screen or hardware); hidden when the keybed is under 68 px (`short`, exists).
+- Wheels (`Wheel.svelte`, mockup JS 1269–1281): PITCH is spring-loaded (drag up/down; on release it returns to centre with a 120 ms ease; arrow keys nudge it and it springs back on keyup; sends `keys_pitch({ value })` −1..1 at most every 16 ms); MOD stays where it is put (`keys_mod({ value })` 0..1, `learnId="keys.mod"`). Both `role="slider"` with `aria-valuetext` (`+1.2 st`, `MOD 40 %`). Hardware `keys-wheel` moves both thumbs.
+- Fold: a 28 px strip `▸ KEYS ● KEYSTATION 49` (lamp inline); `keysFolded` in localStorage `lpd.keys.folded`; feeds `solvePlayLayout`.
+- `keysAbsent` notice input = no connected `keys` device AND the plate not folded AND not the preview.
+- No computer-keyboard playing of the keys.
 
-- [ ] Tests first → implement → PASS; preview: keys play nothing but light, menus open; full verification + build; commit `feat(ui): playable keys plate and mixer channel inputs`
+**Mixer channel inputs (UI spec 6; mockup JS 1494–1511):**
+- A single click or a right-click on a channel's scribble strip opens a `ContextMenu`: info row `Pads: {n} in group {k} (pad editor › MIX GROUP)` (`n` = pads in all banks with `mixGroup === i`, `k = i + 1`; `info: true`); checkbox row `Keys: {SOUND_LABEL}` (`checked = keys.output === i`; when the keys go to another channel the label is `Keys: on {groupLegend(other)}`) → `set_keys({ settings: { ...keys, output: checked ? null : i } })`; separator; `Rename…` with shortcut `F2` (the existing inline rename). Double-click still renames.
+- A channel carrying the keys shows a dot in the sound colour before its name; the scribble's `title` lists its inputs (`Pads: 6 · Keys: E.PIANO`).
+
+**SETUP › KEYS (`SetupKeys.svelte`, rack after MIDI DEVICES):** row `ENGINE` LCD (`BUILT-IN SYNTH` or `SOUNDFONT · {name}`); row `SOUNDFONT` LCD with the path (`middleTruncate`; `NONE`) + `LOAD…` (`pick_file({ title: 'Choose a SoundFont', extensions: ['sf2'] })` → `set_soundfont({ path })`) + `CLEAR` (`set_soundfont({ path: null })`); an error line in `--error` when `keysStatus.error` is set; hint `The built-in synth plays the six sounds; a General MIDI SoundFont (.sf2) replaces it.` Listen to `keys-status`; load `keys_status` on mount.
+
+**Tests:** `keys.test.ts`: `noteName` (21, 60, 61, 108); `velocityFromY(0, 100) == 30`, `(100, 100) == 127`, `(50, 100) == 79`; `windowRange(0) == [36, 84]`; `windowRange(3)` clamps to `[60, 108]`; `rangeLabel(-1) == "C1–C5"`; `outputLabel(null, g) == "→ MASTER"`; `outputLabel(7, groups with name 'VOX') == "→ 8 VOX"`. `notices.test.ts`: the `keysAbsent` row text and prio 14.
+
+**Do not:** play the keys from the computer keyboard; restyle the keybed; leave `aria-hidden` on controls that are now interactive.
+
+**Done when:** [ ] tests first → PASS; [ ] preview: keys light on click and glissando, menus open, fold works with Ctrl+K and gives the height back to the pads; [ ] full verification + build; commit `feat(ui): playable keys plate, mixer channel inputs and setup keys rack`.
 
 ---
 
 ## Phase F — Finish
 
-### Task 17: SETUP DISPLAY bend, LOG rack, telemetry fold strip polish
+### Task 17: SETUP › DISPLAY bend, SETUP › LOG, rack polish
 
-**Files:** `src/components/SetupDisplay.svelte`, `src/components/CrtLayers.svelte`, `src/lib/display.ts` (+ test), `src/components/SetupLog.svelte`, `src/App.svelte`
+**Files:** `src/components/SetupDisplay.svelte`, `src/components/CrtLayers.svelte`, `src/lib/display.ts` + `src/lib/display.test.ts`, `src/components/SetupLog.svelte`, `src/App.svelte`
 
-- DISPLAY: CRT EFFECTS OFF | LOW | MEDIUM (exists) + BEND FLAT | BENT (default FLAT, inactive when CRT is OFF), stored like the CRT level (localStorage key next to the existing one; `readDisplay`/`saveDisplay` extended to `{ level, bend }` with backwards-compatible reading of the old value); BENT applies the SVG `feDisplacementMap` from the mockup (radial map, 4.5 px edge middles, 9 px corners, + 0.4 px blur) to the console. Hint text exactly as UI spec 8 item 4.
-- LOG: OPEN LOG FOLDER key → `open_log_folder`.
-- Rack units carry four registration marks and an orange pill before the title (mockup `.rack-unit`); check every rack (AUDIO, MIDI DEVICES, KEYS, MIDI LEARN, DISPLAY, LOG) uses them; single column max 860 px, scrolls.
+- `display.ts`: `export interface DisplayPrefs { level: CrtLevel; bend: 'flat' | 'bent' }`; `readDisplay(storage): DisplayPrefs` reads the existing key `launchpad-drummer.display.crt` (the old string format stays valid) and a new key `launchpad-drummer.display.bend`; `saveDisplay(storage, prefs)`. Update the callers.
+- DISPLAY rack: `CRT EFFECTS` three-position switch OFF | LOW | MEDIUM (exists) and `BEND` two-position switch FLAT | BENT (default FLAT; `aria-disabled` and dimmed while CRT is OFF). Hint text exactly (replaces the two current lines): `Glow, curved pixel mask, grain, vignette and a scan line that now and then sweeps down (sometimes stalling mid-screen). BENT also bulges the picture itself (text near the edges gets softer). Reduced motion keeps the mask and grain still.`
+- BENT (UI spec 2.5 "Real bend"): port the mockup's SVG filter (`#crt-bend` / `#bend-map` markup 557–558, JS `bendSize` / `setBend` 1921–1923): a radial displacement map, 4.5 px at the edge middles, 9 px in the corners, + 0.4 px blur, applied to `.console` with `filter: url(#crt-bend)` only when `data-bend="on"` and CRT is not OFF; a resize regenerates the map.
+- LOG rack (`SetupLog.svelte`): `OPEN LOG FOLDER` key → `open_log_folder`; hint `Rotating log: lpd.log + 3 older files, 1 MB each.`
+- Check that every rack uses `RackUnit` (registration marks + orange pill): AUDIO, MIDI DEVICES, KEYS, MIDI LEARN, DISPLAY, LOG; single column, max 860 px, scrolls.
 
-**Tests:** `display.test.ts`: old stored value `"medium"` reads as `{ level: 'medium', bend: 'flat' }`; round-trip.
+**Tests:** `display.test.ts`: storage with only `medium` → `{ level: 'medium', bend: 'flat' }`; round-trip `{ level: 'low', bend: 'bent' }`; garbage → `{ level: 'low', bend: 'flat' }`; throwing storage → defaults.
 
-- [ ] Test first → implement → PASS; full verification + build; commit `feat(ui): display bend option and log rack`
+**Done when:** [ ] tests first → PASS; [ ] preview SETUP: the BEND switch toggles the bulge and is inactive at OFF; [ ] full verification + build; commit `feat(ui): display bend option and log rack`.
 
 ### Task 18: Final verification and spec status
 
-- [ ] `cargo fmt --all -- --check`, `cargo test --workspace`, `npm test`, `npm run check`, `npm run build` — all green; paste the summary lines into the commit message body.
-- [ ] Browser preview pass at 1280×720, 1440×900, 1920×1080 (drawer docked / floating, sequencer and keys folded / open, SETUP): no console errors, nothing overlapping; screenshots by eye.
-- [ ] `cargo build -p launchpad-drummer` (app compiles); start `npm run tauri dev` once and confirm the window opens, power-on or the last set shows, no panic in the log.
-- [ ] Update `docs/superpowers/specs/2026-10-17-ui-design.md` §13 and `2026-10-17-drum-sampler-design.md` §15: what shipped, the deviations (sequencer clock jitter ≤ 1 ms instead of sample-accurate; pad learn target carries the bank; group pitch offset does not apply to the keys; LCXL protocol values unverified until `lp-probe` runs on the unit), and the manual hardware checklist (engine spec 10.3) still to run by the user.
-- [ ] Commit `docs: plan 1C status and remaining hardware checks`
+- [ ] `cargo fmt --all -- --check`, `cargo test --workspace`, `npm test`, `npm run check`, `npm run build` all green; paste the summary lines in the report.
+- [ ] Browser preview at 1280×720, 1440×900 and 1920×1080 (drawer docked and floating; keys and sequencer open and folded; SETUP; the power-on screen cannot appear in the preview — skip it): no console errors, no overlap, no horizontal scroll.
+- [ ] `cargo build -p launchpad-drummer`; start `npm run tauri dev` once; confirm the window opens, the power-on screen (no config) or the last set shows, `lpd.log` gets the startup line, and nothing panics.
+- [ ] Update `docs/superpowers/specs/2026-10-17-ui-design.md` §13 and `2026-10-17-drum-sampler-design.md` §15: what shipped in plan 1C; decisions D1–D7 as recorded deviations; open items: the user's hardware checklist (engine spec 10.3: hot-plug, bank switching, light modes, LCXL controls + LEDs, every drag-and-drop path incl. a real Explorer drop, MIDI learn with a keyboard, a 30-minute session with zero dropouts, the ASIO latency check).
+- [ ] Commit `docs: plan 1C status and remaining hardware checks`.
 
 ---
 
@@ -578,27 +1106,27 @@ impl SoundFontKeys { pub fn load(path: &Path, sample_rate: u32) -> anyhow::Resul
 | Spec item | Task |
 |---|---|
 | UI 1 undo/redo 50 steps, kit edits only | 1, 3 |
-| UI 1 MIDI LEARN list, New/Open set UI, couldn't-save notice, sample-name label, hardware hit selects | 12, 3, 2–3, exists, exists |
-| UI 3 set LCD menu, undo keys, notice LCD, chips; status strip lamps, audio LCD, DROPS, path, save LED | 3, 8, 9, 10 |
-| UI 4 drawer browser/editor, docked/floating | 5 (browser tab), exists |
-| UI 4.1 pad menu, missing `!`, Stop all, scribble rename (exists) | 7 |
+| UI 1 MIDI LEARN list, New/Open set UI, couldn't-save notice | 12, 3, 2 + 3 |
+| UI 3 set LCD menu, undo keys, notice LCD, chips; status lamps, audio LCD, DROPS, path, save LED | 3, 8, 9, 10 |
+| UI 4 drawer browser/editor (docked/floating exists), auto open only on SHOW | 5, 3 |
+| UI 4.1 pad menu, missing `!`, empty `+`, Stop all (exists), scribble rename (exists) | 7 |
 | UI 4.2 humanize applied | 1 |
-| UI 4.3 missing box + LOCATE, LEARN, empty text, editor drop target | 7, 12, 6 |
+| UI 4.3 missing box + LOCATE, LEARN, empty text, editor drop target, coalesced drags | 7, 12, 6 |
 | UI 4.4 browser | 5 |
-| UI 4.5 knob right-click learn/reset | 12 |
+| UI 4.5 right-click Learn / Reset | 12 |
 | UI 4.6 keys plate + engine | 15, 16 |
 | UI 4.7 sequencer | 13, 14 |
-| UI 4.8 telemetry real feed, beat lamps, orbit playhead | 8, 14 |
+| UI 4.8 telemetry feed, beat lamps, orbit playhead, folded strip | 8, 14 |
 | UI 5 drag and drop | 4, 6 |
-| UI 6 mixer channel inputs, level fills, LCXL updates | 16, 8, 11 |
-| UI 7.1 notices 1–13 | 3 (+ inputs from 2, 8, 9, 10, 11, 12) |
+| UI 6 channel inputs, level fills, LCXL updates | 16, 8, 11 |
+| UI 7.1 notices 1–13 (+ Keystation info row) | 3 (inputs from 2, 8, 9, 10, 11, 12, 16) |
 | UI 7.2 power-on | 2, 3 |
 | UI 7.3 backend requirements | 1, 2, 5, 8, 13, 15 |
 | UI 8 SETUP racks | 9, 10, 12, 16, 17 |
 | UI 8.1 learn interaction | 12 |
-| UI 10 keyboard | 3 (+ 5, 16 for Ctrl+B / Ctrl+K) |
-| UI 11 accessibility | 3, 7, 12 (roles, labels, focus) |
-| Engine 4.1 autosave 1 s, atomic save (exists) | 2 |
+| UI 10 keyboard | 3 (+ 5 Ctrl+B, 16 Ctrl+K) |
+| UI 11 accessibility | 3, 7, 12, 14, 16 |
+| Engine 4.1 autosave 1 s | 2 |
 | Engine 7 other MIDI devices + learn, LCXL mapping/LEDs | 10, 11, 12 |
 | Engine 9 error handling (port busy, audio lost, ASIO fallback, dropouts, missing, unreadable set, log file) | 2, 8, 9, 10 |
 | Engine 3.1 `instrument` trait | 15 |
