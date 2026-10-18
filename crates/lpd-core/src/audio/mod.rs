@@ -1,8 +1,10 @@
 //! Real-time audio engine. Nothing in here touches a sound card.
 
+mod biquad;
 mod sample;
 mod voice;
 
+pub use biquad::LowPass;
 pub use sample::Sample;
 pub use voice::{PlayParams, Voice};
 
