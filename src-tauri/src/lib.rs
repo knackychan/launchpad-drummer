@@ -1,5 +1,6 @@
 pub mod audio;
 mod launchpad;
+pub mod lights;
 pub mod router;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
