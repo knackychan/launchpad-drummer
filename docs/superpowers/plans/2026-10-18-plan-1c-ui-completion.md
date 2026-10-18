@@ -39,7 +39,7 @@
 5. **Single set owner:** the router's `Set` is the only copy. `KitManager` holds `dir`, `samples`, `failed_samples` only. Readers clone from the router.
 6. **Undo scope** (UI spec 7.3): pad params, sample replace, move/swap/copy, clear, bank names, light modes, humanize, group **names**, learn bindings, pattern edits, keys settings. **Not** mixer values (volume, pan, pitch, low-pass, mute, solo, master), whether from the screen or the LCXL. 50 steps. Undo restores the snapshot but keeps the current mixer values (`restore_keeping_mixer`).
 7. **Autosave:** any change to the set (undoable or not, incl. mixer values) calls `AppState::touch()`; the saver writes 1 s after the last change.
-8. Lock order in `src-tauri`: `router` → `history` → `kit_manager` → `painter`. Never hold `router` while calling `emit`: clone what you need, drop the guard, then emit.
+8. Lock order in `src-tauri`: `router` → `history` → `kit_manager` → `saver`. `painter` (and `assigns`) are separate leaves: nothing else is taken while holding them; `save_gate` is taken first, only to order disk writes. Never hold `router` while calling `emit`: clone what you need, drop the guard, then emit.
 9. `prefers-reduced-motion`: no key transitions, learn blink steady (2 px `--warn` ring), missing-sample blink steady red + `!`, no scope afterglow, CRT layers still. Hardware LEDs unaffected.
 10. Accessibility: focus ring 2 px `--focus` at 2 px offset on `:focus-visible` only (already global). Knobs/faders `role="slider"` + `aria-valuetext`; latching keys `aria-pressed`; choke/mix/mode/step-count rows `role="radiogroup"`; telemetry and CRT layers `aria-hidden`.
 11. Text uses the true minus `−`, multiplication `×`, ellipsis `…`, middle dot `·` and arrow `→` exactly as written in this plan.
@@ -58,6 +58,7 @@
 | D8 | File and folder pickers, reveal-in-Explorer and open-folder run in Rust commands (tauri-plugin-dialog / tauri-plugin-opener Rust APIs). The JS side never imports plugin packages, so capabilities stay `core:default`. |
 | D9 | CRT level and BEND are per-user localStorage settings (CRT already is); the keys octave window and fold states are UI state in localStorage. Library folder, `.sf2` path, audio prefs and MIDI roles live in the app config file. Everything else lives in `set.json`. |
 | D10 | Task 1 outcome (implemented in commit `10835e4`): `edit` records an undo step only when the set actually changed; a group rename that also changes values is split (name via `edit`, values via `Router::update_group` without history); `Router::release_pad_in(bank, x, y)`, `Router::install_set(set)`, `Router::send_mixer()` and `router::mixer_audio_differs(a, b)` exist; holds are tracked by pad id. |
+| D11 | Audit commit `0ef8f5e` (and the Task 1 review fix-ups): lock order is `router` → `history` → `kit_manager` → `saver`, with `painter` a separate leaf (see 0.2 item 8). `update_pad` already takes `key` (Task 7 only wires it in the UI). `AppState::edit_at(key, now, f)` (injected time) and `edit_in(&mut Router, key, now, f)` (inside a held router lock) exist; `update_group` uses `edit_in` for the rename and `Router::update_group` for values, under one lock, one `touch()`. `update_master_db` and group volumes go through `fader_gain` (the −60 dB floor = silence). `update_pad` never changes an existing pad's `sample`; use `assign_sample`. `KitManager` has no `save` / `set_dir` / `import_sample_file`: saving is `AppState::save_set`, importing is `AppState::import_sample` / `store::prepare_sample`. |
 
 ### 0.4 Shared name registry
 
@@ -154,7 +155,7 @@ Implemented. The reviewers check it against this text; later tasks rely on these
 - `AppState::edit<R>(key: Option<&str>, f: impl FnOnce(&mut Set) -> R) -> R`: applies `f` to the router set, records history only if the set changed, re-sends mixer audio only if `mixer_audio_differs`, calls `touch()`.
 - `AppState::{undo, redo, history_state}`; commands `undo`, `redo`, `history_state` registered.
 - Router: `trigger_pad_in(bank, x, y, velocity_gain)` is the only trigger path. Humanize = `gain × velocity_gain × db_to_gain(u × humanize_db / 2)`, `u` uniform in [−1, 1) from a xorshift32 (`set_seed` for tests). `release_pad_in`, `install_set`, `send_mixer`, `mixer_audio_differs`. Holds tracked by pad id.
-- `KitManager { dir, samples, failed_samples }`, `save(&self, set: &Set)`.
+- `KitManager { dir, samples, failed_samples }` (no `save`: see D11).
 
 ### Task 2: App config, startup decision, autosave, save status, log file, pickers
 

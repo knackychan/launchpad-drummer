@@ -220,14 +220,10 @@ impl Router {
         })
     }
 
-    /// Replace the set but keep samples, holds and voice tracking (undo/redo). Mixer
-    /// commands are re-sent only when the mixer changed.
+    /// Replace the set but keep samples, holds and voice tracking (undo/redo). Undo/redo keep the
+    /// current mixer values (`restore_keeping_mixer`), so nothing is sent to the engine.
     pub fn install_set(&mut self, set: Set) {
-        let mixer_changed = mixer_audio_differs(&self.set, &set);
         self.set = set;
-        if mixer_changed {
-            self.send_mixer();
-        }
     }
 
     /// Push every group and the master gain to the engine.
@@ -283,12 +279,14 @@ impl Router {
         }
         params.gain *= gain;
         let id = Self::pad_id(bank, x, y);
-        self.held.insert(id);
-        let _ = self.audio_tx.push(Command::Trigger {
+        let sent = self.audio_tx.push(Command::Trigger {
             pad: id,
             sample,
             params,
         });
+        if sent.is_ok() {
+            self.held.insert(id);
+        }
     }
 
     /// Release (x, y) of the current bank; if that is not held (bank switched while
@@ -433,6 +431,33 @@ mod tests {
             }
         }
         assert_eq!(released, vec![Router::pad_id(1, 0, 0)]);
+    }
+
+    #[test]
+    fn a_trigger_lost_to_a_full_queue_is_not_held() {
+        let mut set = Set::new();
+        set.banks[0].set_pad(Pad::new(0, 0, "samples/a.wav", [63, 0, 0]));
+        let mut samples = HashMap::new();
+        samples.insert(
+            "samples/a.wav".to_string(),
+            Arc::new(Sample {
+                rate: 48_000,
+                data: vec![0.5; 200],
+            }),
+        );
+        // Smaller than the mixer burst `new` sends: the queue is full afterwards.
+        let (tx, mut cmd_rx) = RingBuffer::new(2);
+        let (_evt_tx, evt_rx) = RingBuffer::new(16);
+        let mut router = Router::new(set, samples, tx, evt_rx);
+        router.trigger_pad(0, 0);
+        assert!(!router.held.contains(&Router::pad_id(0, 0, 0)));
+
+        while cmd_rx.pop().is_ok() {}
+        router.release_pad(0, 0);
+        assert!(
+            cmd_rx.pop().is_err(),
+            "no release for a pad that never sounded"
+        );
     }
 
     #[test]

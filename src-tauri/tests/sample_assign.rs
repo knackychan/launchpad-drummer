@@ -94,6 +94,37 @@ fn reassigning_keeps_the_pad_settings_and_is_one_undo_step() {
 }
 
 #[test]
+fn a_stale_pad_from_the_ui_never_reverts_the_assigned_sample() {
+    let tmp = tempfile::tempdir().unwrap();
+    let r = open_kit(tmp.path());
+    write_wav(&tmp.path().join("kit/samples/a.wav"), 480);
+    write_wav(&tmp.path().join("kit/samples/b.wav"), 480);
+    r.state
+        .assign_sample(0, 1, 1, "samples/a.wav", None)
+        .unwrap();
+    // The editor still holds the pad as it was before the reassignment.
+    let mut stale = r.state.get_current_set().banks[0]
+        .pad(1, 1)
+        .unwrap()
+        .clone();
+    r.state
+        .assign_sample(0, 1, 1, "samples/b.wav", None)
+        .unwrap();
+
+    stale.volume_db = -6.0;
+    r.state.update_pad(0, stale, None);
+    let pad = r.state.get_current_set().banks[0]
+        .pad(1, 1)
+        .unwrap()
+        .clone();
+    assert_eq!(
+        pad.sample, "samples/b.wav",
+        "update_pad never changes the sample"
+    );
+    assert_eq!(pad.volume_db, -6.0, "the other params are applied");
+}
+
+#[test]
 fn a_bad_file_leaves_the_pad_playable_and_says_why() {
     let tmp = tempfile::tempdir().unwrap();
     let mut r = open_kit(tmp.path());

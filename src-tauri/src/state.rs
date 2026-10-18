@@ -301,10 +301,14 @@ impl AppState {
     }
 
     /// Replace a pad's parameters. `key` names a continuous control (for example
-    /// `pad:0:2:3:volume`) so a drag is one undo step. Use `assign_sample` to change the sample.
-    pub fn update_pad(&self, bank: usize, pad: Pad, key: Option<&str>) {
+    /// `pad:0:2:3:volume`) so a drag is one undo step. An existing pad keeps its sample (a stale
+    /// editor copy must not revert an assignment); use `assign_sample` to change it.
+    pub fn update_pad(&self, bank: usize, mut pad: Pad, key: Option<&str>) {
         self.edit(key, |set| {
             if let Some(b) = set.banks.get_mut(bank) {
+                if let Some(old) = b.pad(pad.x, pad.y) {
+                    pad.sample = old.sample.clone();
+                }
                 b.set_pad(pad);
             }
         });
@@ -319,19 +323,20 @@ impl AppState {
     }
 
     /// A rename is an undoable kit edit; value changes (volume, pan, ...) are not (UI spec 7.3).
+    /// Both happen under one router lock and mark the set dirty once.
     pub fn update_group(&self, group: usize, g: lpd_core::kit::Group) {
-        let renamed = lock(&self.router)
-            .set()
-            .mixer
-            .groups
-            .get(group)
-            .map(|old| old.name != g.name)
-            .unwrap_or(false);
-        if renamed {
+        let mut r = lock(&self.router);
+        let Some(old) = r.set().mixer.groups.get(group) else {
+            return;
+        };
+        if old.name != g.name {
             let name = g.name.clone();
-            self.edit(None, |set| set.mixer.groups[group].name = name);
+            self.edit_in(&mut r, None, Instant::now(), |set| {
+                set.mixer.groups[group].name = name
+            });
         }
-        lock(&self.router).update_group(group, g);
+        r.update_group(group, g);
+        drop(r);
         self.touch();
     }
 
@@ -349,9 +354,14 @@ impl AppState {
     }
 
     pub fn update_bank_humanize(&self, bank: usize, humanize_db: f32) {
+        self.update_bank_humanize_at(bank, humanize_db, Instant::now());
+    }
+
+    /// `update_bank_humanize` at a given time (tests inject it to check coalescing).
+    pub fn update_bank_humanize_at(&self, bank: usize, humanize_db: f32, now: Instant) {
         let humanize_db = humanize_db.clamp(0.0, 6.0);
         let key = format!("bank:{bank}:humanize");
-        self.edit(Some(&key), |set| {
+        self.edit_at(Some(&key), now, |set| {
             if let Some(b) = set.banks.get_mut(bank) {
                 b.humanize_db = humanize_db;
             }
@@ -697,5 +707,51 @@ mod tests {
         let undone = state.undo().unwrap();
         assert_eq!(undone.mixer.groups[1].name, "Group 2");
         assert_eq!(undone.mixer.groups[1].volume_db, -9.0);
+    }
+
+    fn save_rev(state: &AppState) -> u64 {
+        lock(&state.saver).rev()
+    }
+
+    #[test]
+    fn update_group_out_of_range_changes_nothing() {
+        let (state, _rx) = app();
+        let g = state.get_current_set().mixer.groups[0].clone();
+        let before = save_rev(&state);
+        state.update_group(99, g);
+        assert_eq!(save_rev(&state), before, "not marked dirty");
+        assert!(!state.history_state().can_undo);
+    }
+
+    #[test]
+    fn rename_with_value_change_is_one_touch_and_one_step() {
+        let (state, _rx) = app();
+        let mut g = state.get_current_set().mixer.groups[2].clone();
+        g.name = "Toms".into();
+        g.volume_db = -4.0;
+        let before = save_rev(&state);
+        state.update_group(2, g);
+        assert_eq!(save_rev(&state), before + 1, "one touch");
+        let set = state.get_current_set();
+        assert_eq!(set.mixer.groups[2].name, "Toms");
+        assert_eq!(set.mixer.groups[2].volume_db, -4.0);
+        let undone = state.undo().unwrap();
+        assert_eq!(undone.mixer.groups[2].name, "Group 3");
+        assert_eq!(
+            undone.mixer.groups[2].volume_db, -4.0,
+            "values are not undone"
+        );
+        assert!(state.undo().is_none());
+    }
+
+    #[test]
+    fn undo_marks_the_set_dirty() {
+        let (state, _rx) = app();
+        state.rename_bank(0, "A".into());
+        let before = save_rev(&state);
+        state.undo().unwrap();
+        assert_eq!(save_rev(&state), before + 1);
+        state.redo().unwrap();
+        assert_eq!(save_rev(&state), before + 2);
     }
 }

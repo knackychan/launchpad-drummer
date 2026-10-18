@@ -1,31 +1,17 @@
-use launchpad_drummer_lib::store::KitManager;
-use lpd_core::kit::{Pad, Set};
-use std::path::Path;
+mod common;
 
-fn write_test_wav(path: &Path) {
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate: 48_000,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let mut w = hound::WavWriter::create(path, spec).unwrap();
-    for _ in 0..480 {
-        w.write_sample(1000i16).unwrap();
-    }
-    w.finalize().unwrap();
-}
+use common::{rig, write_wav};
+use launchpad_drummer_lib::store::{prepare_sample, KitManager};
+use lpd_core::kit::{self, Pad, Set};
 
 #[test]
-fn kit_manager_saves_and_loads_set() {
+fn a_saved_set_loads_back_through_the_kit_manager() {
     let dir = tempfile::tempdir().unwrap();
-    let mut km = KitManager::new_default();
-    km.set_dir(dir.path().to_path_buf());
     let mut pad = Pad::new(0, 0, "samples/kick.wav", [63, 0, 0]);
     pad.volume_db = -3.0;
     let mut set = Set::new();
     set.banks[0].set_pad(pad);
-    km.save(&set).expect("save ok");
+    kit::save(dir.path(), &set).expect("save ok");
 
     let loaded = KitManager::load_from_dir(dir.path()).expect("load ok");
     assert_eq!(loaded.set.banks[0].pads.len(), 1);
@@ -33,16 +19,30 @@ fn kit_manager_saves_and_loads_set() {
 }
 
 #[test]
-fn import_sample_copies_and_decodes() {
+fn prepare_sample_copies_and_decodes_an_outside_file() {
     let set_dir = tempfile::tempdir().unwrap();
     let src_dir = tempfile::tempdir().unwrap();
     let src = src_dir.path().join("snare.wav");
-    write_test_wav(&src);
+    write_wav(&src, 480);
 
-    let mut km = KitManager::new_default();
-    km.set_dir(set_dir.path().to_path_buf());
-    let (rel_path, sample) = km.import_sample_file(&src).expect("import ok");
+    let (rel_path, sample) = prepare_sample(set_dir.path(), src.to_str().unwrap()).unwrap();
     assert_eq!(rel_path, "samples/snare.wav");
     assert_eq!(sample.frames(), 480);
     assert!(set_dir.path().join("samples/snare.wav").exists());
+}
+
+#[test]
+fn import_sample_copies_into_the_open_set() {
+    let tmp = tempfile::tempdir().unwrap();
+    let r = rig(1024);
+    let kit_dir = tmp.path().join("kit");
+    r.state.new_set_dir(kit_dir.to_str().unwrap()).unwrap();
+    let src = tmp.path().join("loose/snare.wav");
+    write_wav(&src, 480);
+
+    let rel_path = r.state.import_sample(src.to_str().unwrap()).unwrap();
+    assert_eq!(rel_path, "samples/snare.wav");
+    assert!(kit_dir.join("samples/snare.wav").exists());
+    let peaks = r.state.sample_peaks(&rel_path, 16).expect("loaded");
+    assert_eq!(peaks.length_ms, 10.0);
 }

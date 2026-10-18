@@ -36,10 +36,6 @@ impl KitManager {
         }
     }
 
-    pub fn set_dir(&mut self, dir: PathBuf) {
-        self.dir = Some(dir);
-    }
-
     pub fn load_from_dir(dir: &Path) -> Result<LoadedKit> {
         let Loaded { set, from_backup } = kit::load(dir)?;
         let (samples, failed) = kit::load_samples(dir, &set);
@@ -54,24 +50,6 @@ impl KitManager {
             failed_samples,
             from_backup,
         })
-    }
-
-    /// Save `set` (the router owns it) into the configured set directory.
-    pub fn save(&self, set: &Set) -> Result<()> {
-        let Some(dir) = self.dir.as_ref() else {
-            bail!("no set directory configured");
-        };
-        kit::save(dir, set)?;
-        Ok(())
-    }
-
-    pub fn import_sample_file(&mut self, src: &Path) -> Result<(String, Arc<Sample>)> {
-        let Some(dir) = self.dir.as_ref() else {
-            bail!("no set directory configured");
-        };
-        let (rel_path, sample) = prepare_sample(dir, &src.to_string_lossy())?;
-        self.samples.insert(rel_path.clone(), sample.clone());
-        Ok((rel_path, sample))
     }
 }
 
