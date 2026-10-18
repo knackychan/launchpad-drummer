@@ -1,51 +1,3 @@
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn matches_only_launchpad_mk2_ports() {
-        assert!(is_launchpad_port("Launchpad MK2"));
-        assert!(is_launchpad_port("Launchpad MK2 16"));
-        assert!(is_launchpad_port("2- Launchpad MK2 16"));
-        assert!(!is_launchpad_port("Other Launchpad MK2"));
-        assert!(!is_launchpad_port("Launchpad MK2X"));
-        assert!(!is_launchpad_port("Launch Control XL"));
-    }
-
-    #[test]
-    fn decodes_grid_and_side_button_press_and_release_only() {
-        assert_eq!(decode_pad(&[0x90, 11, 127]), Some(PadEvent { note: 11, pressed: true }));
-        assert_eq!(decode_pad(&[0x90, 88, 0]), Some(PadEvent { note: 88, pressed: false }));
-        assert_eq!(decode_pad(&[0x80, 44, 64]), Some(PadEvent { note: 44, pressed: false }));
-        assert_eq!(decode_pad(&[0x90, 89, 127]), Some(PadEvent { note: 89, pressed: true }));
-        assert_eq!(decode_pad(&[0x80, 79, 64]), Some(PadEvent { note: 79, pressed: false }));
-        for bytes in [&[0x91, 11, 127][..], &[0x90, 99, 127], &[0xB0, 104, 127], &[0x90, 11]] {
-            assert_eq!(decode_pad(bytes), None);
-        }
-    }
-
-    #[test]
-    fn encodes_screen_order_as_hardware_rows_and_validates_frame() {
-        let mut frame = vec![[0, 0, 0]; 64];
-        frame[0] = [63, 1, 2];
-        frame[63] = [3, 4, 5];
-        let message = rgb_message(&frame).unwrap();
-        assert_eq!(&message[..7], &[0xF0, 0, 0x20, 0x29, 2, 0x18, 0x0B]);
-        assert_eq!(&message[7..11], &[81, 63, 1, 2]);
-        assert_eq!(&message[7 + 63 * 4..7 + 64 * 4], &[18, 3, 4, 5]);
-        assert_eq!(message.last(), Some(&0xF7));
-        assert!(rgb_message(&frame[..63]).is_err());
-        frame[2][0] = 64;
-        assert!(rgb_message(&frame).is_err());
-    }
-
-    #[test]
-    fn recognises_bootloader_pid_without_matching_other_usb_ids() {
-        assert!(is_bootloader_id("USB\\VID_1235&PID_1069\\1234"));
-        assert!(!is_bootloader_id("USB\\VID_1235&PID_1068\\1234"));
-        assert!(!is_bootloader_id("USB\\VID_9999&PID_1069\\1234"));
-    }
-}
 //! Launchpad MK2 MIDI bridge.
 // shortcut: protocol lives here until Plan 1A's lpd-core is built; then use its codec.
 
@@ -59,7 +11,7 @@ const SESSION_LAYOUT: [u8; 9] = [0xF0, 0, 0x20, 0x29, 2, 0x18, 0x22, 0, 0xF7];
 const ALL_OFF: [u8; 9] = [0xF0, 0, 0x20, 0x29, 2, 0x18, 0x0E, 0, 0xF7];
 const RECHECK: Duration = Duration::from_secs(2);
 
-struct FrameSender(Sender<Vec<u8>>);
+pub struct FrameSender(Sender<Vec<u8>>);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DeviceStatus {
@@ -314,3 +266,52 @@ fn bootloader_present() -> Result<bool, u32> {
 #[cfg(not(windows))]
 fn bootloader_present() -> Result<bool, u32> { Ok(false) }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matches_only_launchpad_mk2_ports() {
+        assert!(is_launchpad_port("Launchpad MK2"));
+        assert!(is_launchpad_port("Launchpad MK2 16"));
+        assert!(is_launchpad_port("2- Launchpad MK2 16"));
+        assert!(!is_launchpad_port("Other Launchpad MK2"));
+        assert!(!is_launchpad_port("Launchpad MK2X"));
+        assert!(!is_launchpad_port("Launch Control XL"));
+    }
+
+    #[test]
+    fn decodes_grid_and_side_button_press_and_release_only() {
+        assert_eq!(decode_pad(&[0x90, 11, 127]), Some(PadEvent { note: 11, pressed: true }));
+        assert_eq!(decode_pad(&[0x90, 88, 0]), Some(PadEvent { note: 88, pressed: false }));
+        assert_eq!(decode_pad(&[0x80, 44, 64]), Some(PadEvent { note: 44, pressed: false }));
+        assert_eq!(decode_pad(&[0x90, 89, 127]), Some(PadEvent { note: 89, pressed: true }));
+        assert_eq!(decode_pad(&[0x80, 79, 64]), Some(PadEvent { note: 79, pressed: false }));
+        for bytes in [&[0x91, 11, 127][..], &[0x90, 99, 127], &[0xB0, 104, 127], &[0x90, 11]] {
+            assert_eq!(decode_pad(bytes), None);
+        }
+    }
+
+    #[test]
+    fn encodes_screen_order_as_hardware_rows_and_validates_frame() {
+        let mut frame = vec![[0, 0, 0]; 64];
+        frame[0] = [63, 1, 2];
+        frame[63] = [3, 4, 5];
+        let message = rgb_message(&frame).unwrap();
+        assert_eq!(&message[..7], &[0xF0, 0, 0x20, 0x29, 2, 0x18, 0x0B]);
+        assert_eq!(&message[7..11], &[81, 63, 1, 2]);
+        assert_eq!(&message[7 + 63 * 4..7 + 64 * 4], &[18, 3, 4, 5]);
+        assert_eq!(message.last(), Some(&0xF7));
+        assert!(rgb_message(&frame[..63]).is_err());
+        frame[2][0] = 64;
+        assert!(rgb_message(&frame).is_err());
+    }
+
+    #[test]
+    fn recognises_bootloader_pid_without_matching_other_usb_ids() {
+        assert!(is_bootloader_id("USB\\VID_1235&PID_1069\\1234"));
+        assert!(!is_bootloader_id("USB\\VID_1235&PID_1068\\1234"));
+        assert!(!is_bootloader_id("USB\\VID_9999&PID_1069\\1234"));
+    }
+}
