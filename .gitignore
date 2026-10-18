@@ -5,3 +5,6 @@ src-tauri/gen/
 .npm-cache/
 .verification/
 *.local
+*.db
+*.pdb
+Thumbs.db

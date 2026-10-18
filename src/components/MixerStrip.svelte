@@ -1,356 +1,138 @@
 <script lang="ts">
+  // 1:1 Launch Control XL mirror + master (UI spec 7.1): label column, 8 channel columns, master.
+  import Knob from './Knob.svelte';
+  import Fader from './Fader.svelte';
   import type { Group } from '../lib/model.ts';
+  import { groupLegend } from '../lib/model.ts';
+  import type { MixDims } from '../lib/layout.ts';
+  import { dbToPos, fmtDbShort, fmtLp, fmtPan, fmtSemis, knobToLp, lpToKnob } from '../lib/mix.ts';
 
   let {
-    groups,
-    masterDb,
-    onupdategroup,
-    onupdatemaster,
-    onstopall,
+    groups, masterDb, dims, onupdategroup, onupdatemaster, onstopall,
   }: {
     groups: Group[];
     masterDb: number;
+    dims?: MixDims;
     onupdategroup: (index: number, group: Group) => void;
     onupdatemaster: (masterDb: number) => void;
-    onstopall: () => void;
+    onstopall?: () => void;
   } = $props();
 
-  function updateGroupParam<K extends keyof Group>(index: number, key: K, value: Group[K]) {
-    const updated = {
-      ...groups[index],
-      [key]: value,
-    };
-    onupdategroup(index, updated);
-  }
+  const DEFAULT_DIMS: MixDims = {
+    cw: 50,
+    fh: 120,
+    kn: 30,
+    kr: 48,
+    kb: 26,
+    sh: 24,
+    fw: 36,
+    fs: 10,
+  };
+  const d = $derived(dims ?? DEFAULT_DIMS);
+  let renaming = $state<number | null>(null);
+  const narrow = $derived(d.cw < 44);
+  const TICKS: [number, string][] = [[6, '+6'], [0, '0'], [-12, '−12'], [-40, '−40'], [-60, '−∞']];
 
-  function toggleMute(index: number) {
-    updateGroupParam(index, 'mute', !groups[index].mute);
+  function set<K extends keyof Group>(index: number, key: K, value: Group[K]) {
+    onupdategroup(index, { ...groups[index], [key]: value });
   }
-
-  function toggleSolo(index: number) {
-    updateGroupParam(index, 'solo', !groups[index].solo);
+  function finishRename(index: number, input: HTMLInputElement, commit: boolean) {
+    if (renaming !== index) return;
+    renaming = null;
+    const name = input.value.trim().toUpperCase();
+    if (commit && name && name !== groups[index].name) set(index, 'name', name);
   }
+  function focusSelect(node: HTMLInputElement) { node.focus(); node.select(); }
 </script>
 
-<div class="mixer-console" aria-label="8-Channel Mixer and Master Section">
-  <div class="strips-container">
-    {#each groups as group, index}
-      <div class="channel-strip" class:muted={group.mute} class:soloed={group.solo}>
-        <div class="strip-header">
-          <span class="silk strip-num">{index + 1}</span>
-          <span class="lcd strip-name">{group.name || `CH ${index + 1}`}</span>
-        </div>
+<div
+  class="mixer plate"
+  aria-label="Mixer"
+  data-label="MIX · LAUNCH CONTROL XL"
+  style:--cw="{d.cw}px"
+  style:--fh="{d.fh}px"
+  style:--kr="{d.kr}px"
+  style:--kb="{d.kb}px"
+  style:--sh="{d.sh}px"
+  style:--fw="{d.fw}px"
+  style:--fs="{d.fs.toFixed(1)}px"
+>
+  <div class="mx-labels">
+    <span class="silk">GROUP</span>
+    <span class="silk">PAN</span>
+    <span class="silk">PITCH</span>
+    <span class="silk" title="Low-pass">LPF</span>
+    <div class="mx-ticks" title="Volume scale (dB)">
+      {#each TICKS as [db, text]}
+        <span class="silk" style:top="{9 + (1 - dbToPos(db)) * (d.fh - 18)}px">{text}</span>
+      {/each}
+    </div>
+    <span class="silk">dB</span>
+    <span class="silk">MUTE</span>
+    <span class="silk">SOLO</span>
+  </div>
 
-        <!-- Mute and Solo -->
-        <div class="strip-buttons">
-          <button
-            type="button"
-            class="key mute-btn"
-            class:active-mute={group.mute}
-            onclick={() => toggleMute(index)}
-            aria-label="Mute channel {index + 1}"
-          >
-            M
-          </button>
-          <button
-            type="button"
-            class="key solo-btn"
-            class:active-solo={group.solo}
-            onclick={() => toggleSolo(index)}
-            aria-label="Solo channel {index + 1}"
-          >
-            S
-          </button>
-        </div>
-
-        <!-- Lowpass Filter Cutoff -->
-        <div class="knob-row">
-          <label class="silk param-label" for="lp-{index}">LP</label>
-          <input
-            id="lp-{index}"
-            type="range"
-            min="200"
-            max="20000"
-            step="100"
-            class="mini-slider"
-            value={group.lowpassHz}
-            title={`Lowpass: ${group.lowpassHz >= 20000 ? 'Bypass' : `${Math.round(group.lowpassHz)} Hz`}`}
-            oninput={(e) => updateGroupParam(index, 'lowpassHz', parseFloat((e.target as HTMLInputElement).value))}
-          />
-        </div>
-
-        <!-- Pan -->
-        <div class="knob-row">
-          <label class="silk param-label" for="pan-{index}">PAN</label>
-          <input
-            id="pan-{index}"
-            type="range"
-            min="-1"
-            max="1"
-            step="0.05"
-            class="mini-slider"
-            value={group.pan}
-            title={`Pan: ${group.pan === 0 ? 'C' : group.pan < 0 ? `L${Math.round(Math.abs(group.pan) * 100)}` : `R${Math.round(group.pan * 100)}`}`}
-            oninput={(e) => updateGroupParam(index, 'pan', parseFloat((e.target as HTMLInputElement).value))}
-          />
-        </div>
-
-        <!-- Volume Fader -->
-        <div class="fader-container">
-          <input
-            type="range"
-            min="-60"
-            max="12"
-            step="0.5"
-            class="v-fader"
-            value={group.volumeDb}
-            aria-label="Volume channel {index + 1}"
-            oninput={(e) => updateGroupParam(index, 'volumeDb', parseFloat((e.target as HTMLInputElement).value))}
-          />
-          <div class="fader-scale">
-            <span>+12</span>
-            <span class="zero-mark">0</span>
-            <span>-12</span>
-            <span>-30</span>
-            <span>-∞</span>
+  <div class="mx-cols">
+    {#each groups as group, i}
+      <div class="mx-col" data-group={i}>
+        {#if renaming === i}
+          <div class="scrib screen active">
+            <input
+              value={group.name}
+              maxlength="12"
+              aria-label="Group name"
+              use:focusSelect
+              onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Enter') finishRename(i, e.currentTarget, true); if (e.key === 'Escape') finishRename(i, e.currentTarget, false); }}
+              onblur={(e) => finishRename(i, e.currentTarget, true)}
+            />
           </div>
-        </div>
-
-        <span class="lcd fader-val">
-          {group.volumeDb <= -60 ? '-∞' : `${group.volumeDb > 0 ? '+' : ''}${group.volumeDb.toFixed(0)}`}
-        </span>
+        {:else}
+          <button
+            type="button"
+            class="scrib screen active"
+            title="Channel {i + 1}: double-click to rename"
+            ondblclick={() => { renaming = i; }}
+          ><span class="nm">{groupLegend(i, group.name)}</span></button>
+        {/if}
+        <Knob ariaLabel="{group.name} pan" value={group.pan} min={-1} max={1} def={0} step={0.02} fine={0.01} size={d.kn} fmt={fmtPan} onchange={(v) => set(i, 'pan', v)} />
+        <Knob ariaLabel="{group.name} pitch" value={group.pitchSemitones} min={-12} max={12} def={0} step={1} fine={0.1} size={d.kn} fmt={fmtSemis} onchange={(v) => set(i, 'pitchSemitones', v)} />
+        <Knob ariaLabel="{group.name} low-pass" value={lpToKnob(group.lowpassHz)} min={0} max={1} def={1} step={0.01} fine={0.002} size={d.kn} fmt={fmtLp} onchange={(t) => set(i, 'lowpassHz', t >= 0.999 ? 20000 : knobToLp(t))} />
+        <Fader label="{group.name} volume" value={group.volumeDb} height={d.fh} meters={[i]} onchange={(db) => set(i, 'volumeDb', db)} />
+        <span class="lcd">{fmtDbShort(group.volumeDb)}</span>
+        <button type="button" class="key" class:on={group.mute} class:amber={group.mute} aria-pressed={group.mute} aria-label="{group.name} mute" onclick={() => set(i, 'mute', !group.mute)}>{narrow ? 'M' : 'MUTE'}</button>
+        <button type="button" class="key" class:on={group.solo} class:green={group.solo} aria-pressed={group.solo} aria-label="{group.name} solo" onclick={() => set(i, 'solo', !group.solo)}>{narrow ? 'S' : 'SOLO'}</button>
       </div>
     {/each}
+  </div>
 
-    <!-- Master Section -->
-    <div class="master-strip">
-      <div class="strip-header master-header">
-        <span class="silk strip-name">MASTER</span>
-      </div>
-
-      <button
-        type="button"
-        class="key stop-all-btn"
-        title="Emergency stop all sounding voices"
-        onclick={onstopall}
-      >
-        STOP ALL
-      </button>
-
-      <div class="fader-container">
-        <input
-          type="range"
-          min="-60"
-          max="12"
-          step="0.5"
-          class="v-fader master-fader"
-          value={masterDb}
-          aria-label="Master volume"
-          oninput={(e) => onupdatemaster(parseFloat((e.target as HTMLInputElement).value))}
-        />
-        <div class="fader-scale">
-          <span>+12</span>
-          <span class="zero-mark">0</span>
-          <span>-12</span>
-          <span>-30</span>
-          <span>-∞</span>
-        </div>
-      </div>
-
-      <span class="lcd fader-val master-val">
-        {masterDb <= -60 ? '-∞' : `${masterDb > 0 ? '+' : ''}${masterDb.toFixed(1)} dB`}
-      </span>
-    </div>
+  <div class="mx-col mx-master">
+    <div class="scrib screen active master-scrib"><span class="nm">MASTER</span></div>
+    <div></div><div></div><div></div>
+    <Fader label="Master volume" value={masterDb} height={d.fh} color="#ff5b1f" meters={['L', 'R']} onchange={onupdatemaster} />
+    <span class="lcd">{fmtDbShort(masterDb)}</span>
+    <div></div><div></div>
   </div>
 </div>
 
 <style>
-  .mixer-console {
-    width: 100%;
-    height: 100%;
-    display: flex;
-    overflow-x: auto;
-    overflow-y: hidden;
-    padding: 4px;
-    background: var(--body);
-    border-radius: var(--r-panel);
+  .mixer { flex: none; display: flex; gap: 4px; padding: 12px 10px; position: relative; }
+  .mx-labels, .mx-col {
+    display: grid; grid-template-rows: var(--sh) var(--kr) var(--kr) var(--kr) var(--fh) 16px var(--kb) var(--kb);
+    row-gap: 6px; align-items: center; justify-items: center;
   }
-
-  .strips-container {
-    display: flex;
-    gap: 6px;
-    height: 100%;
-    min-width: min-content;
+  .mx-labels { justify-items: end; width: 30px; }
+  .mx-ticks { position: relative; width: 100%; height: 100%; }
+  .mx-ticks .silk { position: absolute; right: 2px; transform: translateY(-50%); font-size: 8px; letter-spacing: 0; }
+  .mx-cols { display: flex; gap: 2px; }
+  .mx-col { width: var(--cw); border-radius: 6px; }
+  .mx-master { padding-left: 8px; margin-left: 4px; border-left: 1px solid var(--line); }
+  .scrib {
+    width: calc(var(--cw) - 2px); height: var(--sh); display: flex; align-items: center; justify-content: center; gap: 5px; padding: 0 2px; border: 0;
+    font: 400 calc(var(--fs) - .5px)/1 var(--f-lcd); color: var(--lcd); overflow: hidden; white-space: nowrap; cursor: pointer;
   }
-
-  .channel-strip {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    width: 48px;
-    height: 100%;
-    padding: 4px 2px;
-    background: var(--body-raised);
-    border: 1px solid var(--line);
-    border-radius: 3px;
-    gap: 4px;
-  }
-
-  .master-strip {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    width: 62px;
-    height: 100%;
-    padding: 4px 2px;
-    background: #1c1816;
-    border: 1px solid var(--orange);
-    border-radius: 3px;
-    gap: 4px;
-  }
-
-  .strip-header {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    width: 100%;
-    border-bottom: 1px solid var(--line);
-    padding-bottom: 2px;
-  }
-
-  .strip-num {
-    font-size: 11px;
-    color: var(--silk);
-  }
-
-  .strip-name {
-    font-size: 9px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 44px;
-    color: var(--lcd-dim);
-  }
-
-  .master-header .strip-name {
-    color: var(--orange);
-    font-weight: 700;
-  }
-
-  .strip-buttons {
-    display: flex;
-    gap: 3px;
-  }
-
-  .mute-btn,
-  .solo-btn {
-    width: 18px;
-    height: 16px;
-    padding: 0;
-    font-size: 9px;
-    display: grid;
-    place-items: center;
-    color: var(--lcd-dim);
-  }
-
-  .active-mute {
-    background: var(--error) !important;
-    color: white !important;
-    border-color: #ff6b7b !important;
-  }
-
-  .active-solo {
-    background: var(--warn) !important;
-    color: #110b05 !important;
-    border-color: #ffcc55 !important;
-  }
-
-  .stop-all-btn {
-    width: 52px;
-    height: 20px;
-    font-size: 8px;
-    padding: 0;
-    background: #2a0808;
-    color: var(--error);
-    border-color: #881a1a;
-  }
-
-  .stop-all-btn:active {
-    background: var(--error);
-    color: white;
-  }
-
-  .knob-row {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    width: 100%;
-    gap: 1px;
-  }
-
-  .param-label {
-    font-size: 8px;
-    color: var(--silk);
-  }
-
-  .mini-slider {
-    width: 40px;
-    height: 4px;
-    accent-color: var(--vec);
-    cursor: pointer;
-  }
-
-  .fader-container {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    flex: 1;
-    min-height: 50px;
-    position: relative;
-  }
-
-  .v-fader {
-    writing-mode: vertical-lr;
-    direction: rtl;
-    width: 18px;
-    height: 100%;
-    accent-color: var(--orange);
-    cursor: pointer;
-  }
-
-  .master-fader {
-    accent-color: #ff3300;
-  }
-
-  .fader-scale {
-    display: flex;
-    flex-direction: column;
-    justify-content: space-between;
-    height: 100%;
-    font-size: 7px;
-    color: var(--lcd-dim);
-    line-height: 1;
-    padding: 2px 0;
-  }
-
-  .zero-mark {
-    color: var(--vec);
-    font-weight: 700;
-  }
-
-  .fader-val {
-    font-size: 9px;
-    color: var(--lcd);
-    height: 12px;
-  }
-
-  .master-val {
-    color: var(--orange);
-    font-size: 9px;
-    font-weight: 700;
-  }
-
-  .channel-strip.muted {
-    opacity: 0.6;
-  }
+  .scrib .nm { overflow: hidden; text-overflow: ellipsis; }
+  .scrib input { width: 100%; background: transparent; border: 0; color: #fff; font: inherit; padding: 0; text-align: center; }
+  .master-scrib { cursor: default; }
+  .mx-col .key { width: calc(var(--cw) - 6px); height: var(--kb); padding: 0; font-size: var(--fs); min-width: 0; }
+  .mx-col .lcd, .mx-col :global(.knob-val) { font-size: var(--fs); min-width: 0; }
 </style>

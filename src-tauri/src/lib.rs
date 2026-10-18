@@ -63,7 +63,9 @@ pub fn run() {
             commands::update_bank_lights,
             commands::rename_bank,
             commands::stop_all,
-            commands::import_sample
+            commands::import_sample,
+            commands::update_bank_humanize,
+            commands::sample_peaks
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Launchpad Drummer");

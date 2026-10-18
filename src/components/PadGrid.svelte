@@ -3,8 +3,12 @@
   import { ledToCss, padNote } from '../lib/led.ts';
   import type { PadInput, Rgb } from '../lib/led.ts';
 
-  let { leds, selected = null, oninput }: {
-    leds: readonly Rgb[]; selected?: number | null; oninput: (input: PadInput) => void;
+  let { leds, names = [], selected = null, oninput }: {
+    leds: readonly Rgb[];
+    /** Pad labels in frame order (top-left first); empty string = empty pad. */
+    names?: readonly string[];
+    selected?: number | null;
+    oninput: (input: PadInput) => void;
   } = $props();
   let buttons: HTMLButtonElement[] = [];
   let focusIndex = $state(56);
@@ -45,10 +49,12 @@
       bind:this={buttons[index]}
       class="pad"
       class:lit={rgb.some(v => v > 0)}
+      class:empty={!names[index]}
       class:selected={selected === note}
       style:--led={ledToCss(rgb)}
       data-note={note}
-      aria-label="Row {row}, column {col}, note {note}"
+      aria-label="Row {row}, column {col}, {names[index] || 'empty'}"
+      title={names[index] || 'Empty pad'}
       aria-pressed={selected === note}
       tabindex={focusIndex === index ? 0 : -1}
       onfocus={() => { focusIndex = index; }}
@@ -68,6 +74,6 @@
         if (event.key === ' ' || event.key === 'Enter') { event.preventDefault(); release(note); }
       }}
       onblur={() => release(note)}
-    ></button>
+    ><span class="glyph"></span>{#if names[index]}<span class="nm">{names[index]}</span>{/if}</button>
   {/each}
 </div>

@@ -96,6 +96,12 @@ impl Router {
         }
     }
 
+    pub fn update_bank_humanize(&mut self, bank: usize, humanize_db: f32) {
+        if bank < self.set.banks.len() {
+            self.set.banks[bank].humanize_db = humanize_db;
+        }
+    }
+
     pub fn rename_bank(&mut self, bank: usize, name: String) {
         if bank < self.set.banks.len() {
             self.set.banks[bank].name = name;

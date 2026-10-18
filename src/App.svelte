@@ -172,6 +172,16 @@
     await window.__TAURI__?.core.invoke('update_bank_lights', { bank: activeBank, lights });
   }
 
+  async function updateBankHumanize(humanizeDb: number) {
+    if (!currentSet?.banks[activeBank]) return;
+    currentSet.banks[activeBank].humanizeDb = humanizeDb;
+    await window.__TAURI__?.core.invoke('update_bank_humanize', {
+      bank: activeBank,
+      humanizeDb,
+      humanize_db: humanizeDb,
+    });
+  }
+
   async function handlePadUpdate(pad: Pad) {
     if (!currentSet) return;
     const bank = currentSet.banks[activeBank];
@@ -194,13 +204,20 @@
   async function handleUpdateGroup(groupIndex: number, group: Group) {
     if (!currentSet) return;
     currentSet.mixer.groups[groupIndex] = group;
-    await window.__TAURI__?.core.invoke('update_group', { group: groupIndex, groupData: group });
+    await window.__TAURI__?.core.invoke('update_group', {
+      group: groupIndex,
+      groupData: group,
+      group_data: group,
+    });
   }
 
   async function handleUpdateMaster(masterDb: number) {
     if (!currentSet) return;
     currentSet.mixer.masterDb = masterDb;
-    await window.__TAURI__?.core.invoke('update_master_db', { masterDb });
+    await window.__TAURI__?.core.invoke('update_master_db', {
+      masterDb,
+      master_db: masterDb,
+    });
   }
 
   async function handleStopAll() {
@@ -372,6 +389,18 @@
                         />
                         RIPPLE
                       </label>
+                      <label class="toggle-label" title="Random velocity humanization (0 to 6 dB)">
+                        HUM:
+                        <input
+                          type="range"
+                          min="0"
+                          max="6"
+                          step="0.1"
+                          style="width: 38px; height: 4px;"
+                          value={currentSet.banks[activeBank].humanizeDb ?? 0}
+                          oninput={(e) => updateBankHumanize(parseFloat((e.target as HTMLInputElement).value))}
+                        />
+                      </label>
                     </div>
                   {/if}
                 </div>
@@ -379,31 +408,35 @@
             </Plate>
 
             <!-- Pad Editor Drawer (when a pad is selected) -->
-            {#if selectedPad}
+            {#if selectedPad && currentSet && selected !== null}
+              {@const px = (selected % 10) - 1}
+              {@const py = Math.floor(selected / 10) - 1}
               <PadEditor
+                x={px}
+                y={py}
                 pad={selectedPad}
-                bankIndex={activeBank}
+                groups={currentSet.mixer.groups}
+                peaks={null}
                 onupdate={handlePadUpdate}
                 onremove={handlePadRemove}
-                onclose={() => { selected = null; }}
                 ontrigger={(x, y) => window.__TAURI__?.core.invoke('trigger_pad', { x, y })}
                 onrelease={(x, y) => window.__TAURI__?.core.invoke('release_pad', { x, y })}
               />
             {/if}
 
-            <Plate label="MIX · LAUNCH CONTROL XL" class="mixer-cap">
-              {#if currentSet}
-                <MixerStrip
-                  groups={currentSet.mixer.groups}
-                  masterDb={currentSet.mixer.masterDb}
-                  onupdategroup={handleUpdateGroup}
-                  onupdatemaster={handleUpdateMaster}
-                  onstopall={handleStopAll}
-                />
-              {:else}
+            {#if currentSet}
+              <MixerStrip
+                groups={currentSet.mixer.groups}
+                masterDb={currentSet.mixer.masterDb}
+                onupdategroup={handleUpdateGroup}
+                onupdatemaster={handleUpdateMaster}
+                onstopall={handleStopAll}
+              />
+            {:else}
+              <Plate label="MIX · LAUNCH CONTROL XL" class="mixer-cap">
                 <HazardCap label="Mixer" />
-              {/if}
-            </Plate>
+              </Plate>
+            {/if}
           </div>
 
           <Plate label="KEYS · KEYSTATION 49" class="keys-cap"><HazardCap label="Keyboard" /></Plate>

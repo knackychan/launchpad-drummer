@@ -1,367 +1,237 @@
 <script lang="ts">
-  import { LAUNCHPAD_PALETTE } from '../lib/model.ts';
-  import type { Pad, PadMode } from '../lib/model.ts';
+  // Pad editor (UI spec 4.3), shown in the Play side drawer.
+  import Knob from './Knob.svelte';
+  import { GROUP_COLORS, LAUNCHPAD_PALETTE, groupLegend, padLabel } from '../lib/model.ts';
+  import type { Group, Pad, PadMode, SamplePeaks } from '../lib/model.ts';
   import { ledToCss } from '../lib/led.ts';
+  import { fmtDb, fmtSemis } from '../lib/mix.ts';
 
-  let { pad, bankIndex, onupdate, onremove, onclose, ontrigger, onrelease }: {
-    pad: Pad;
-    bankIndex: number;
+  let { x, y, pad, groups, peaks, onupdate, onremove, ontrigger, onrelease }: {
+    x: number;
+    y: number;
+    /** null = empty pad */
+    pad: Pad | null;
+    groups: Group[];
+    peaks: SamplePeaks | null;
     onupdate: (pad: Pad) => void;
     onremove: (x: number, y: number) => void;
-    onclose: () => void;
-    ontrigger?: (x: number, y: number) => void;
-    onrelease?: (x: number, y: number) => void;
+    ontrigger: (x: number, y: number) => void;
+    onrelease: (x: number, y: number) => void;
   } = $props();
 
-  function updateField<K extends keyof Pad>(key: K, value: Pad[K]) {
-    onupdate({
-      ...pad,
-      [key]: value,
-    });
-  }
+  let showRgb = $state(false);
+  let canvas = $state<HTMLCanvasElement>();
+  let pathDraft = $state('');
 
-  function handleModeChange(mode: PadMode) {
-    updateField('mode', mode);
+  function update<K extends keyof Pad>(key: K, value: Pad[K]) {
+    if (pad) onupdate({ ...pad, [key]: value });
   }
+  const sameColor = (a: readonly number[], b: readonly number[]) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 
-  function handleColorSelect(color: [number, number, number]) {
-    updateField('color', color);
+  // Waveform: pad colour inside the trim, dim outside, white start / end handles.
+  function draw() {
+    if (!canvas || !pad) return;
+    const dpr = devicePixelRatio || 1, W = canvas.clientWidth, H = canvas.clientHeight;
+    if (!W) return;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    const g = canvas.getContext('2d');
+    if (!g) return;
+    g.scale(dpr, dpr);
+    g.clearRect(0, 0, W, H);
+    if (!peaks) {
+      g.fillStyle = 'rgba(79,208,198,.35)'; g.fillRect(0, H / 2, W, 1);
+      g.fillStyle = '#8fa3bf'; g.font = '11px "Share Tech Mono", monospace'; g.textAlign = 'center';
+      g.fillText(pad.sample ? 'SAMPLE NOT LOADED' : 'NO SAMPLE', W / 2, H / 2 - 8);
+      return;
+    }
+    const len = peaks.lengthMs, s = (pad.trimStartMs / len) * W, e = ((pad.trimEndMs ?? len) / len) * W;
+    const col = ledToCss(pad.color), n = peaks.peaks.length;
+    for (let px = 0; px < W; px += 2) {
+      const a = Math.min(1, peaks.peaks[Math.min(n - 1, Math.floor((px / W) * n))]) * (H / 2 - 4);
+      g.fillStyle = px < s || px > e ? '#2a2d30' : col;
+      g.fillRect(px, H / 2 - a, 1.5, Math.max(1, a * 2));
+    }
+    g.fillStyle = '#fff';
+    for (const hx of [s, e]) { g.fillRect(hx - 1, 0, 2, H); g.fillRect(hx - (hx === s ? 0 : 7), 0, 7, 9); }
   }
+  $effect(() => { pad; peaks; canvas; draw(); });
 
-  function handleChokeChange(event: Event) {
-    const val = (event.target as HTMLSelectElement).value;
-    updateField('chokeGroup', val === 'none' ? null : parseInt(val, 10));
+  function waveDown(event: PointerEvent) {
+    if (!pad || !canvas) return;
+    const r = canvas.getBoundingClientRect(), px = event.clientX - r.left;
+    const len = peaks?.lengthMs ?? 0;
+    const sx = len ? (pad.trimStartMs / len) * r.width : -99, ex = len ? ((pad.trimEndMs ?? len) / len) * r.width : -99;
+    const which = Math.abs(px - sx) < 8 ? 's' : Math.abs(px - ex) < 8 ? 'e' : null;
+    if (!which) {
+      ontrigger(x, y);
+      const up = () => { onrelease(x, y); window.removeEventListener('pointerup', up); };
+      window.addEventListener('pointerup', up);
+      return;
+    }
+    canvas.setPointerCapture(event.pointerId);
+    const el = canvas;
+    const move = (e: PointerEvent) => {
+      if (!pad) return;
+      const ms = Math.min(len, Math.max(0, ((e.clientX - r.left) / r.width) * len));
+      if (which === 's') update('trimStartMs', Math.round(Math.min(ms, (pad.trimEndMs ?? len) - 10)));
+      else { const v = Math.max(ms, pad.trimStartMs + 10); update('trimEndMs', v >= len - 1 ? null : Math.round(v)); }
+    };
+    const up = () => { el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up); };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
   }
-
-  function handleMixGroupChange(event: Event) {
-    const val = parseInt((event.target as HTMLSelectElement).value, 10);
-    updateField('mixGroup', val);
+  function waveHover(event: PointerEvent) {
+    if (!pad || !canvas || !peaks) return;
+    const r = canvas.getBoundingClientRect(), px = event.clientX - r.left, len = peaks.lengthMs;
+    const near = [pad.trimStartMs, pad.trimEndMs ?? len].some((v) => Math.abs((v / len) * r.width - px) < 8);
+    canvas.style.cursor = near ? 'ew-resize' : 'pointer';
+  }
+  function setSample(path: string) {
+    const sample = path.trim();
+    if (!sample) return;
+    if (pad) update('sample', sample);
+    else onupdate({ x, y, sample, color: [...GROUP_COLORS[y % 8]] as [number, number, number], volumeDb: 0, pitchSemitones: 0, trimStartMs: 0, trimEndMs: null, mode: 'oneShot', chokeGroup: null, mixGroup: y });
   }
 </script>
 
-<aside class="pad-editor plate" aria-label="Pad Editor Drawer" data-label="PAD EDITOR">
-  <header class="editor-header">
-    <div class="pad-badge">
-      <span class="silk">BANK {bankIndex + 1}</span>
-      <span class="lcd pad-coord">R{pad.y + 1}·C{pad.x + 1}</span>
-    </div>
-    <div class="header-actions">
-      {#if ontrigger && onrelease}
-        <button
-          type="button"
-          class="key small test-hit"
-          title="Test trigger pad"
-          onpointerdown={() => ontrigger?.(pad.x, pad.y)}
-          onpointerup={() => onrelease?.(pad.x, pad.y)}
-          onpointerleave={() => onrelease?.(pad.x, pad.y)}
-        >
-          HIT
-        </button>
-      {/if}
-      <button type="button" class="key small close-btn" onclick={onclose} aria-label="Close Pad Editor">
-        ✕
-      </button>
-    </div>
-  </header>
+<div class="editor screen" aria-label="Pad editor">
+  <div class="ed-head">
+    <span class="lcd lcd-dim">R{y + 1}·C{x + 1}</span>
+    <span class="lcd ed-name">{pad?.sample ? padLabel(pad.sample).toUpperCase() : 'EMPTY'}</span>
+    {#if pad && peaks}<span class="lcd lcd-dim small">{(peaks.lengthMs / 1000).toFixed(2)} s · {(peaks.rate / 1000).toFixed(1)} kHz</span>{/if}
+    {#if pad}
+      <button type="button" class="key small clear" title="Clear pad" onclick={() => onremove(x, y)}>CLEAR</button>
+    {/if}
+  </div>
 
-  <div class="editor-body">
-    <!-- Sample Name / Path -->
-    <div class="field">
-      <label for="pad-sample" class="silk">SAMPLE PATH</label>
-      <div class="sample-input-row">
-        <input
-          id="pad-sample"
-          class="screen lcd input-text"
-          type="text"
-          value={pad.sample}
-          placeholder="e.g. samples/kick.wav"
-          onchange={(e) => updateField('sample', (e.target as HTMLInputElement).value)}
-        />
+  <div class="ed-sec">
+    <label class="silk" for="pad-sample">SAMPLE</label>
+    <input
+      id="pad-sample"
+      class="lcd screen path"
+      type="text"
+      spellcheck="false"
+      placeholder="samples/kick.wav"
+      value={pad?.sample ?? pathDraft}
+      oninput={(e) => { pathDraft = e.currentTarget.value; }}
+      onchange={(e) => setSample(e.currentTarget.value)}
+      onkeydown={(e) => e.stopPropagation()}
+    />
+  </div>
+
+  {#if !pad}
+    <div class="empty-msg">Empty pad.<br />Type a sample path (relative to the set folder) and press Enter.</div>
+  {:else}
+    <div class="ed-sec">
+      <div class="silk">SAMPLE · TRIM</div>
+      <canvas bind:this={canvas} class="wave" aria-label="Waveform. Drag the handles to trim. Click to audition." onpointerdown={waveDown} onpointermove={waveHover}></canvas>
+      <div class="lcd lcd-dim small trim">
+        <span>START {Math.round(pad.trimStartMs)} ms</span>
+        <span>END {pad.trimEndMs == null ? (peaks ? Math.round(peaks.lengthMs) : '—') : Math.round(pad.trimEndMs)} ms</span>
       </div>
     </div>
 
-    <!-- Mode Selector -->
-    <div class="field">
-      <span class="silk field-label">PLAYBACK MODE</span>
-      <div class="switch">
-        <button
-          type="button"
-          class="mode-btn key"
-          class:on={pad.mode === 'oneShot'}
-          onclick={() => handleModeChange('oneShot')}
-        >
-          ONE-SHOT
-        </button>
-        <button
-          type="button"
-          class="mode-btn key"
-          class:on={pad.mode === 'hold'}
-          onclick={() => handleModeChange('hold')}
-        >
-          HOLD
-        </button>
+    <div class="ed-sec">
+      <div class="ed-row between">
+        <span class="silk">COLOUR</span>
+        <span class="lcd lcd-dim small">{pad.color.join(' · ')}</span>
+        <button type="button" class="key small" class:on={showRgb} aria-pressed={showRgb} onclick={() => { showRgb = !showRgb; }}>+RGB</button>
       </div>
-    </div>
-
-    <!-- Volume and Pitch sliders -->
-    <div class="field-row">
-      <div class="field flex-1">
-        <div class="field-head">
-          <label for="pad-vol" class="silk">GAIN</label>
-          <span class="lcd readout">{pad.volumeDb > 0 ? `+${pad.volumeDb.toFixed(1)}` : pad.volumeDb.toFixed(1)} dB</span>
-        </div>
-        <input
-          id="pad-vol"
-          type="range"
-          min="-60"
-          max="12"
-          step="0.5"
-          value={pad.volumeDb}
-          oninput={(e) => updateField('volumeDb', parseFloat((e.target as HTMLInputElement).value))}
-        />
-      </div>
-
-      <div class="field flex-1">
-        <div class="field-head">
-          <label for="pad-pitch" class="silk">PITCH</label>
-          <span class="lcd readout">{pad.pitchSemitones > 0 ? `+${pad.pitchSemitones.toFixed(1)}` : pad.pitchSemitones.toFixed(1)} st</span>
-        </div>
-        <input
-          id="pad-pitch"
-          type="range"
-          min="-24"
-          max="24"
-          step="1"
-          value={pad.pitchSemitones}
-          oninput={(e) => updateField('pitchSemitones', parseFloat((e.target as HTMLInputElement).value))}
-        />
-      </div>
-    </div>
-
-    <!-- Choke and Mix Group -->
-    <div class="field-row">
-      <div class="field flex-1">
-        <label for="pad-choke" class="silk">CHOKE GROUP</label>
-        <select id="pad-choke" class="screen lcd select-box" value={pad.chokeGroup ?? 'none'} onchange={handleChokeChange}>
-          <option value="none">OFF</option>
-          {#each Array(8) as _, i}
-            <option value={i + 1}>GROUP {i + 1}</option>
-          {/each}
-        </select>
-      </div>
-
-      <div class="field flex-1">
-        <label for="pad-mix" class="silk">MIX BUS</label>
-        <select id="pad-mix" class="screen lcd select-box" value={pad.mixGroup} onchange={handleMixGroupChange}>
-          {#each Array(8) as _, i}
-            <option value={i}>BUS {i + 1}</option>
-          {/each}
-        </select>
-      </div>
-    </div>
-
-    <!-- Pad LED Color Palette -->
-    <div class="field">
-      <span class="silk field-label">PAD COLOR</span>
-      <div class="palette-swatches">
-        {#each LAUNCHPAD_PALETTE as swatch}
-          {@const isSelected = pad.color[0] === swatch[0] && pad.color[1] === swatch[1] && pad.color[2] === swatch[2]}
+      <div class="swatches">
+        {#each LAUNCHPAD_PALETTE as c}
           <button
             type="button"
-            class="swatch"
-            class:active={isSelected}
-            style:background={ledToCss(swatch)}
-            aria-label="Color RGB {swatch[0]} {swatch[1]} {swatch[2]}"
-            onclick={() => handleColorSelect([...swatch])}
+            class="sw"
+            class:cur={sameColor(c, pad.color)}
+            style:background={ledToCss(c)}
+            aria-label="Colour {c.join(' ')}"
+            title="R{c[0]} G{c[1]} B{c[2]}"
+            onclick={() => update('color', [...c] as [number, number, number])}
           ></button>
+        {/each}
+      </div>
+      {#if showRgb}
+        <div class="ed-row rgb">
+          {#each ['R', 'G', 'B'] as channel, ci}
+            <Knob
+              label={channel}
+              value={pad.color[ci]}
+              min={0}
+              max={63}
+              def={0}
+              step={1}
+              fine={1}
+              size={30}
+              fmt={(v) => String(Math.round(v))}
+              onchange={(v) => { if (pad) { const color = [...pad.color] as [number, number, number]; color[ci] = Math.round(v); update('color', color); } }}
+            />
+          {/each}
+        </div>
+      {/if}
+    </div>
+
+    <div class="ed-row knobs">
+      <Knob label="VOLUME" value={pad.volumeDb} min={-60} max={6} def={0} step={0.5} fine={0.1} fmt={fmtDb} onchange={(v) => update('volumeDb', v)} />
+      <Knob label="PITCH" value={pad.pitchSemitones} min={-24} max={24} def={0} step={1} fine={0.1} fmt={fmtSemis} onchange={(v) => update('pitchSemitones', v)} />
+      <div class="ed-sec">
+        <span class="silk">MODE</span>
+        <div class="switch" role="radiogroup" aria-label="Mode">
+          {#each [['oneShot', 'ONE-SHOT'], ['hold', 'HOLD']] as [m, text]}
+            <button type="button" class="key" class:on={pad.mode === m} role="radio" aria-checked={pad.mode === m} onclick={() => update('mode', m as PadMode)}>{text}</button>
+          {/each}
+        </div>
+      </div>
+    </div>
+
+    <div class="ed-sec">
+      <span class="silk">CHOKE</span>
+      <div class="ed-row tight" role="radiogroup" aria-label="Choke group">
+        {#each [null, 1, 2, 3, 4, 5, 6, 7, 8] as c}
+          <button type="button" class="key small" class:on={pad.chokeGroup === c} role="radio" aria-checked={pad.chokeGroup === c} onclick={() => update('chokeGroup', c)}>{c ?? 'OFF'}</button>
         {/each}
       </div>
     </div>
 
-    <!-- Actions -->
-    <div class="field-actions">
-      <button
-        type="button"
-        class="key remove-btn"
-        onclick={() => onremove(pad.x, pad.y)}
-      >
-        CLEAR PAD
-      </button>
+    <div class="ed-sec">
+      <div class="ed-row between">
+        <span class="silk">MIX GROUP</span>
+        <span class="lcd lcd-dim small">{groups[pad.mixGroup] ? groupLegend(pad.mixGroup, groups[pad.mixGroup].name) : ''}</span>
+      </div>
+      <div class="ed-row tight" role="radiogroup" aria-label="Mix group">
+        {#each groups as g, i}
+          <button type="button" class="key small" class:on={pad.mixGroup === i} role="radio" aria-checked={pad.mixGroup === i} title={g.name} aria-label="Mix {i + 1} {g.name}" onclick={() => update('mixGroup', i)}>{i + 1}</button>
+        {/each}
+      </div>
     </div>
-  </div>
-</aside>
+
+    <div class="ed-sec">
+      <span class="silk">MIDI</span>
+      <div class="ed-row">
+        <button type="button" class="key" aria-disabled="true" title="MIDI learn — not fitted yet">LEARN</button>
+        <span class="tooltip-note">Bind a note from another MIDI device</span>
+      </div>
+    </div>
+  {/if}
+</div>
 
 <style>
-  .pad-editor {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    padding: 14px 12px 12px;
-    width: 270px;
-    min-width: 250px;
-    background: var(--body-raised);
-    border-radius: var(--r-panel);
-    border: 1px solid var(--line);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
-  }
-
-  .editor-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    border-bottom: 1px solid var(--line);
-    padding-bottom: 8px;
-  }
-
-  .pad-badge {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .pad-coord {
-    font-size: 15px;
-    color: var(--silk);
-    font-weight: 700;
-  }
-
-  .header-actions {
-    display: flex;
-    gap: 6px;
-  }
-
-  .test-hit {
-    font-size: 10px;
-    width: 36px;
-    height: 22px;
-    color: var(--lcd);
-  }
-
-  .close-btn {
-    width: 22px;
-    height: 22px;
-    padding: 0;
-    display: grid;
-    place-items: center;
-    font-size: 11px;
-    color: var(--lcd-dim);
-  }
-
-  .editor-body {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .field-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-
-  .field-row {
-    display: flex;
-    gap: 8px;
-  }
-
-  .flex-1 {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .field-label {
-    margin-bottom: 2px;
-  }
-
-  .readout {
-    font-size: 11px;
-    color: var(--vec);
-  }
-
-  .input-text {
-    width: 100%;
-    height: 26px;
-    padding: 2px 8px;
-    border: 1px solid var(--line);
-    color: var(--lcd);
-    font-size: 12px;
-  }
-
-  .select-box {
-    width: 100%;
-    height: 26px;
-    padding: 2px 6px;
-    border: 1px solid var(--line);
-    color: var(--lcd);
-    font-size: 11px;
-    background: var(--glass);
-  }
-
-  .switch {
-    display: flex;
-    gap: 4px;
-    background: #110f0e;
-    padding: 2px;
-    border-radius: var(--r-key);
-    border: 1px solid var(--line);
-  }
-
-  .mode-btn {
-    flex: 1;
-    height: 24px;
-    font-size: 10px;
-    padding: 0;
-  }
-
-  input[type='range'] {
-    width: 100%;
-    accent-color: var(--orange);
-    height: 6px;
-    cursor: pointer;
-  }
-
-  .palette-swatches {
-    display: grid;
-    grid-template-columns: repeat(8, 1fr);
-    gap: 4px;
-  }
-
-  .swatch {
-    width: 100%;
-    aspect-ratio: 1;
-    border: 1px solid rgba(0, 0, 0, 0.6);
-    border-radius: 2px;
-    cursor: pointer;
-    padding: 0;
-    transition: transform 60ms;
-  }
-
-  .swatch:hover {
-    transform: scale(1.15);
-    z-index: 2;
-  }
-
-  .swatch.active {
-    outline: 2px solid white;
-    outline-offset: 1px;
-  }
-
-  .field-actions {
-    margin-top: 6px;
-    display: flex;
-    justify-content: flex-end;
-  }
-
-  .remove-btn {
-    font-size: 10px;
-    padding: 4px 10px;
-    color: var(--error);
-    border-color: rgba(255, 61, 79, 0.4);
-  }
+  .editor { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 12px; padding: 12px; overflow: auto; }
+  .ed-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .ed-name { font-size: 16px; color: #fff; font-weight: 500; }
+  .clear { margin-left: auto; color: var(--error); }
+  .small { font-size: 11px; }
+  .ed-sec { display: flex; flex-direction: column; gap: 6px; }
+  .ed-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .ed-row.between { justify-content: space-between; }
+  .ed-row.tight { gap: 4px; }
+  .ed-row.knobs { gap: 22px; align-items: flex-start; flex-wrap: nowrap; }
+  .ed-row.rgb { gap: 14px; }
+  .path { height: 26px; padding: 0 8px; border: 0; font-size: 12px; width: 100%; }
+  .wave { display: block; width: 100%; height: 72px; border-radius: 2px; background: var(--glass); box-shadow: inset 0 0 0 1px var(--line); cursor: pointer; touch-action: none; }
+  .trim { display: flex; justify-content: space-between; }
+  .swatches { display: grid; grid-template-columns: repeat(8, 26px); gap: 6px; }
+  .sw { width: 26px; height: 22px; border: 0; border-radius: 2px; cursor: pointer; padding: 0; }
+  .sw.cur { outline: 2px solid var(--lcd); outline-offset: 2px; }
+  .empty-msg, .tooltip-note { color: var(--lcd-dim); font: 400 12px/1.5 var(--f-lcd); }
+  .tooltip-note { font-size: 11px; }
 </style>

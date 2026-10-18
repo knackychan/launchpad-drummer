@@ -12,6 +12,14 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SamplePeaks {
+    pub peaks: Vec<f32>,
+    pub length_ms: f32,
+    pub rate: u32,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub router: Arc<Mutex<Router>>,
@@ -191,6 +199,42 @@ impl AppState {
                 km.set.banks[bank].lights = lights;
             }
         }
+    }
+
+    pub fn update_bank_humanize(&self, bank: usize, humanize_db: f32) {
+        let humanize_db = humanize_db.clamp(0.0, 6.0);
+        if let Ok(mut r) = self.router.lock() {
+            r.update_bank_humanize(bank, humanize_db);
+        }
+        if let Ok(mut km) = self.kit_manager.lock() {
+            if bank < km.set.banks.len() {
+                km.set.banks[bank].humanize_db = humanize_db;
+            }
+        }
+    }
+
+    /// Peak envelope of a loaded sample for the editor waveform: `buckets` max-abs values
+    /// over both channels. None when the sample is not loaded.
+    pub fn sample_peaks(&self, path: &str, buckets: usize) -> Option<SamplePeaks> {
+        let sample = self.kit_manager.lock().ok()?.samples.get(path)?.clone();
+        let frames = sample.frames();
+        let buckets = buckets.clamp(16, 2048);
+        let mut peaks = vec![0.0f32; buckets];
+        if frames > 0 {
+            for (i, peak) in peaks.iter_mut().enumerate() {
+                let start = i * frames / buckets;
+                let end = ((i + 1) * frames / buckets).clamp(start + 1, frames);
+                for f in start..end {
+                    let (l, r) = sample.frame(f as isize);
+                    *peak = peak.max(l.abs()).max(r.abs());
+                }
+            }
+        }
+        Some(SamplePeaks {
+            peaks,
+            length_ms: frames as f32 * 1000.0 / sample.rate.max(1) as f32,
+            rate: sample.rate,
+        })
     }
 
     pub fn rename_bank(&self, bank: usize, name: String) {

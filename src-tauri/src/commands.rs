@@ -1,5 +1,5 @@
 use crate::audio::AudioStatus;
-use crate::state::AppState;
+use crate::state::{AppState, SamplePeaks};
 use lpd_core::kit::{Group, LightModes, Pad, Set};
 use tauri::State;
 
@@ -86,4 +86,18 @@ pub(crate) fn stop_all(state: State<'_, AppState>) {
 #[tauri::command]
 pub(crate) fn import_sample(src: String, state: State<'_, AppState>) -> Result<String, String> {
     state.import_sample(&src)
+}
+
+#[tauri::command]
+pub(crate) fn update_bank_humanize(bank: usize, humanize_db: f32, state: State<'_, AppState>) {
+    state.update_bank_humanize(bank, humanize_db);
+}
+
+#[tauri::command]
+pub(crate) fn sample_peaks(
+    path: String,
+    buckets: usize,
+    state: State<'_, AppState>,
+) -> Option<SamplePeaks> {
+    state.sample_peaks(&path, buckets)
 }
