@@ -1,20 +1,19 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { createHorde, hitCell, ledFrame, noteCell, startHorde, tickHorde, type HordeState } from '../lib/horde.ts';
+  import { createHorde, hitCell, ledFrame, noteCell, tickHorde, type HordeState } from '../lib/horde.ts';
   import type { Rgb } from '../lib/led.ts';
 
   let { onframe }: { onframe: (frame: Rgb[]) => void } = $props();
   let canvas: HTMLCanvasElement;
   let gameState: HordeState = $state(createHorde());
-  let summary = $state({ mode: 'title', wave: 0, hp: 100, score: 0, combo: 0 });
+  let summary = $state({ mode: 'title', playMode: 'free', wave: 0, hp: 100, score: 0, combo: 0, bombs: 1, charge: 0, armed: false });
   const W = 640, H = 360;
   const colors = { grunt: '#5fd38a', runner: '#f5c644', brute: '#f08a2b', splitter: '#a77be6', survivor: '#ffffff', boss: '#e63b2e' };
 
   export function padInput(note: number, pressed: boolean) {
     if (!pressed) return;
     const { column, row } = noteCell(note);
-    if (gameState.mode === 'title') startHorde(gameState);
-    else hitCell(gameState, column, row);
+    hitCell(gameState, column, row);
   }
 
   function draw() {
@@ -34,9 +33,13 @@
     g.fillStyle = '#454448'; g.fillRect(119, 323, 402, 19); g.fillStyle = '#ffb21a'; g.fillRect(125, 326, 390 * gameState.hp / 100, 4);
     for (const enemy of gameState.enemies) {
       const x = 132 + (enemy.column - 1) * 48, y = 98 + (7 - enemy.row) * 28;
-      g.fillStyle = '#201a26'; g.fillRect(x + 4, y + 6, 34, 17);
-      g.fillStyle = colors[enemy.type]; g.fillRect(x + 8, y + 1, 26, 18);
+      g.fillStyle = '#201a26'; g.fillRect(x + 4, enemy.type === 'boss' ? y - 24 : y + 6, enemy.type === 'boss' ? 82 : 34, enemy.type === 'boss' ? 51 : 17);
+      g.fillStyle = colors[enemy.type]; g.fillRect(x + 8, enemy.type === 'boss' ? y - 27 : y + 1, enemy.type === 'boss' ? 74 : 26, enemy.type === 'boss' ? 46 : 18);
       g.fillStyle = '#101018'; g.fillRect(x + 13, y + 6, 4, 4); g.fillRect(x + 25, y + 6, 4, 4);
+      if (enemy.type === 'boss') {
+        const weak = enemy.weak ?? 0;
+        g.fillStyle = '#fff6dc'; g.fillRect(x + 13 + (weak % 2) * 48, y + 6 - Math.floor(weak / 2) * 28, 10, 10);
+      }
       if (enemy.hp > 1) { g.fillStyle = '#fff6dc'; g.font = 'bold 10px monospace'; g.fillText(String(enemy.hp), x + 18, y + 29); }
     }
     g.fillStyle = '#fff6dc'; g.font = 'bold 20px monospace'; g.fillText(`WAVE ${gameState.wave}     ${String(gameState.score).padStart(6, '0')}`, 20, 35);
@@ -56,7 +59,8 @@
       if (!running) return;
       const dt = Math.min(.05, (now - last) / 1000); last = now;
       tickHorde(gameState, dt); draw();
-      summary = { mode: gameState.mode, wave: gameState.wave, hp: gameState.hp, score: gameState.score, combo: gameState.combo };
+      summary = { mode: gameState.mode, playMode: gameState.playMode, wave: gameState.wave, hp: gameState.hp,
+        score: gameState.score, combo: gameState.combo, bombs: gameState.bombs, charge: gameState.charge, armed: gameState.armed };
       if (now - lastLed > 33) { onframe(ledFrame(gameState)); lastLed = now; }
       requestAnimationFrame(loop);
     };
@@ -74,10 +78,20 @@
     else if (gameState.mode !== 'play') padInput(11, true);
   }}></canvas>
   <div class="game-foot silk">{summary.mode === 'play' ? `COMBO ×${summary.combo} · ON SCREEN OR LAUNCHPAD` : 'PRESS ANY PAD TO DEPLOY'}</div>
+  <div class="game-controls lcd" aria-label="Horde controls">
+    <button class:active={summary.playMode === 'free'} onclick={() => gameState.playMode = 'free'} disabled={summary.mode === 'play'}>FREE</button>
+    <button class:active={summary.playMode === 'beat'} onclick={() => gameState.playMode = 'beat'} disabled={summary.mode === 'play'}>BEAT</button>
+    <button onclick={() => padInput(89, true)} disabled={summary.mode !== 'play'} aria-label="Arm bomb">BOMB {summary.bombs}{summary.armed ? ' ARMED' : ''}</button>
+    <button onclick={() => padInput(79, true)} disabled={summary.mode !== 'play' || summary.charge < 100} aria-label="Freeze enemies">FREEZE {summary.charge}%</button>
+  </div>
 </div>
 
 <style>
-  .horde-screen { height: 100%; display: grid; grid-template-rows: 28px minmax(0,1fr) 24px; min-height: 0; gap: 6px; }
+  .horde-screen { height: 100%; display: grid; grid-template-rows: 28px minmax(0,1fr) 24px 24px; min-height: 0; gap: 6px; }
   .game-head, .game-foot { display:flex; justify-content:space-between; align-items:center; padding:0 8px; }
   canvas { width:100%; height:100%; min-height:0; object-fit:contain; background:#000; image-rendering:pixelated; border:1px solid var(--line); border-radius:3px; box-shadow:inset 0 0 20px #0b1930; }
+  .game-controls { display: flex; justify-content: space-between; gap: 6px; margin-top: 4px; }
+  .game-controls button { color: inherit; background: var(--glass); border: 1px solid var(--line); font: inherit; cursor: pointer; }
+  .game-controls button.active, .game-controls button:focus-visible { color: var(--accent); border-color: var(--accent); }
+  .game-controls button:disabled { opacity: .5; cursor: default; }
 </style>
