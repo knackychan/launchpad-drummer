@@ -148,7 +148,7 @@ Copy the markup structure, class names and CSS; re-implement the behaviour in Sv
 
 ## Phase A — Foundation
 
-### Task 1: One set owner, edit pipeline, undo history, humanize — DONE (`10835e4`, review pending)
+### Task 1: One set owner, edit pipeline, undo history, humanize — DONE (`10835e4`; review fix-ups `4479281`, `0ef8f5e`)
 
 Implemented. The reviewers check it against this text; later tasks rely on these names.
 
@@ -1125,13 +1125,15 @@ Task 16 verification (2026-10-19): `keys.test.ts` (6 tests) was RED (module miss
 
 Task 17 verification (2026-10-19): `display.test.ts` (4 tests) was written first and failed against the old signature, then passed. fmt clean; `cargo test --workspace` all passed; `npm test` 89 passed; `npm run check` 0 errors, 0 warnings; `npm run build` passed. Headless Edge via CDP at 1280×720: SETUP lists AUDIO, MIDI DEVICES, KEYS, MIDI LEARN, DISPLAY, LOG (every rack is a `RackUnit`; the column is 860 px wide and scrolls); the DISPLAY hint is the plan's exact text; BEND → BENT sets `data-bend="on"`, the console gets `filter: url(#crt-bend) …`, the displacement map is the generated 512 px PNG sized to the console (1256 × 696), both preferences are stored (`low`, `bent`); at CRT OFF the bend is off, the BEND fieldset is dimmed, and clicking FLAT does nothing (the radio does not flip); back at LOW the bend returns; a screenshot shows the edges bulging. The old `launchpad-drummer.display.crt` string stays valid. The OPEN LOG FOLDER key calls `open_log_folder` (not exercised here: no Tauri). Not verified: the bend on a real monitor (softness of text near the edges), the scan-line behaviour (unchanged, already shipped).
 
-### Task 18: Final verification and spec status
+### Task 18: Final verification and spec status — DONE
 
 - [ ] `cargo fmt --all -- --check`, `cargo test --workspace`, `npm test`, `npm run check`, `npm run build` all green; paste the summary lines in the report.
 - [ ] Browser preview at 1280×720, 1440×900 and 1920×1080 (drawer docked and floating; keys and sequencer open and folded; SETUP; the power-on screen cannot appear in the preview — skip it): no console errors, no overlap, no horizontal scroll.
 - [ ] `cargo build -p launchpad-drummer`; start `npm run tauri dev` once; confirm the window opens, the power-on screen (no config) or the last set shows, `lpd.log` gets the startup line, and nothing panics.
 - [ ] Update `docs/superpowers/specs/2026-10-17-ui-design.md` §13 and `2026-10-17-drum-sampler-design.md` §15: what shipped in plan 1C; decisions D1–D7 as recorded deviations; open items: the user's hardware checklist (engine spec 10.3: hot-plug, bank switching, light modes, LCXL controls + LEDs, every drag-and-drop path incl. a real Explorer drop, MIDI learn with a keyboard, a 30-minute session with zero dropouts, the ASIO latency check).
-- [ ] Commit `docs: plan 1C status and remaining hardware checks`.
+- [x] Commit `docs: plan 1C status and remaining hardware checks`.
+
+Task 18 verification (2026-10-19): `cargo fmt --all -- --check` clean; `cargo test --workspace` all passed (120 lib tests plus every integration suite, no compiler warnings); `npm test` 89 passed; `npm run check` 0 errors, 0 warnings; `npm run build` passed; `cargo clippy --workspace --all-targets` reports style lints only. **Preview** (headless Edge, CDP) at 1280×720, 1440×900 and 1920×1080 — default, editor docked, editor floating, browser, keys folded, sequencer folded, both folded, 32 steps with a lane, SETUP (six racks, 860 px column) and GAMES: no console errors, no horizontal scroll, no overlap between the plates, the telemetry and the docked drawer; the only overlaps are the floating drawer over the mixer, keys, sequencer and telemetry, which is what floating means. **Desktop app** (`npm run tauri dev`, driven through WebView2's remote debugging port): the window opened, `lpd.log` got `Launchpad Drummer started`, `Startup: FirstRun` and the audio line (WASAPI, Headphones, 48 kHz), the power-on screen showed `No set yet. Create one or open a set folder.`, `new_set` into a temp folder opened the Play screen with the keys and sequencer plates, the telemetry clock ran, `set_keys` / `undo` round-tripped, `seq_add_lane` on an empty pad answered `Pad is empty`, `seq_update` with a bad length was refused, and nothing panicked. No note was played on the real audio device. **Final review:** the Task 6–10 changes were reviewed by separate spec and quality reviewers (findings fixed in their fix-up commits); the changes of Tasks 11–18 were self-reviewed inline at the end (lock order router → history → kit manager → saver with `seq` a leaf below the router, no emit under a lock, no allocation or free on the audio path including `SoundFontKeys::render_add` per rustysynth's source, panics on corrupt files, undo/redo of keys and pattern). That pass found and fixed one defect: unplugging or re-roling a keys device left its notes sounding in the engine (only the screen key was released) and the wheels off centre; both are now sent to the engine. The spec status notes are in `ui-design.md` §13.1 and `drum-sampler-design.md` §15.1.
 
 ---
 

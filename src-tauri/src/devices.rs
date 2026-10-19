@@ -1,7 +1,6 @@
 //! MIDI device registry and the generic input poller (every port that is not a Launchpad or a
 //! Launch Control XL).
 
-use crate::router::UiEvent;
 use crate::state::AppState;
 use lpd_core::devices::launchpad as lp;
 use midir::{MidiInput, MidiInputConnection};
@@ -232,11 +231,8 @@ fn release(app: &AppHandle, state: &AppState, open: Open) {
     } = open;
     drop(connection);
     for note in held.take_all() {
-        let off = UiEvent::KeysNote {
-            note,
-            velocity: 0,
-            on: false,
-        };
+        // The engine's voice ends too, not only the screen's key.
+        let off = state.keys_note(note, 0, false);
         let _ = app.emit(off.name(), off.payload());
     }
     if role == "keys" {

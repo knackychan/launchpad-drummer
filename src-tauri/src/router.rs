@@ -792,6 +792,7 @@ impl Router {
         }
         self.keys_pitch = 0.0;
         self.keys_mod = 0.0;
+        self.send_wheels();
         Some(self.wheel_event())
     }
 
@@ -1490,6 +1491,23 @@ mod tests {
             })
         );
         assert_eq!(r.reset_keys_wheels(), None);
+    }
+
+    #[test]
+    fn resetting_the_wheels_also_centres_them_in_the_engine() {
+        let (mut r, mut rx) = router_with_pad(0.0, 0.0);
+        key(&mut r, "keys", MidiMsg::PitchBend { ch: 0, value: 4096 });
+        while rx.pop().is_ok() {}
+        r.reset_keys_wheels();
+        let sent = drain(&mut rx);
+        assert!(
+            matches!(sent[0], Command::KeysPitch(p) if p == 0.0),
+            "{sent:?}"
+        );
+        assert!(
+            matches!(sent[1], Command::KeysMod(m) if m == 0.0),
+            "{sent:?}"
+        );
     }
 
     #[test]

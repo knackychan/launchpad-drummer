@@ -382,3 +382,15 @@ Parts 2–4 and the sequencer to be decided after Part 1.
 - Expected protocol values (2.2, 2.3) are unverified until `lp-probe` runs.
 - `cpal` ASIO setup on Windows is the most likely build friction; WASAPI fallback keeps
   the project unblocked.
+
+### 15.1 Status after plan 1C (2026-10-19)
+
+Plan 1C implemented the engine items this spec left open: the autosave (4.1), audio device handling with
+reconnect, ASIO fallback and the dropout counter (9), all MIDI inputs with roles and learn (7), the Launch
+Control XL mapping and LEDs (2.3, 7.1), the `Instrument` trait with the built-in synth and a SoundFont
+engine (3.1), and the step sequencer clock. Decisions recorded as deviations: D1 (keys sound engine),
+D3 (sequencer clock not sample-accurate), D4 (pad learn targets carry the bank), D5 (the group pitch does
+not apply to the keys), D6 (LCXL values still the expected ones), D7 (MIDI roles), D12 (RECONNECT also from
+state `error`). Still open and to be done by the user: the hardware checklist of 10.3 (hot-plug,
+bank switching, light modes, LCXL controls and LEDs, every drag-and-drop path including a real Explorer
+drop, MIDI learn with a keyboard, a 30-minute session with zero dropouts) and the ASIO latency check of 10.2.
