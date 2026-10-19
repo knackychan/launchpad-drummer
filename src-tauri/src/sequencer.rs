@@ -241,6 +241,7 @@ fn emit_position(app: &AppHandle, position: &SeqPosition) {
 fn run(app: AppHandle, state: AppState) {
     let seq = state.seq_handle();
     let mut was_playing = false;
+    let mut was_rec = false;
     let mut last_emit = Instant::now();
     loop {
         let now = Instant::now();
@@ -289,10 +290,12 @@ fn run(app: AppHandle, state: AppState) {
         if playing && (!due.is_empty() || now.duration_since(last_emit) >= POSITION_INTERVAL) {
             emit_position(&app, &position);
             last_emit = now;
-        } else if was_playing && !playing {
+        } else if (was_playing && !playing) || position.rec != was_rec {
+            // Stopped, or REC changed while the clock was not running: the screen follows.
             emit_position(&app, &position);
         }
         was_playing = playing;
+        was_rec = position.rec;
 
         if playing {
             let next_step = seq

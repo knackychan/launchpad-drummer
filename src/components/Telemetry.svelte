@@ -6,18 +6,30 @@
   import { onMount } from 'svelte';
   import { energy, feedLive, isResting, masterDb, onActivity } from '../lib/activity.ts';
   import { GROUP_COLORS } from '../lib/model.ts';
+  import type { SeqPosition } from '../lib/model.ts';
+  import { stepAngle } from '../lib/seq.ts';
   import { ledToCss } from '../lib/led.ts';
   import {
     APP_START, feed, fmtClock, fmtPeakHz, fmtPk, holdValue, meterColor, msPerDiv, onFeed, SPEC_FLOOR_DB, VU_MAX_DB, VU_MIN_DB, vuPos,
   } from '../lib/telemetry.ts';
 
-  let { mini, sampleRate = 0, onfold }: { mini: boolean; sampleRate?: number; onfold: (folded: boolean) => void } = $props();
+  let { mini, sampleRate = 0, seq = null, seqAt = 0, hits = [], length = 16, bpm = 100, onfold }: {
+    mini: boolean; sampleRate?: number;
+    /** The last `seq-position` event and when it arrived (performance.now()), for the beat lamps and the playhead planet. */
+    seq?: SeqPosition | null; seqAt?: number;
+    /** Per step of the pattern: does any lane have a hit there (amber tick on the outer ring). */
+    hits?: readonly boolean[]; length?: number; bpm?: number;
+    onfold: (folded: boolean) => void;
+  } = $props();
 
   type Lo = HTMLCanvasElement & { _labels?: [string, number, number, string][] };
   const canvases: Record<string, HTMLCanvasElement | undefined> = $state({});
   let clock = $state('T+00:00.0');
-  const reads = $state({ scope: '— ms/div', spec: '—', orbit: 'IDLE · NO SEQ', vu: 'PK −∞' });
-  const PIX = 2, NB = 28, STEPS = 16;
+  const reads = $state({ scope: '— ms/div', spec: '—', orbit: 'IDLE · 100 BPM', vu: 'PK −∞' });
+  const PIX = 2, NB = 28;
+  const playing = $derived(!!seq?.playing);
+  /** Quarter-note lamp that is lit while the sequencer plays: the downbeat is cream, the others orange. */
+  const beat = $derived(playing && seq ? Math.floor(seq.step / 4) % 4 : -1);
   const groupCol = (i: number) => ledToCss(GROUP_COLORS[i]);
   const motionQuery = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null;
   const reduced = () => motionQuery?.matches ?? false;
@@ -161,12 +173,24 @@
       txt(g, String(i + 1), lx, ly + 3, hot ? '#ece3cc' : '#7b8796', 'center');
     }
     g.strokeStyle = 'rgba(65,200,255,.35)'; g.beginPath(); g.arc(cx, cy, R, 0, TAU); g.stroke();
-    for (let q = 0; q < STEPS; q++) {
-      const L = q % 4 === 0 ? 6 : 3, a = -Math.PI / 2 + (q / STEPS) * TAU;
-      g.strokeStyle = 'rgba(65,200,255,.4)'; g.beginPath();
+    const n = Math.max(1, length);
+    for (let q = 0; q < n; q++) {
+      const L = q % 4 === 0 ? 6 : 3, a = -Math.PI / 2 + (q / n) * TAU;
+      g.strokeStyle = hits[q] ? '#ffb21a' : 'rgba(65,200,255,.4)'; g.beginPath();
       g.moveTo(cx + Math.cos(a) * (R - L), cy + Math.sin(a) * (R - L)); g.lineTo(cx + Math.cos(a) * R, cy + Math.sin(a) * R); g.stroke();
     }
-    g.fillStyle = '#7b8796'; g.beginPath(); g.arc(cx, cy - R, 3, 0, TAU); g.fill();
+    // Playhead planet: interpolated from the last position event; parked at the top while stopped.
+    const stepMs = 60000 / Math.max(1, bpm) / 4;
+    const head = playing && seq ? seq.step + Math.min(1, (seq.msIntoStep + (performance.now() - seqAt)) / stepMs) : 0;
+    const pa = stepAngle(Math.floor(head), head % 1, n), px = cx + Math.cos(pa) * R, py = cy + Math.sin(pa) * R;
+    if (playing) {
+      for (let k = 1; k <= 4; k++) {
+        const ta = pa - (k * 0.09), tx = cx + Math.cos(ta) * R, ty = cy + Math.sin(ta) * R;
+        g.fillStyle = `rgba(255,91,31,${(0.55 / k).toFixed(2)})`; g.beginPath(); g.arc(tx, ty, 3 - k * 0.4, 0, TAU); g.fill();
+      }
+    }
+    g.fillStyle = playing ? '#ece3cc' : '#7b8796'; g.beginPath(); g.arc(px, py, 3.2, 0, TAU); g.fill();
+    reads.orbit = playing && seq ? `STEP ${seq.step + 1}/${seq.length} · ${Math.round(seq.bpm)} BPM` : `IDLE · ${Math.round(bpm)} BPM`;
   }
   function drawVu(g: CanvasRenderingContext2D, W: number, H: number) {
     const N = 36, x0 = 12, w = W - x0 - 2, sw = w / N, rh = Math.floor((H - 12) / 2) - 1, pos = vuPos, now = performance.now();
@@ -242,6 +266,23 @@
     schedule('scope'); schedule('spec'); schedule('vu');
   }
 
+  $effect(() => {
+    // Anything the ring shows changed: redraw it once.
+    seq; hits; length; bpm;
+    if (!mini) schedule('orbit');
+  });
+  $effect(() => {
+    // While playing the planet moves: redraw the ring on every frame (~30 fps, ~4 with reduced motion).
+    if (!playing || mini) return;
+    let raf = 0, last = 0;
+    const loop = (now: number) => {
+      if (now - last >= (reduced() ? 250 : 33)) { last = now; schedule('orbit'); }
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  });
+
   onMount(() => {
     const tick = () => {
       if (mini || document.hidden) return;
@@ -269,7 +310,7 @@
     <div class="tele-head">
       <span class="pill">SIGNAL</span>
       <span class="lcd">{clock}</span>
-      <span class="beats"><i></i><i></i><i></i><i></i></span>
+      <span class="beats">{#each [0, 1, 2, 3] as b}<i class:on={beat === b} class:down={beat === b && b === 0}></i>{/each}</span>
       <button type="button" class="key small" title="Fold telemetry" tabindex="-1" onclick={() => onfold(true)}>▸</button>
     </div>
     {#each [['scope', 'OSCILLOSCOPE'], ['spec', 'SPECTRUM'], ['orbit', 'ORBIT'], ['vu', 'MASTER L / R']] as [id, label]}
@@ -290,6 +331,8 @@
   .tele-head .key { margin-left: auto; width: 20px; height: 18px; min-width: 0; padding: 0; }
   .beats { display: flex; gap: 3px; }
   .beats i { width: 8px; height: 8px; background: var(--led-off); }
+  .beats i.on { background: var(--orange); box-shadow: 0 0 6px var(--orange); }
+  .beats i.down { background: var(--lcd); box-shadow: 0 0 6px var(--lcd); }
   .tm { display: flex; flex-direction: column; gap: 3px; min-height: 0; flex: 1 1 0; }
   .tm.scope { flex-grow: 1.3; }
   .tm.orbit { flex-grow: 1.4; }

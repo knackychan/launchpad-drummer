@@ -33,7 +33,7 @@
   import { CRT_FACTORS, readDisplay, saveDisplay } from './lib/display.ts';
   import type { CrtLevel } from './lib/display.ts';
   import { createEmptySet, createPreviewSet, GROUP_COLORS, padAriaLabel, padLabel } from './lib/model.ts';
-  import type { AppConfig, AudioStatus, Binding, DropReport, Group, LightModes, MidiDevice, MissingPad, OpenResult, Pad, SamplePeaks, SetModel, Startup } from './lib/model.ts';
+  import type { AppConfig, AudioStatus, Binding, Pattern, SeqPosition, DropReport, Group, LightModes, MidiDevice, MissingPad, OpenResult, Pad, SamplePeaks, SetModel, Startup } from './lib/model.ts';
   import { PREVIEW_MIDI, pushLog, roleStatus } from './lib/midi.ts';
   import { solvePlayLayout } from './lib/layout.ts';
   import { feedLive, hitAmount, hitGroup, runActivity } from './lib/activity.ts';
@@ -43,7 +43,7 @@
   import type { TelemetryFrame } from './lib/telemetry.ts';
 
   const tauri = isTauri;
-  const editCommands = new Set(['update_pad', 'clear_pad', 'move_pad', 'drop_files', 'locate_sample', 'update_group', 'rename_bank', 'update_bank_lights', 'update_bank_humanize', 'unbind']);
+  const editCommands = new Set(['update_pad', 'clear_pad', 'move_pad', 'drop_files', 'locate_sample', 'update_group', 'rename_bank', 'update_bank_lights', 'update_bank_humanize', 'unbind', 'seq_update', 'seq_add_lane']);
   async function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     const result = await call<T>(cmd, args);
     if (editCommands.has(cmd)) refreshHistory();
@@ -86,6 +86,56 @@
   const confirmationTimers = new Set<number>();
   let peaksNonce = $state(0);
   let padMenu = $state<{ x: number; y: number; at: { x: number; y: number } } | null>(null);
+
+  // Step sequencer (Task 14): the clock runs in the router; the plate edits the pattern optimistically.
+  const SEQ_FOLD_KEY = 'lpd.seq.folded';
+  let seqFolded = $state(false);
+  let seqPos = $state<SeqPosition | null>(null);
+  let seqAt = $state(0);
+  let seqRec = $state(false);
+  let patternCall = 0;
+  const pattern = $derived(currentSet.pattern);
+  const seqPlaying = $derived(!!seqPos?.playing);
+  const seqHits = $derived(Array.from({ length: 32 }, (_, i) => pattern.lanes.some(l => l.steps[i] > 0)));
+  function setSeqFolded(folded: boolean) {
+    seqFolded = folded;
+    try { window.localStorage.setItem(SEQ_FOLD_KEY, String(folded)); } catch { /* the plate still folds without storage */ }
+  }
+  async function resyncSet() {
+    if (!tauri) return;
+    try { const set = await call<SetModel>('get_current_set'); if (set) currentSet = set; } catch { /* keep what is shown */ }
+  }
+  /** Optimistic: show the new pattern now, send it, and take the returned set unless a newer edit is in flight. */
+  function updatePattern(next: Pattern, key?: string) {
+    currentSet.pattern = next;
+    const id = ++patternCall;
+    void invoke<SetModel>('seq_update', { pattern: next, key })
+      .then(set => { if (set && id === patternCall) currentSet = set; })
+      .catch(e => { showToast(errorText(e)); void resyncSet(); });
+  }
+  async function addLane() {
+    if (!selXY) { showToast('Select a pad first'); return; }
+    if (!tauri) {
+      if (!selectedPad?.sample) { showToast('Pad is empty'); return; }
+      if (pattern.lanes.some(l => l.bank === activeBank && l.x === selXY.x && l.y === selXY.y)) { showToast('Lane already there'); return; }
+      currentSet.pattern = { ...pattern, lanes: [...pattern.lanes, { bank: activeBank, x: selXY.x, y: selXY.y, mute: false, steps: Array(32).fill(0) }] };
+      confirm('Lane added');
+      return;
+    }
+    try {
+      const set = await invoke<SetModel>('seq_add_lane', { bank: activeBank, ...selXY });
+      if (set) { currentSet = set; confirm('Lane added'); }
+    } catch (e) { showToast(errorText(e)); }
+  }
+  function toggleSeqPlay() { void invoke('seq_play', { play: !seqPlaying }).catch(e => showToast(errorText(e))); }
+  function toggleSeqRec() {
+    seqRec = !seqRec;
+    void invoke('seq_rec', { armed: seqRec }).catch(e => showToast(errorText(e)));
+  }
+  function selectLanePad(bank: number, x: number, y: number) {
+    if (bank !== activeBank) chooseBank(bank);
+    selected = (y + 1) * 10 + x + 1;
+  }
 
   // MIDI learn (plan 1C Task 12): the control being learned, and the one shared menu of learnable controls.
   let learnArmed = $state<{ id: string; kind: 'cc' | 'note' } | null>(null);
@@ -231,7 +281,7 @@
   }
 
   const layout = $derived(solvePlayLayout({
-    width: bayW, height: bayH, drawerOpen: drawer !== null, drawerPinned, teleFolded, lanes: 4,
+    width: bayW, height: bayH, drawerOpen: drawer !== null, drawerPinned, teleFolded, seqFolded, lanes: Math.max(1, currentSet.pattern.lanes.length),
   }));
 
   const bank = $derived(currentSet.banks[activeBank]);
@@ -365,6 +415,7 @@
 
   onMount(() => {
     try { crt = readDisplay(window.localStorage); } catch { crt = 'low'; }
+    try { seqFolded = window.localStorage.getItem(SEQ_FOLD_KEY) === 'true'; } catch { seqFolded = false; }
     if (window.innerWidth >= 1780) drawer = 'editor';
     const stopActivity = runActivity();
     const secondTimer = window.setInterval(() => { secondTick++; }, 1000);
@@ -409,6 +460,7 @@
       });
       subscribe<{ binding: Binding }>('learn-bound', (event) => void onLearnBound(event.binding));
       subscribe<{ reason: string }>('learn-ignored', (event) => showToast(event.reason));
+      subscribe<SeqPosition>('seq-position', (event) => { seqPos = event; seqAt = performance.now(); seqRec = event.rec; });
       subscribe<{ bank: number; x: number; y: number }>('pad-hit', (event) => padHit(event.bank, event.x, event.y));
       subscribe<SetModel>('set-changed', (event) => { currentSet = event; });
       subscribe<SaveStatus>('save-status', (event) => { saveStatus = event; });
@@ -753,10 +805,14 @@
                   />
                 </div>
                 <KeysPlate short={layout.kh < 68} />
-                <SequencerPlate />
+                <SequencerPlate
+                  {pattern} banks={currentSet.banks} selected={selXY} {activeBank} position={seqPos} playing={seqPlaying} rec={seqRec} folded={seqFolded}
+                  onplay={toggleSeqPlay} onrec={toggleSeqRec} onupdate={updatePattern} onaddlane={() => void addLane()}
+                  onfold={setSeqFolded} onselect={selectLanePad} onaudition={(b, x, y) => void invoke('seq_audition_step', { bank: b, x, y })}
+                />
               </div>
               {#if layout.tw > 0}
-                <Telemetry mini={layout.mini} sampleRate={audioStatus?.sampleRate ?? 0} onfold={(f) => { teleFolded = f; }} />
+                <Telemetry mini={layout.mini} sampleRate={audioStatus?.sampleRate ?? 0} seq={seqPos} {seqAt} hits={seqHits} length={pattern.length} bpm={pattern.bpm} onfold={(f) => { teleFolded = f; }} />
               {/if}
             </div>
           </div>

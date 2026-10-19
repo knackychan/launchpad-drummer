@@ -30,9 +30,14 @@ export interface PlayLayoutInput {
   drawerOpen: boolean;
   drawerPinned: boolean;
   teleFolded: boolean;
+  /** Keys plate and sequencer folded to a 28 px strip; the height they save goes back to the pads. */
+  keysFolded?: boolean;
+  seqFolded?: boolean;
   lanes: number;
 }
 
+/** A folded keys plate or sequencer. */
+export const FOLDED_H = 28;
 const GAP = 5;
 const DRAWER_W = 300;
 const DTAB_W = 28;
@@ -60,7 +65,9 @@ export const mixChrome = (d: MixDims) => d.sh + 3 * d.kr + 16 + 2 * d.kb + 42 + 
 export function solvePlayLayout(input: PlayLayoutInput): PlayLayout {
   const { width: W, height: H } = input;
   const avail = H - 16 - LP_CHROME_H - 7 * GAP - 2 * 8;
-  const sq0 = clamp(avail * 0.25, 110, 320);
+  const keysOpen = !input.keysFolded;
+  const seqOpen = !input.seqFolded;
+  const sq0 = seqOpen ? clamp(avail * 0.25, 110, 320) : FOLDED_H;
   const keysMin = 12 + 44;
 
   const fit = (docked: boolean, tw: number) => {
@@ -68,7 +75,7 @@ export function solvePlayLayout(input: PlayLayoutInput): PlayLayout {
     const S = stageW - 10 - (24 + 28 + 66 + 12) - 7 * GAP;
     const pW = (S - MIX_CHROME_W) / (8 + 9 * MIX_RATIO);
     const rest = avail - sq0;
-    const pH = Math.min((rest - keysMin) / 8, (rest - 12) / 8.9);
+    const pH = keysOpen ? Math.min((rest - keysMin) / 8, (rest - 12) / 8.9) : (rest - FOLDED_H) / 8;
     const p = Math.floor(clamp(Math.min(pW, pH), 36, 112));
     return {
       p,
@@ -93,8 +100,8 @@ export function solvePlayLayout(input: PlayLayoutInput): PlayLayout {
   if (tw < 0 && fit(docked, TELE_MINI).ok) tw = TELE_MINI;
 
   const { p: pad, cw } = fit(docked, tw);
-  const kh = clamp(Math.round(pad * 0.9), 44, 110);
-  const sq = clamp(Math.floor(avail - 8 * pad - (12 + kh)), 110, 360);
+  const kh = keysOpen ? clamp(Math.round(pad * 0.9), 44, 110) : FOLDED_H;
+  const sq = seqOpen ? clamp(Math.floor(avail - 8 * pad - (keysOpen ? 12 + kh : FOLDED_H)), 110, 360) : FOLDED_H;
   const lanes = Math.max(1, input.lanes);
   const lh = clamp(Math.floor((sq - 12 - 22 - 6 + 3) / lanes) - 3, 14, 24);
 
