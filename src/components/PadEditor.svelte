@@ -219,9 +219,10 @@
 
 <style>
   .editor { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 12px; padding: 12px; overflow: auto; }
-  .ed-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-  .ed-name { font-size: 16px; color: #fff; font-weight: 500; }
-  .clear { margin-left: auto; color: var(--error); }
+  .ed-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: nowrap; }
+  .ed-head > .lcd:not(.ed-name) { flex-shrink: 0; white-space: nowrap; }
+  .ed-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; color: #fff; font-weight: 500; }
+  .clear { flex-shrink: 0; margin-left: auto; color: var(--error); }
   .small { font-size: 11px; }
   .learn-lcd { font-size: 11px; color: var(--warn); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ed-sec { display: flex; flex-direction: column; gap: 6px; }
