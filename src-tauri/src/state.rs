@@ -1231,19 +1231,47 @@ impl AppState {
     /// Create an empty set in a folder that holds no kit. Nothing on disk or in memory changes
     /// when the folder already holds one. Slow: call from a worker thread.
     pub fn new_set(&self, dir_str: &str) -> Result<OpenResult, String> {
+        self.create_set(dir_str, Set::new(), false)
+    }
+
+    /// Open the default set in `dir`; when `dir` holds no set yet, create it from the starter kit,
+    /// its samples and its groove. Later launches open the user's edited copy. Slow: call from a
+    /// worker thread.
+    pub fn open_default_set(&self, dir: &Path) -> Result<OpenResult, String> {
+        let dir_str = dir.to_string_lossy();
+        if dir.join(kit::SET_FILE).exists() {
+            self.open_set(&dir_str)
+        } else {
+            self.create_set(&dir_str, kit::starter_set(), true)
+        }
+    }
+
+    fn create_set(
+        &self,
+        dir_str: &str,
+        set: Set,
+        write_samples: bool,
+    ) -> Result<OpenResult, String> {
         let ticket = self.begin_open();
         let dir = Path::new(dir_str);
         kit::ensure_new_set_dir(dir).map_err(|e| format!("{e:#}"))?;
         let created_dir = !dir.exists();
         std::fs::create_dir_all(dir).map_err(|e| format!("{e:#}"))?;
-        let set = Set::new();
+        if write_samples {
+            kit::write_starter_samples(dir, &set).map_err(|e| format!("{e:#}"))?;
+        }
         kit::save(dir, &set).map_err(|e| format!("{e:#}"))?;
+        let (samples, failed) = kit::load_samples(dir, &set);
+        let failed = failed
+            .into_iter()
+            .map(|(p, e)| (p, e.to_string()))
+            .collect();
         let installed = self.install(
             ticket,
             set.clone(),
             Some(dir.to_path_buf()),
-            Default::default(),
-            vec![],
+            samples,
+            failed,
         );
         let seq = match installed {
             Ok(seq) => seq,
@@ -1251,7 +1279,7 @@ impl AppState {
                 // Not adopted: take back what this call created so a retry finds the folder free.
                 let _ = std::fs::remove_file(dir.join(kit::SET_FILE));
                 if created_dir {
-                    let _ = std::fs::remove_dir(dir);
+                    let _ = std::fs::remove_dir_all(dir); // only this call's files are in it
                 }
                 return Err(reason);
             }

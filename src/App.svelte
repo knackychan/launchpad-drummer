@@ -708,12 +708,16 @@
     void invoke('stop_all');
   }
 
-  async function manageSet(isNew: boolean) {
+  async function manageSet(kind: 'new' | 'open' | 'default') {
     try {
-      const defaultDir = await invoke<string>('default_sets_dir');
-      const dir = await invoke<string | null>('pick_folder', { title: isNew ? 'New set — choose an empty folder' : 'Open set folder', defaultDir });
-      if (!dir) return;
-      const opened = await invoke<OpenResult>(isNew ? 'new_set' : 'open_set', { dir });
+      let opened: OpenResult | null;
+      if (kind === 'default') opened = await invoke<OpenResult>('open_default_set');
+      else {
+        const defaultDir = await invoke<string>('default_sets_dir');
+        const dir = await invoke<string | null>('pick_folder', { title: kind === 'new' ? 'New set — choose an empty folder' : 'Open set folder', defaultDir });
+        if (!dir) return;
+        opened = await invoke<OpenResult>(kind === 'new' ? 'new_set' : 'open_set', { dir });
+      }
       if (!opened) return;
       currentSet = opened.set; setName = opened.name; setPath = opened.path;
       startup = { kind: 'loaded', path: opened.path, name: opened.name, fromBackup: opened.fromBackup, backupSavedAt: opened.backupSavedAt };
@@ -783,7 +787,7 @@
     let handled = true;
     if (key === 'escape') { if (!runEsc()) { if (gameFull) exitGameFull(); else if (mode === 'play') stopAll(); } }
     else if (event.ctrlKey) {
-      if (key === 'n' || key === 'o') void manageSet(key === 'n');
+      if (key === 'n' || key === 'o') void manageSet(key === 'n' ? 'new' : 'open');
       else if (key === 'z' || key === 'y') void undoRedo(key === 'y' || event.shiftKey ? 'redo' : 'undo');
       else if (key === '1') setMode('play');
       else if (key === ',') setMode('setup');
@@ -833,7 +837,7 @@
     <ConsoleBackdrop />
     <header class="top-strip">
       <div class="brand" aria-hidden="true">LPD·01</div>
-      <SetMenu name={setName} path={setPath} onnew={() => void manageSet(true)} onopen={() => void manageSet(false)} onreveal={() => void invoke('reveal_path', { path: setPath }).catch(e => showToast(errorText(e)))} />
+      <SetMenu name={setName} path={setPath} onnew={() => void manageSet('new')} onopen={() => void manageSet('open')} ondefault={() => void manageSet('default')} onreveal={() => void invoke('reveal_path', { path: setPath }).catch(e => showToast(errorText(e)))} />
       <button class="key small" aria-label="Undo" title="Undo (Ctrl+Z)" aria-disabled={!history.canUndo} onclick={() => void undoRedo('undo')}>↶</button>
       <button class="key small" aria-label="Redo" title="Redo (Ctrl+Y)" aria-disabled={!history.canRedo} onclick={() => void undoRedo('redo')}>↷</button>
       <NoticeLcd {notices} idle={tauri ? 'Launchpad MK2 connected' : 'Browser preview — demo kit, no audio engine'} onaction={n => void noticeAction(n)} />
@@ -853,7 +857,7 @@
 
     <main class="bay" aria-label={mode === 'play' ? 'Play' : mode === 'games' ? 'Games' : 'Setup'} bind:clientWidth={bayW} bind:clientHeight={bayH}>
       {#if mode === 'play' && startup.kind !== 'loaded'}
-        <PowerOn {startup} error={powerError} launchpad={deviceState} lcxl={lcxlState} audio={audioStatus?.state ?? 'stopped'} onnew={() => void manageSet(true)} onopen={() => void manageSet(false)} />
+        <PowerOn {startup} error={powerError} launchpad={deviceState} lcxl={lcxlState} audio={audioStatus?.state ?? 'stopped'} onnew={() => void manageSet('new')} onopen={() => void manageSet('open')} ondefault={() => void manageSet('default')} />
       {:else if mode === 'play'}
         <section
           class="play-screen"

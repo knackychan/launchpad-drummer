@@ -37,6 +37,7 @@ fn a_batch_import_is_one_undo_step_and_reports_bank_capacity() {
 
 #[test]
 fn locate_keeps_trim_and_empty_or_failed_imports_do_not_add_history() {
+    // Bank 4 is the one bank the starter kit leaves empty.
     let tmp = tempfile::tempdir().unwrap();
     let r = rig(1024);
     r.state
@@ -44,7 +45,7 @@ fn locate_keeps_trim_and_empty_or_failed_imports_do_not_add_history() {
         .unwrap();
     let report = r
         .state
-        .drop_files(0, 0, 0, vec!["no.txt".into(), "missing.wav".into()])
+        .drop_files(3, 0, 0, vec!["no.txt".into(), "missing.wav".into()])
         .unwrap();
     assert_eq!((report.imported, report.rejected), (0, 2));
     assert!(!r.state.history_state().can_undo);
@@ -52,7 +53,7 @@ fn locate_keeps_trim_and_empty_or_failed_imports_do_not_add_history() {
     write_wav(&p, 480);
     assert_eq!(
         r.state
-            .locate_sample(0, 0, 0, p.to_str().unwrap())
+            .locate_sample(3, 0, 0, p.to_str().unwrap())
             .unwrap_err(),
         "Pad is empty"
     );
@@ -60,10 +61,10 @@ fn locate_keeps_trim_and_empty_or_failed_imports_do_not_add_history() {
         let mut p = Pad::new(0, 0, "missing.wav", [1, 2, 3]);
         p.trim_start_ms = 2.0;
         p.trim_end_ms = Some(8.0);
-        s.banks[0].set_pad(p);
+        s.banks[3].set_pad(p);
     });
-    let set = r.state.locate_sample(0, 0, 0, p.to_str().unwrap()).unwrap();
-    let pad = set.banks[0].pad(0, 0).unwrap();
+    let set = r.state.locate_sample(3, 0, 0, p.to_str().unwrap()).unwrap();
+    let pad = set.banks[3].pad(0, 0).unwrap();
     assert_eq!((pad.trim_start_ms, pad.trim_end_ms), (2.0, Some(8.0)));
     assert!(r.state.missing_samples().is_empty());
 }

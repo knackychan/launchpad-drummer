@@ -171,3 +171,24 @@ fn restore_opens_the_last_set_from_the_config() {
     assert_eq!(r.state.kit_manager.lock().unwrap().dir, None);
     assert!(r.state.save_set().is_err());
 }
+
+#[test]
+fn the_default_set_is_made_once_and_then_reopened_as_edited() {
+    let tmp = tempfile::tempdir().unwrap();
+    let r = rig(1024);
+    let dir = tmp.path().join("Starter");
+    let created = r.state.open_default_set(&dir).unwrap();
+    assert_eq!(created.set, kit::starter_set());
+    assert_eq!(created.set.pattern.lanes.len(), 5);
+    assert!(dir.join("samples/kick_808.wav").exists());
+    assert!(r.state.missing_samples().is_empty());
+    let loaded = KitManager::load_from_dir(&dir).unwrap();
+    assert_eq!(loaded.set, created.set);
+    assert!(loaded.failed_samples.is_empty());
+
+    let mut edited = created.set.clone();
+    edited.banks[0].name = "MINE".into();
+    kit::save(&dir, &edited).unwrap();
+    let again = r.state.open_default_set(&dir).unwrap();
+    assert_eq!(again.set.banks[0].name, "MINE", "an existing default set is opened, not rebuilt");
+}

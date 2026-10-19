@@ -115,6 +115,22 @@ pub(crate) async fn new_set(dir: String, state: State<'_, AppState>) -> Result<O
     worker(&state, move |s| s.new_set(&dir)).await
 }
 
+/// The default set (starter kit and groove) in `<Documents>\Launchpad Drummer\Default Set`:
+/// created on first use, opened as it is afterwards.
+#[tauri::command]
+pub(crate) async fn open_default_set(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<OpenResult, String> {
+    let dir = app
+        .path()
+        .document_dir()
+        .map_err(|e| e.to_string())?
+        .join("Launchpad Drummer")
+        .join(lpd_core::kit::DEFAULT_SET_NAME);
+    worker(&state, move |s| s.open_default_set(&dir)).await
+}
+
 #[tauri::command]
 pub(crate) async fn open_set(
     dir: String,

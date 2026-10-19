@@ -106,6 +106,7 @@ pub fn run() {
             commands::get_current_set,
             commands::get_startup,
             commands::new_set,
+            commands::open_default_set,
             commands::open_set,
             commands::save_now,
             commands::get_save_status,
