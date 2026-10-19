@@ -60,6 +60,8 @@
   let activeBank = $state(0);
   let setName = $state(tauri ? 'DEFAULT SET' : 'PREVIEW KIT');
   let audioStatus = $state<AudioStatus | null>(null);
+  // An `audio-status` event is newer than the initial fetch, which may have been answered earlier.
+  let audioEventSeen = false;
   let saveStatus = $state<SaveStatus>(IDLE_SAVE);
   let startup = $state<Startup>({ kind: 'loaded', path: '', name: '', fromBackup: false, backupSavedAt: null });
   let setPath = $state('');
@@ -282,7 +284,8 @@
       history = await invoke<typeof history>('history_state');
       libraryDir = (await invoke<AppConfig>('get_config')).libraryDir;
       // The preview answers with a demo status; the desktop app with the live one.
-      audioStatus = await invoke<AudioStatus>('get_audio_status');
+      const fetched = await invoke<AudioStatus>('get_audio_status');
+      if (!audioEventSeen) audioStatus = fetched;
       if (!tauri) return;
       const [set, b, save] = await Promise.all([
         invoke<SetModel>('get_current_set'),
@@ -300,7 +303,6 @@
   onMount(() => {
     try { crt = readDisplay(window.localStorage); } catch { crt = 'low'; }
     if (window.innerWidth >= 1780) drawer = 'editor';
-    void loadInitialState();
     const stopActivity = runActivity();
     const secondTimer = window.setInterval(() => { secondTick++; }, 1000);
     const onVisibility = () => { windowVisible = document.visibilityState === 'visible'; };
@@ -338,13 +340,15 @@
         frameSeen = true;
       });
       subscribe<SaveStatus>('save-status', (event) => { saveStatus = event; });
-      subscribe<AudioStatus>('audio-status', (event) => { audioStatus = event; });
+      subscribe<AudioStatus>('audio-status', (event) => { audioEventSeen = true; audioStatus = event; });
       subscribe<TelemetryFrame>('telemetry', (event) => pushFrame(event));
       subscribe<{ paths: string[]; position: { x: number; y: number } }>('tauri://drag-enter', e => externalEnter(e.paths, e.position));
       subscribe<{ position: { x: number; y: number } }>('tauri://drag-over', e => { if (drag?.external) { const p = physicalToCss(e.position, devicePixelRatio); updateDrag(p.x, p.y, false); } });
       subscribe<{ paths: string[]; position: { x: number; y: number } }>('tauri://drag-drop', e => { externalEnter(e.paths, e.position); void finishDrop(); });
       subscribe<unknown>('tauri://drag-leave', cancelDrag);
     }
+    // After the listeners are requested: the initial fetch must not overwrite a newer event.
+    void loadInitialState();
     return () => {
       disposed = true;
       clearTimeout(historyTimer);
