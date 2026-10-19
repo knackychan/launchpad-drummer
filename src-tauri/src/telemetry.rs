@@ -68,26 +68,33 @@ impl Telemetry {
     /// One 16 ms step: drain the taps, then build a frame when the feed is on.
     pub fn tick(&mut self, state: &AppState) -> Tick {
         let on = state.telemetry_enabled();
-        if let Some(taps) = state
-            .taps
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_mut()
-        {
-            while let Ok(s) = taps.scope.pop() {
-                self.ring[self.head] = s;
-                self.head = (self.head + 1) % FFT_SIZE;
-            }
-            while let Ok(l) = taps.levels.pop() {
-                for c in 0..2 {
-                    self.master_peak[c] = self.master_peak[c].max(l.master[c]);
+        let have_taps = {
+            let mut guard = state.taps.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.as_mut() {
+                Some(taps) => {
+                    while let Ok(s) = taps.scope.pop() {
+                        self.ring[self.head] = s;
+                        self.head = (self.head + 1) % FFT_SIZE;
+                    }
+                    while let Ok(l) = taps.levels.pop() {
+                        for c in 0..2 {
+                            self.master_peak[c] = self.master_peak[c].max(l.master[c]);
+                        }
+                        for (peak, g) in self.group_peak.iter_mut().zip(l.groups) {
+                            *peak = peak.max(g);
+                        }
+                    }
+                    true
                 }
-                for (peak, g) in self.group_peak.iter_mut().zip(l.groups) {
-                    *peak = peak.max(g);
+                None => {
+                    // No stream: forget the old trace so it cannot come back frozen.
+                    self.ring.fill(0.0);
+                    self.head = 0;
+                    false
                 }
             }
-        }
-        let frame = on.then(|| self.frame(state.sample_rate()));
+        };
+        let frame = (on && have_taps).then(|| self.frame(state.sample_rate()));
         self.master_peak = [0.0; 2];
         self.group_peak = [0.0; GROUPS];
 

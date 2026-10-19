@@ -420,13 +420,20 @@ impl AppState {
     ) -> AudioStatus {
         lock(&self.router).replace_audio(commands, events);
         self.set_taps(Some(taps));
-        self.set_audio_stats(stats);
+        // Status before stats: an error the new stream flags at once is then seen against the
+        // new status, not overwritten by it.
         self.set_audio_status(status);
+        self.set_audio_stats(stats);
+        // Pad lights followed voices of the old stream.
+        lock(&self.painter).invalidate();
         self.get_audio_status()
     }
 
     /// The stream could not be (re)started: no taps, fresh counters, status "error".
     pub fn audio_failed(&self, prefs: &AudioPrefs) {
+        // The old stream is gone with its voices: nothing may stay "sounding" or held.
+        lock(&self.router).forget_voices();
+        lock(&self.painter).invalidate();
         self.set_taps(None);
         self.set_audio_stats(Arc::new(AudioStats::new()));
         let mut status = lock(&self.audio_status);
@@ -442,12 +449,6 @@ impl AppState {
             status.device_name = device.clone();
         }
         status.buffer_size = prefs.buffer_frames;
-    }
-
-    /// The stream was dropped on request.
-    pub fn audio_stopped(&self) {
-        self.set_taps(None);
-        lock(&self.audio_status).state = "stopped".into();
     }
 
     /// Remember the audio prefs (`set_audio`); the stream restarts separately.

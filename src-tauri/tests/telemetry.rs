@@ -122,7 +122,7 @@ fn without_taps_a_tick_is_harmless() {
     let r = rig(16);
     r.state.set_telemetry(true);
     let tick = Telemetry::new().tick(&r.state);
-    assert!(tick.frame.is_some());
+    assert!(tick.frame.is_none(), "no stream, no frame");
     assert!(!tick.dropouts_changed);
 }
 
@@ -180,4 +180,26 @@ fn a_lost_stream_is_reported_by_one_tick_with_state_lost() {
     let lost = t.tick(&r.state).lost.expect("the flag is picked up");
     assert_eq!(lost.state, "lost");
     assert!(t.tick(&r.state).lost.is_none(), "reported once");
+}
+
+#[test]
+fn without_taps_nothing_frozen_is_emitted_and_old_samples_are_forgotten() {
+    let r = rig(16);
+    let (mut engine, _events, taps) = Engine::with_taps(SR);
+    r.state.set_taps(Some(taps));
+    r.state.set_telemetry(true);
+    play_dc(&mut engine, 3, 0.5);
+    render(&mut engine, 4096);
+    let mut t = Telemetry::new();
+    assert!(t.tick(&r.state).frame.is_some());
+
+    r.state.set_taps(None);
+    assert!(t.tick(&r.state).frame.is_none(), "no stream, no frame");
+
+    // A new stream starts silent: the old trace must not come back.
+    let (_engine2, _events2, taps2) = Engine::with_taps(SR);
+    r.state.set_taps(Some(taps2));
+    let frame = t.tick(&r.state).frame.expect("feed is on");
+    assert!(frame.scope.iter().all(|s| *s == 0.0));
+    assert_eq!(frame.groups[3], 0.0);
 }

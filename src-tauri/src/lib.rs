@@ -13,6 +13,7 @@ pub mod telemetry;
 
 use lpd_core::kit::Set;
 use state::AppState;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -35,7 +36,17 @@ pub fn run() {
     let (commands, _) = rtrb::RingBuffer::new(1024);
     let (_, events) = rtrb::RingBuffer::new(1024);
     let app_state = AppState::new(Set::new(), commands, events);
-    let audio_controller = audio::AudioController::spawn(app_state.clone());
+    // The app handle exists only once Tauri is up; every finished stream start is announced to the UI.
+    let app_handle: Arc<OnceLock<AppHandle>> = Arc::default();
+    let announce_to = app_handle.clone();
+    let audio_controller = audio::AudioController::spawn(
+        app_state.clone(),
+        Box::new(move |status| {
+            if let Some(app) = announce_to.get() {
+                let _ = app.emit("audio-status", status);
+            }
+        }),
+    );
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -56,11 +67,10 @@ pub fn run() {
                     Err(e) => logfile::log(format!("No app config folder: {e}")),
                 }
                 // The saved audio prefs decide the device, so the stream starts after the config
-                // is read. A failure is logged by the controller and shows as "error" in SETUP.
-                match audio_controller.start(app_state.get_config().audio) {
-                    Ok(status) => logfile::log(format!("Audio: {status:?}")),
-                    Err(e) => logfile::log(format!("Audio device init warning: {e}")),
-                }
+                // is read. It starts in the background (opening a device can take seconds); the
+                // UI hears about it through `audio-status`, and a failure shows as "error" in SETUP.
+                let _ = app_handle.set(app.handle().clone());
+                audio_controller.start_detached(app_state.get_config().audio);
                 launchpad::start(app.handle().clone(), app_state.clone());
                 let handle = app.handle().clone();
                 let telemetry_handle = handle.clone();

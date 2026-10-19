@@ -23,8 +23,8 @@ async fn worker<T: Send + 'static>(
 }
 
 #[tauri::command]
-pub(crate) fn get_audio_status(state: State<'_, AppState>) -> AudioStatus {
-    state.get_audio_status()
+pub(crate) async fn get_audio_status(state: State<'_, AppState>) -> Result<AudioStatus, String> {
+    Ok(state.get_audio_status())
 }
 
 /// Output devices of a backend ("wasapi" | "asio") with their buffer sizes. Enumeration can be

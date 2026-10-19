@@ -409,14 +409,20 @@ where
 // ---- the thread that owns the stream ----------------------------------------------------------
 
 pub enum AudioRequest {
-    /// Replace the running stream (if any) with one for these prefs.
-    Start(AudioPrefs, mpsc::Sender<Result<AudioStatus, String>>),
-    /// Drop the stream; the status becomes "stopped".
-    Stop,
+    /// Replace the running stream (if any) with one for these prefs. The reply is optional: a
+    /// boot start does not wait.
+    Start(
+        AudioPrefs,
+        Option<mpsc::Sender<Result<AudioStatus, String>>>,
+    ),
 }
 
 /// Builds a stream for the prefs. Runs on the owner thread only (a `cpal::Stream` is not `Send`).
 pub type Starter = Box<dyn FnMut(&AudioPrefs) -> Result<AudioSystem> + Send>;
+
+/// Told the status every time a start has finished, whether or not anyone still waits for the
+/// reply (the app emits `audio-status` from it).
+pub type Announce = Box<dyn Fn(AudioStatus) + Send>;
 
 /// How long a command waits for the owner thread.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -428,64 +434,100 @@ pub struct AudioController {
     tx: mpsc::Sender<AudioRequest>,
 }
 
+/// Start with the prefs; a fixed buffer the device rejects is retried once with AUTO, so a bad
+/// saved buffer size cannot leave the app without sound.
+fn start_with_fallback(starter: &mut Starter, prefs: &AudioPrefs) -> Result<AudioSystem> {
+    match starter(prefs) {
+        Err(e) if prefs.buffer_frames.is_some() => {
+            logfile::log(format!(
+                "Audio start with buffer {:?} failed ({e:#}); retrying with AUTO",
+                prefs.buffer_frames
+            ));
+            starter(&AudioPrefs {
+                buffer_frames: None,
+                ..prefs.clone()
+            })
+        }
+        other => other,
+    }
+}
+
+fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
+    p.downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| p.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown".into())
+}
+
 impl AudioController {
     /// Spawn the owner thread with the real cpal starter.
-    pub fn spawn(state: AppState) -> Self {
-        Self::spawn_with(state, Box::new(start))
+    pub fn spawn(state: AppState, announce: Announce) -> Self {
+        Self::spawn_with(state, Box::new(start), announce)
     }
 
-    pub fn spawn_with(state: AppState, mut starter: Starter) -> Self {
+    pub fn spawn_with(state: AppState, mut starter: Starter, announce: Announce) -> Self {
         let (tx, rx) = mpsc::channel::<AudioRequest>();
         std::thread::Builder::new()
             .name("audio-owner".into())
             .spawn(move || {
                 let mut stream: Option<cpal::Stream> = None;
                 for request in rx {
+                    let AudioRequest::Start(prefs, reply) = request;
                     // The old stream goes first: ASIO devices cannot be opened twice.
                     drop(stream.take());
-                    match request {
-                        AudioRequest::Start(prefs, reply) => {
-                            let result = match starter(&prefs) {
-                                Ok(sys) => {
-                                    stream = sys.stream;
-                                    Ok(state.install_audio(
-                                        sys.commands,
-                                        sys.events,
-                                        sys.taps,
-                                        sys.stats,
-                                        sys.status,
-                                    ))
-                                }
-                                Err(e) => {
-                                    let message = format!("{e:#}");
-                                    logfile::log(format!("Audio start failed: {message}"));
-                                    state.audio_failed(&prefs);
-                                    Err(message)
-                                }
-                            };
-                            let _ = reply.send(result);
+                    // A panic in a driver call becomes an error status; the thread lives on.
+                    let work = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        match start_with_fallback(&mut starter, &prefs) {
+                            Ok(sys) => {
+                                let status = state.install_audio(
+                                    sys.commands,
+                                    sys.events,
+                                    sys.taps,
+                                    sys.stats,
+                                    sys.status,
+                                );
+                                Ok((sys.stream, status))
+                            }
+                            Err(e) => Err(format!("{e:#}")),
                         }
-                        AudioRequest::Stop => state.audio_stopped(),
+                    }));
+                    let result = match work {
+                        Ok(Ok((new_stream, status))) => {
+                            stream = new_stream;
+                            logfile::log(format!("Audio: {status:?}"));
+                            Ok(status)
+                        }
+                        Ok(Err(message)) => Err(message),
+                        Err(p) => Err(format!("The audio driver panicked: {}", panic_text(&*p))),
+                    };
+                    if let Err(message) = &result {
+                        logfile::log(format!("Audio start failed: {message}"));
+                        state.audio_failed(&prefs);
+                    }
+                    announce(state.get_audio_status());
+                    if let Some(reply) = reply {
+                        let _ = reply.send(result);
                     }
                 }
-                drop(stream);
             })
             .expect("spawn the audio owner thread");
         AudioController { tx }
     }
 
-    /// Restart the stream with `prefs`. Blocks up to 5 s: call from a worker, not the UI.
+    /// Restart the stream with `prefs`. Blocks up to 5 s: call from a worker, not the UI. After
+    /// a timeout the thread still finishes the start and announces the result.
     pub fn start(&self, prefs: AudioPrefs) -> Result<AudioStatus, String> {
         let (reply, wait) = mpsc::channel();
         self.tx
-            .send(AudioRequest::Start(prefs, reply))
+            .send(AudioRequest::Start(prefs, Some(reply)))
             .map_err(|_| "The audio thread is not running".to_string())?;
         wait.recv_timeout(REPLY_TIMEOUT)
             .map_err(|_| "The audio device did not answer in time".to_string())?
     }
 
-    pub fn stop(&self) {
-        let _ = self.tx.send(AudioRequest::Stop);
+    /// Start without waiting (app launch): the result arrives as an announcement.
+    pub fn start_detached(&self, prefs: AudioPrefs) {
+        let _ = self.tx.send(AudioRequest::Start(prefs, None));
     }
 
     /// `set_audio`: remember the prefs, then restart with them.

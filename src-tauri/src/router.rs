@@ -211,10 +211,15 @@ impl Router {
     pub fn replace_audio(&mut self, tx: Producer<Command>, rx: Consumer<Event>) {
         self.audio_tx = tx;
         self.audio_rx = rx;
-        self.voice_counts.clear();
-        self.held.clear();
+        self.forget_voices();
         self.send_mixer();
         // keys: Task 15 (re-send the keys settings to the new engine here)
+    }
+
+    /// The engine that owned the voices is gone: drop voice counts and holds.
+    pub fn forget_voices(&mut self) {
+        self.voice_counts.clear();
+        self.held.clear();
     }
 
     /// Release every held pad (input ownership is changing).
