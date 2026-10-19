@@ -1109,7 +1109,7 @@ Task 16 verification (2026-10-19): `keys.test.ts` (6 tests) was RED (module miss
 
 ## Phase F — Finish
 
-### Task 17: SETUP › DISPLAY bend, SETUP › LOG, rack polish
+### Task 17: SETUP › DISPLAY bend, SETUP › LOG, rack polish — DONE
 
 **Files:** `src/components/SetupDisplay.svelte`, `src/components/CrtLayers.svelte`, `src/lib/display.ts` + `src/lib/display.test.ts`, `src/components/SetupLog.svelte`, `src/App.svelte`
 
@@ -1121,7 +1121,9 @@ Task 16 verification (2026-10-19): `keys.test.ts` (6 tests) was RED (module miss
 
 **Tests:** `display.test.ts`: storage with only `medium` → `{ level: 'medium', bend: 'flat' }`; round-trip `{ level: 'low', bend: 'bent' }`; garbage → `{ level: 'low', bend: 'flat' }`; throwing storage → defaults.
 
-**Done when:** [ ] tests first → PASS; [ ] preview SETUP: the BEND switch toggles the bulge and is inactive at OFF; [ ] full verification + build; commit `feat(ui): display bend option and log rack`.
+**Done when:** [x] tests first → PASS; [x] preview SETUP: the BEND switch toggles the bulge and is inactive at OFF; [x] full verification + build; commit `feat(ui): display bend option and log rack`.
+
+Task 17 verification (2026-10-19): `display.test.ts` (4 tests) was written first and failed against the old signature, then passed. fmt clean; `cargo test --workspace` all passed; `npm test` 89 passed; `npm run check` 0 errors, 0 warnings; `npm run build` passed. Headless Edge via CDP at 1280×720: SETUP lists AUDIO, MIDI DEVICES, KEYS, MIDI LEARN, DISPLAY, LOG (every rack is a `RackUnit`; the column is 860 px wide and scrolls); the DISPLAY hint is the plan's exact text; BEND → BENT sets `data-bend="on"`, the console gets `filter: url(#crt-bend) …`, the displacement map is the generated 512 px PNG sized to the console (1256 × 696), both preferences are stored (`low`, `bent`); at CRT OFF the bend is off, the BEND fieldset is dimmed, and clicking FLAT does nothing (the radio does not flip); back at LOW the bend returns; a screenshot shows the edges bulging. The old `launchpad-drummer.display.crt` string stays valid. The OPEN LOG FOLDER key calls `open_log_folder` (not exercised here: no Tauri). Not verified: the bend on a real monitor (softness of text near the edges), the scan-line behaviour (unchanged, already shipped).
 
 ### Task 18: Final verification and spec status
 

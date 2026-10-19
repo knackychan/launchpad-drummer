@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { CrtLevel } from '../lib/display.ts';
-  let { level }: { level: CrtLevel } = $props();
+  let { level, bent = false }: { level: CrtLevel; bent?: boolean } = $props();
   let mask: HTMLCanvasElement;
   let scan: HTMLDivElement;
   let reduced = $state(true);
@@ -45,6 +45,31 @@
     ctx.stroke();
   }
 
+  // BEND (mockup 557–558, 1921–1923): a radial displacement map, 4.5 px at the middle of the edges and
+  // 9 px in the corners (R/G = 0.5 + 0.25·u·r²), sized to the console; SVG filter #crt-bend.
+  let bendMap = $state('');
+  let bendW = $state(1280), bendH = $state(720);
+  function makeBendMap() {
+    const N = 512, canvas = document.createElement('canvas');
+    canvas.width = canvas.height = N;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return '';
+    const image = ctx.createImageData(N, N);
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      const u = (x / (N - 1)) * 2 - 1, v = (y / (N - 1)) * 2 - 1, r2 = u * u + v * v, i = (y * N + x) * 4;
+      image.data[i] = Math.round(255 * (0.5 + 0.25 * u * r2));
+      image.data[i + 1] = Math.round(255 * (0.5 + 0.25 * v * r2));
+      image.data[i + 2] = 128; image.data[i + 3] = 255;
+    }
+    ctx.putImageData(image, 0, 0);
+    return canvas.toDataURL();
+  }
+  function sizeBend() {
+    const console = document.querySelector<HTMLElement>('.console');
+    if (console) { bendW = console.offsetWidth; bendH = console.offsetHeight; }
+  }
+  $effect(() => { if (bent) { if (!bendMap) bendMap = makeBendMap(); sizeBend(); } });
+
   onMount(() => {
     const query = matchMedia('(prefers-reduced-motion: reduce)');
     const motionChanged = () => { reduced = query.matches; };
@@ -52,8 +77,9 @@
     const resize = new ResizeObserver(drawMask);
     resize.observe(mask);
     window.addEventListener('resize', drawMask);
+    window.addEventListener('resize', sizeBend);
     return () => {
-      resize.disconnect(); window.removeEventListener('resize', drawMask);
+      resize.disconnect(); window.removeEventListener('resize', drawMask); window.removeEventListener('resize', sizeBend);
       query.removeEventListener('change', motionChanged);
     };
   });
@@ -79,6 +105,13 @@
   });
 </script>
 
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <filter id="crt-bend" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">
+    <feImage href={bendMap} x="0" y="0" width={bendW} height={bendH} preserveAspectRatio="none" result="map" />
+    <feDisplacementMap in="SourceGraphic" in2="map" scale="18" xChannelSelector="R" yChannelSelector="G" result="d" />
+    <feGaussianBlur in="d" stdDeviation=".4" />
+  </filter>
+</svg>
 <div class="crt-bloom" aria-hidden="true"></div>
 <canvas bind:this={mask} class="crt-mask" aria-hidden="true"></canvas>
 <div class="crt-tube" aria-hidden="true">

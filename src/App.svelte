@@ -10,6 +10,7 @@
   import CrtLayers from './components/CrtLayers.svelte';
   import SetupAudio from './components/SetupAudio.svelte';
   import SetupDisplay from './components/SetupDisplay.svelte';
+  import SetupLog from './components/SetupLog.svelte';
   import SetupMidi from './components/SetupMidi.svelte';
   import SetupLearn from './components/SetupLearn.svelte';
   import SetupKeys from './components/SetupKeys.svelte';
@@ -33,7 +34,7 @@
   import { createLedFrame, ledToCss } from './lib/led.ts';
   import type { PadInput, Rgb } from './lib/led.ts';
   import { CRT_FACTORS, readDisplay, saveDisplay } from './lib/display.ts';
-  import type { CrtLevel } from './lib/display.ts';
+  import type { Bend, CrtLevel } from './lib/display.ts';
   import { createEmptySet, createPreviewSet, GROUP_COLORS, groupLegend, padAriaLabel, padLabel } from './lib/model.ts';
   import type { AppConfig, AudioStatus, Binding, KeysStatus, Pattern, SeqPosition, DropReport, Group, LightModes, MidiDevice, MissingPad, OpenResult, Pad, SamplePeaks, SetModel, Startup } from './lib/model.ts';
   import { PREVIEW_MIDI, pushLog, roleStatus } from './lib/midi.ts';
@@ -61,6 +62,7 @@
   // A `midi-devices` event is newer than the initial fetch.
   let midiEventSeen = false;
   let crt = $state<CrtLevel>('low');
+  let bend = $state<Bend>('flat');
   let leds = $state<readonly Rgb[]>(createLedFrame());
   let frameSeen = $state(false);
   let pressed = $state<number[]>([]);
@@ -486,7 +488,7 @@
   }
 
   onMount(() => {
-    try { crt = readDisplay(window.localStorage); } catch { crt = 'low'; }
+    try { const prefs = readDisplay(window.localStorage); crt = prefs.level; bend = prefs.bend; } catch { crt = 'low'; bend = 'flat'; }
     try { seqFolded = window.localStorage.getItem(SEQ_FOLD_KEY) === 'true'; } catch { seqFolded = false; }
     try { keysFolded = window.localStorage.getItem(KEYS_FOLD_KEY) === 'true'; keysOctave = Math.min(2, Math.max(-1, Number(window.localStorage.getItem(KEYS_OCTAVE_KEY)) || 0)); } catch { keysFolded = false; keysOctave = 0; }
     if (window.innerWidth >= 1780) drawer = 'editor';
@@ -595,9 +597,16 @@
 
   let hordeComponent = $state<{ padInput: (note: number, pressed: boolean) => void } | undefined>();
 
+  function saveDisplayPrefs() {
+    try { saveDisplay(window.localStorage, { level: crt, bend }); } catch { /* the switch still works without storage */ }
+  }
   function setCrt(level: CrtLevel) {
     crt = level;
-    try { saveDisplay(window.localStorage, level); } catch { /* the switch still works without storage */ }
+    saveDisplayPrefs();
+  }
+  function setBend(next: Bend) {
+    bend = next;
+    saveDisplayPrefs();
   }
 
   function padInput(input: PadInput) {
@@ -819,7 +828,7 @@
 {#if learnMenu}<ContextMenu x={learnMenu.x} y={learnMenu.y} items={learnMenu.items} onclose={() => { learnMenu = null; }} />{/if}
 {#if padMenu}<ContextMenu x={padMenu.at.x} y={padMenu.at.y} items={padMenuItems} onclose={() => { padMenu = null; }} />{/if}
 
-<div class="instrument" data-crt={crt} style:--crt={CRT_FACTORS[crt]}>
+<div class="instrument" data-crt={crt} data-bend={bend === 'bent' && crt !== 'off' ? 'on' : 'off'} style:--crt={CRT_FACTORS[crt]}>
   <div class="console" class:game-full={gameFull}>
     <ConsoleBackdrop />
     <header class="top-strip">
@@ -976,7 +985,8 @@
             <SetupMidi devices={midiDevices} events={midiLog} onrole={(port, role) => void setMidiRole(port, role)} />
             <SetupKeys status={keysStatus} soundfont={soundfontPath} onload={() => void loadSoundfont()} onclear={() => void applySoundfont(null)} />
             <SetupLearn set={currentSet} onunbind={(index) => void unbindAt(index)} />
-            <SetupDisplay level={crt} onchange={setCrt} />
+            <SetupDisplay level={crt} {bend} onchange={setCrt} onbend={setBend} />
+            <SetupLog onopen={() => void invoke('open_log_folder').catch(e => showToast(errorText(e)))} />
           </div>
         </div>
       {/if}
@@ -998,5 +1008,5 @@
       {#key saveStatus}<span class="lamp" class:ok={saveStatus.state === 'saved'} class:blink={saveStatus.state === 'saved'} class:error={saveStatus.state === 'failed'} role="img" aria-label={saveStatus.state === 'failed' ? 'Save failed' : saveStatus.state === 'saved' ? 'Saved' : 'Saving…'}></span>{/key}
     </footer>
   </div>
-  <CrtLayers level={crt} />
+  <CrtLayers level={crt} bent={bend === 'bent' && crt !== 'off'} />
 </div>
