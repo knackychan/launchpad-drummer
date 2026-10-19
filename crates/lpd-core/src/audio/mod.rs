@@ -2,8 +2,10 @@
 
 mod biquad;
 mod engine;
+pub mod fft;
 pub mod host;
 mod sample;
+mod taps;
 mod voice;
 
 pub use biquad::LowPass;
@@ -11,6 +13,7 @@ pub use engine::{
     Command, Engine, Event, GroupParams, AUDITION_PAD, GROUPS, MAX_BLOCK, MAX_VOICES,
 };
 pub use sample::Sample;
+pub use taps::{Levels, Taps, LEVELS_CAPACITY, SCOPE_CAPACITY};
 pub use voice::{PlayParams, Voice};
 
 pub fn db_to_gain(db: f32) -> f32 {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { AudioStatus } from './model.ts';
-import { audioLabel, currentNotice, IDLE_SAVE, padEditKey, saveBadge } from './status.ts';
+import { audioLabel, currentNotice, dropoutRecent, IDLE_SAVE, padEditKey, saveBadge } from './status.ts';
 import type { NoticeInputs } from './status.ts';
 
 const running: AudioStatus = { state: 'running', deviceName: 'Speakers', sampleRate: 48000, bufferSize: 128, channels: 2 };
@@ -35,6 +35,15 @@ test('audio label reports running, stopped and error', () => {
   assert.equal(audioLabel(running), 'Speakers · 128 · 48.0 kHz');
   assert.equal(audioLabel({ ...running, state: 'error' }), 'AUDIO ERROR');
   assert.equal(audioLabel(null), 'AUDIO STOPPED');
+});
+
+test('a dropout is recent for 10 s, counted from when it happened', () => {
+  assert.equal(dropoutRecent(null, 0), false);
+  assert.equal(dropoutRecent(undefined, 0), false);
+  assert.equal(dropoutRecent(0, 0), true);
+  assert.equal(dropoutRecent(2000, 7999), true);
+  assert.equal(dropoutRecent(2000, 8000), false);
+  assert.equal(dropoutRecent(10_000, 0), false);
 });
 
 test('only continuous pad controls get an undo-coalescing key', () => {

@@ -12,6 +12,8 @@ fn running() -> AudioStatus {
         sample_rate: 48_000,
         buffer_size: Some(128),
         channels: 2,
+        dropouts: 0,
+        last_dropout_ago_ms: None,
     }
 }
 

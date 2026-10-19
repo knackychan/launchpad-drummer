@@ -30,9 +30,11 @@
   import { createEmptySet, createPreviewSet, GROUP_COLORS, padAriaLabel, padLabel } from './lib/model.ts';
   import type { AppConfig, AudioStatus, DropReport, Group, LightModes, MissingPad, OpenResult, Pad, SamplePeaks, SetModel, Startup } from './lib/model.ts';
   import { solvePlayLayout } from './lib/layout.ts';
-  import { hitAmount, hitGroup, runActivity } from './lib/activity.ts';
-  import { audioLabel, IDLE_SAVE, padEditKey } from './lib/status.ts';
+  import { feedLive, hitAmount, hitGroup, runActivity } from './lib/activity.ts';
+  import { audioLabel, dropoutRecent, IDLE_SAVE, padEditKey } from './lib/status.ts';
   import type { SaveStatus } from './lib/status.ts';
+  import { pushFrame } from './lib/telemetry.ts';
+  import type { TelemetryFrame } from './lib/telemetry.ts';
 
   const tauri = isTauri;
   const editCommands = new Set(['update_pad', 'clear_pad', 'move_pad', 'drop_files', 'locate_sample', 'update_group', 'rename_bank', 'update_bank_lights', 'update_bank_humanize']);
@@ -210,11 +212,29 @@
     return frame;
   });
 
+  // A dropout is "recent" for 10 s after it happened; re-evaluated every second.
+  const statusStamp = new WeakMap<object, number>();
+  let secondTick = $state(0);
+  const dropoutIsRecent = $derived.by(() => {
+    secondTick;
+    const status = audioStatus;
+    if (!status) return false;
+    if (!statusStamp.has(status)) statusStamp.set(status, performance.now());
+    return dropoutRecent(status.lastDropoutAgoMs, performance.now() - statusStamp.get(status)!);
+  });
   const notices = $derived(activeNotices({ learnArmed: null, audioLost: audioStatus?.state === 'lost' || audioStatus?.state === 'error',
     backup, saveFailed: saveStatus.state === 'failed' ? saveStatus.reason : null,
     launchpad: tauri ? deviceState : 'connected', lcxl: tauri ? 'disconnected' : 'connected', missing: missing.length,
-    asioFallback: false, dropoutRecent: false, confirmations, keysAbsent: false, dismissed }));
+    asioFallback: false, dropoutRecent: dropoutIsRecent, confirmations, keysAbsent: false, dismissed }));
   const lampClass = (state: string) => ({ connected: 'ok', running: 'ok', busy: 'warn', bootloader: 'error', stopped: 'error', error: 'error' } as Record<string, string>)[state] ?? '';
+  const audioLamp = $derived(audioStatus?.state === 'running' && dropoutIsRecent ? 'warn' : lampClass(audioStatus?.state ?? 'stopped'));
+
+  // The engine feed (scope, spectrum, levels) runs only while it can be seen: Play mode, window visible.
+  let windowVisible = $state(typeof document === 'undefined' || document.visibilityState === 'visible');
+  $effect(() => {
+    if (!tauri) return;
+    void call('set_telemetry', { on: mode === 'play' && windowVisible }).catch(() => {});
+  });
 
   function logMidi(text: string) {
     midiLog = [{ time: new Date().toLocaleTimeString(), text }, ...midiLog].slice(0, 40);
@@ -281,6 +301,9 @@
     if (window.innerWidth >= 1780) drawer = 'editor';
     void loadInitialState();
     const stopActivity = runActivity();
+    const secondTimer = window.setInterval(() => { secondTick++; }, 1000);
+    const onVisibility = () => { windowVisible = document.visibilityState === 'visible'; };
+    document.addEventListener('visibilitychange', onVisibility);
     const onFullscreen = () => { if (!document.fullscreenElement) gameFull = false; };
     document.addEventListener('fullscreenchange', onFullscreen);
     const swallowDragClick = (e: MouseEvent) => { if (suppressClick) { e.preventDefault(); e.stopImmediatePropagation(); suppressClick = false; } };
@@ -315,6 +338,7 @@
       });
       subscribe<SaveStatus>('save-status', (event) => { saveStatus = event; });
       subscribe<AudioStatus>('audio-status', (event) => { audioStatus = event; });
+      subscribe<TelemetryFrame>('telemetry', (event) => pushFrame(event));
       subscribe<{ paths: string[]; position: { x: number; y: number } }>('tauri://drag-enter', e => externalEnter(e.paths, e.position));
       subscribe<{ position: { x: number; y: number } }>('tauri://drag-over', e => { if (drag?.external) { const p = physicalToCss(e.position, devicePixelRatio); updateDrag(p.x, p.y, false); } });
       subscribe<{ paths: string[]; position: { x: number; y: number } }>('tauri://drag-drop', e => { externalEnter(e.paths, e.position); void finishDrop(); });
@@ -332,6 +356,8 @@
       window.removeEventListener('keydown', trackCtrl);
       window.removeEventListener('keyup', trackCtrl);
       stopActivity();
+      clearInterval(secondTimer);
+      document.removeEventListener('visibilitychange', onVisibility);
       document.removeEventListener('fullscreenchange', onFullscreen);
       unlisten.forEach((fn) => fn());
     };
@@ -383,7 +409,8 @@
       if (pad?.sample) {
         const g = currentSet.mixer.groups[pad.mixGroup];
         const anySolo = currentSet.mixer.groups.some((q) => q.solo);
-        if (g) hitGroup(pad.mixGroup, hitAmount(g.volumeDb + pad.volumeDb, anySolo ? g.solo : !g.mute));
+        // While the engine feed is live it reports the real level; hits only stand in without it.
+        if (g && !feedLive()) hitGroup(pad.mixGroup, hitAmount(g.volumeDb + pad.volumeDb, anySolo ? g.solo : !g.mute));
       }
     }
     if (!frameSeen) pressed = input.pressed ? [...pressed, input.note] : pressed.filter((n) => n !== input.note);
@@ -645,7 +672,7 @@
                 <SequencerPlate />
               </div>
               {#if layout.tw > 0}
-                <Telemetry mini={layout.mini} onfold={(f) => { teleFolded = f; }} />
+                <Telemetry mini={layout.mini} sampleRate={audioStatus?.sampleRate ?? 0} onfold={(f) => { teleFolded = f; }} />
               {/if}
             </div>
           </div>
@@ -724,7 +751,7 @@
         <span class="lamp"></span><span class="silk">LCXL</span>
       </button>
       <button class="device-status" onclick={() => setMode('setup')} aria-label="AUDIO: {audioStatus?.state ?? 'stopped'}. Open Setup">
-        <span class="lamp {lampClass(audioStatus?.state ?? 'stopped')}"></span><span class="silk">AUDIO</span>
+        <span class="lamp {audioLamp}"></span><span class="silk">AUDIO</span>
       </button>
       <span class="lcd lcd-dim" class:audio-error={audioStatus?.state === 'error'}>{audioLabel(audioStatus)}</span>
       <span class="lcd lcd-dim">DROPS {audioStatus?.dropouts ?? 0}</span>

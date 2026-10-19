@@ -9,6 +9,7 @@ pub mod saver;
 pub mod startup;
 pub mod state;
 pub mod store;
+pub mod telemetry;
 
 use lpd_core::kit::Set;
 use state::AppState;
@@ -36,13 +37,15 @@ fn housekeeping(app: AppHandle, state: AppState, health: Arc<audio::StreamHealth
 pub fn run() {
     let default_set = Set::new();
     let mut audio_warning = None;
-    let (stream, commands, events, status, health) = match audio::start(false, None) {
+    let (stream, commands, events, status, health, taps, stats) = match audio::start(false, None) {
         Ok(sys) => (
             Some(sys.stream),
             sys.commands,
             sys.events,
             sys.status,
             sys.health,
+            Some(sys.taps),
+            Some(sys.stats),
         ),
         Err(e) => {
             // The log file opens in `setup`; the warning is written there.
@@ -59,13 +62,21 @@ pub fn run() {
                     sample_rate: 48_000,
                     buffer_size: None,
                     channels: 2,
+                    dropouts: 0,
+                    last_dropout_ago_ms: None,
                 },
                 Arc::new(audio::StreamHealth::default()),
+                None,
+                None,
             )
         }
     };
     let app_state = AppState::new(default_set, commands, events);
     app_state.set_audio_status(status);
+    app_state.set_taps(taps);
+    if let Some(stats) = stats {
+        app_state.set_audio_stats(stats);
+    }
     let _audio_stream = stream;
 
     tauri::Builder::default()
@@ -91,13 +102,18 @@ pub fn run() {
                 }
                 launchpad::start(app.handle().clone(), app_state.clone());
                 let handle = app.handle().clone();
+                let telemetry_handle = handle.clone();
+                let telemetry_state = app_state.clone();
                 std::thread::spawn(move || housekeeping(handle, app_state, health));
+                std::thread::spawn(move || telemetry::run(telemetry_handle, telemetry_state));
                 Ok(())
             }
         })
         .invoke_handler(tauri::generate_handler![
             launchpad::send_led_frame,
             commands::get_audio_status,
+            commands::set_telemetry,
+            commands::reset_dropouts,
             commands::trigger_pad,
             commands::release_pad,
             commands::select_bank,

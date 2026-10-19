@@ -8,7 +8,7 @@
 //! else); the one exception to "no lock across disk I/O" is `config`, held while its own small
 //! file is written.
 
-use crate::audio::AudioStatus;
+use crate::audio::{AudioStats, AudioStatus};
 use crate::config::{self, AppConfig};
 use crate::lights::LightPainter;
 use crate::logfile;
@@ -16,13 +16,13 @@ use crate::router::Router;
 use crate::saver::{SaveState, SaveStatus, Saver};
 use crate::startup::{self, Startup};
 use crate::store::{prepare_sample, KitManager, LoadedKit};
-use lpd_core::audio::{Command, Event, Sample};
+use lpd_core::audio::{Command, Event, Sample, Taps};
 use lpd_core::devices::launchpad::LpEvent;
 use lpd_core::kit::{self, History, Pad, Set};
 use rtrb::{Consumer, Producer};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
@@ -151,6 +151,13 @@ pub struct AppState {
     pub painter: Arc<Mutex<LightPainter>>,
     pub kit_manager: Arc<Mutex<KitManager>>,
     pub audio_status: Arc<Mutex<AudioStatus>>,
+    /// Engine output taps read by the telemetry thread (a leaf lock). Task 9 swaps them on a
+    /// stream restart.
+    pub taps: Arc<Mutex<Option<Taps>>>,
+    /// The UI wants the `telemetry` feed (Play mode, window visible).
+    telemetry_on: Arc<AtomicBool>,
+    /// Dropout counter of the current stream (a leaf lock).
+    audio_stats: Arc<Mutex<Arc<AudioStats>>>,
     /// Undo/redo of kit edits; lock after `router`.
     pub history: Arc<Mutex<History>>,
     /// What the app opened at launch, or the set opened since.
@@ -195,7 +202,12 @@ impl AppState {
                 sample_rate: 48_000,
                 buffer_size: None,
                 channels: 2,
+                dropouts: 0,
+                last_dropout_ago_ms: None,
             })),
+            taps: Arc::default(),
+            telemetry_on: Arc::new(AtomicBool::new(false)),
+            audio_stats: Arc::new(Mutex::new(Arc::new(AudioStats::new()))),
             history: Arc::new(Mutex::new(History::new())),
             startup: Arc::new(Mutex::new(Startup::FirstRun)),
             config: Arc::default(),
@@ -366,19 +378,56 @@ impl AppState {
     }
 
     pub fn get_audio_status(&self) -> AudioStatus {
-        lock(&self.audio_status).clone()
+        let status = lock(&self.audio_status).clone();
+        self.with_dropouts(status)
+    }
+
+    /// Fill the dropout fields from the live counter (the stored status never carries them).
+    fn with_dropouts(&self, mut status: AudioStatus) -> AudioStatus {
+        let stats = lock(&self.audio_stats).clone();
+        status.dropouts = stats.dropouts();
+        status.last_dropout_ago_ms = stats.last_dropout_ago_ms(Instant::now());
+        status
     }
 
     /// The output stream reported an error. Returns the new status the first time only, so a
     /// burst of errors reaches the UI once.
     pub fn audio_stream_failed(&self) -> Option<AudioStatus> {
-        let mut status = lock(&self.audio_status);
-        if status.state == "running" {
-            status.state = "error".into();
-            Some(status.clone())
-        } else {
-            None
-        }
+        let failed = {
+            let mut status = lock(&self.audio_status);
+            if status.state == "running" {
+                status.state = "error".into();
+                Some(status.clone())
+            } else {
+                None
+            }
+        };
+        failed.map(|s| self.with_dropouts(s))
+    }
+
+    pub fn set_taps(&self, taps: Option<Taps>) {
+        *lock(&self.taps) = taps;
+    }
+
+    /// Point the status and `reset_dropouts` at the counter of a new stream.
+    pub fn set_audio_stats(&self, stats: Arc<AudioStats>) {
+        *lock(&self.audio_stats) = stats;
+    }
+
+    pub fn dropout_count(&self) -> u32 {
+        lock(&self.audio_stats).dropouts()
+    }
+
+    pub fn reset_dropouts(&self) {
+        lock(&self.audio_stats).reset();
+    }
+
+    pub fn set_telemetry(&self, on: bool) {
+        self.telemetry_on.store(on, Ordering::Relaxed);
+    }
+
+    pub fn telemetry_enabled(&self) -> bool {
+        self.telemetry_on.load(Ordering::Relaxed)
     }
 
     pub fn get_current_set(&self) -> Set {

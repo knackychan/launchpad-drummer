@@ -1,18 +1,22 @@
 <script lang="ts">
   // Telemetry column (UI spec 4.8): oscilloscope, spectrum, orbit (channel radar), master L/R meters.
   // Drawn into a low-res buffer, bit-crushed and blown up with a phosphor glow (mockup present()).
-  // The orbit radar follows pad-hit activity; scope, spectrum and meters stay in STANDBY until the
-  // engine streams master levels to the UI.
+  // The orbit radar follows the engine's per-channel peaks (pad hits in the browser preview); scope,
+  // spectrum and meters follow the `telemetry` feed and stay in STANDBY without one.
   import { onMount } from 'svelte';
-  import { energy, isResting, onActivity } from '../lib/activity.ts';
+  import { energy, feedLive, isResting, masterDb, onActivity } from '../lib/activity.ts';
   import { GROUP_COLORS } from '../lib/model.ts';
   import { ledToCss } from '../lib/led.ts';
+  import {
+    feed, fmtPeakHz, fmtPk, holdValue, meterColor, msPerDiv, onFeed, SPEC_FLOOR_DB, VU_MAX_DB, VU_MIN_DB, vuPos,
+  } from '../lib/telemetry.ts';
 
-  let { mini, onfold }: { mini: boolean; onfold: (folded: boolean) => void } = $props();
+  let { mini, sampleRate = 0, onfold }: { mini: boolean; sampleRate?: number; onfold: (folded: boolean) => void } = $props();
 
   type Lo = HTMLCanvasElement & { _labels?: [string, number, number, string][] };
   const canvases: Record<string, HTMLCanvasElement | undefined> = $state({});
   let clock = $state('T+00:00.0');
+  const reads = $state({ scope: '— ms/div', spec: '—', orbit: 'IDLE · NO SEQ', vu: 'PK −∞' });
   const PIX = 2, NB = 28, STEPS = 16;
   const groupCol = (i: number) => ledToCss(GROUP_COLORS[i]);
   const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -92,20 +96,51 @@
     for (let j = 1; j < ny; j++) { const y = Math.round((j * H) / ny / PIX) * PIX; g.moveTo(0, y); g.lineTo(W, y); }
     g.stroke(); g.setLineDash([]);
   }
+  // Scope: the latest frames, newest first (the feed listener keeps the last four; one with reduced motion).
+  let scopeHist: number[][] = [];
+  const live = () => feedLive() && feed.frame !== null;
   function drawScope(g: CanvasRenderingContext2D, W: number, H: number) {
     scopeGrid(g, W, H, 8, 6);
     const cx = Math.round(W / 2 / PIX) * PIX, cy = Math.round(H / 2 / PIX) * PIX;
+    const on = live(), trace = on && !feed.silent;
     g.lineWidth = 2; g.strokeStyle = '#ff3d4f'; g.beginPath(); g.moveTo(cx, 0); g.lineTo(cx, H); g.stroke();
-    g.strokeStyle = '#e9fff1'; g.beginPath(); g.moveTo(0, cy); g.lineTo(W, cy); g.stroke();
+    if (trace) {
+      // Master waveform, triggered on a rising zero crossing, with a short phosphor afterglow.
+      g.setLineDash([4, 4]); g.beginPath(); g.moveTo(0, cy); g.lineTo(W, cy); g.stroke(); g.setLineDash([]);
+      for (let j = scopeHist.length - 1; j >= 0; j--) {
+        const s = scopeHist[j];
+        g.strokeStyle = j ? `rgba(125,255,176,${(0.5 / j).toFixed(3)})` : '#e9fff1'; g.lineWidth = 1.5;
+        g.beginPath();
+        for (let x = 0; x <= W; x += PIX) {
+          const y = H / 2 - (s[Math.min(s.length - 1, Math.floor((x / W) * s.length))] ?? 0) * H * 0.45;
+          if (x) g.lineTo(x, y); else g.moveTo(x, y);
+        }
+        g.stroke();
+      }
+    } else {
+      g.strokeStyle = '#e9fff1'; g.beginPath(); g.moveTo(0, cy); g.lineTo(W, cy); g.stroke();
+    }
     txt(g, 'CH1 · MASTER', 6, 14, '#ffb21a');
-    txt(g, 'STANDBY · NO LEVEL FEED', W / 2, H * 0.3, '#5cff9d', 'center');
+    if (!on) txt(g, 'STANDBY · NO LEVEL FEED', W / 2, H * 0.3, '#5cff9d', 'center');
+    else if (feed.silent) txt(g, 'STANDBY · PLAY A PAD', W / 2, H * 0.3, '#5cff9d', 'center');
   }
+  $effect(() => { reads.scope = msPerDiv(sampleRate); });
   function drawSpec(g: CanvasRenderingContext2D, W: number, H: number) {
     const lo = 40, hi = 16000, bot = H - 14, sh = 4, sg = 2, nSeg = Math.max(4, Math.floor((bot - 4) / (sh + sg))), bw = (W - 8) / NB;
-    for (let b = 0; b < NB; b++) for (let q = 0; q < nSeg; q++) {
-      g.fillStyle = 'rgba(65,200,255,.07)'; g.fillRect(4 + b * bw, bot - (q + 1) * (sh + sg), bw - 2, sh);
+    const on = live();
+    for (let b = 0; b < NB; b++) {
+      const x = 4 + b * bw, lit = on ? Math.round(feed.spectrum.bands[b] * nSeg) : 0;
+      for (let q = 0; q < nSeg; q++) {
+        const f = q / nSeg;
+        g.fillStyle = q < lit ? (f < 0.6 ? '#37c2b0' : f < 0.85 ? '#ffb21a' : '#ff3d4f') : 'rgba(65,200,255,.07)';
+        g.fillRect(x, bot - (q + 1) * (sh + sg), bw - 2, sh);
+      }
+      const cs = on ? Math.round(feed.spectrum.caps[b] * nSeg) : 0;
+      if (cs > 0) { g.fillStyle = '#ece3cc'; g.fillRect(x, bot - cs * (sh + sg) - 2, bw - 2, 2); }
     }
     for (const [f, l] of [[100, '100'], [1000, '1k'], [10000, '10k']] as const) txt(g, l, 4 + (Math.log(f / lo) / Math.log(hi / lo)) * (W - 8), H - 2, '#7b8796', 'center');
+    const frame = feed.frame;
+    reads.spec = on && frame && Math.max(...frame.bands) > SPEC_FLOOR_DB ? `PEAK ${fmtPeakHz(frame.peakHz)}` : '—';
   }
   function drawOrbit(g: CanvasRenderingContext2D, W: number, H: number) {
     const cx = W / 2, cy = H / 2, R = Math.min(W, H) / 2 - 7, r0 = R * 0.64, TAU = Math.PI * 2, ang = (i: number) => -Math.PI / 2 + (i * TAU) / 8;
@@ -114,13 +149,13 @@
     g.setLineDash([]); g.strokeStyle = 'rgba(65,200,255,.16)'; g.beginPath();
     for (let i = 0; i < 8; i++) { g.moveTo(cx, cy); g.lineTo(cx + Math.cos(ang(i)) * r0, cy + Math.sin(ang(i)) * r0); }
     g.stroke();
-    const pt = (i: number, rr: number) => [cx + Math.cos(ang(i)) * rr, cy + Math.sin(ang(i)) * rr], rad = (i: number) => r0 * (0.06 + 0.94 * energy[i]);
+    const pt = (i: number, rr: number) => [cx + Math.cos(ang(i)) * rr, cy + Math.sin(ang(i)) * rr], e = (i: number) => Math.min(1, energy[i]), rad = (i: number) => r0 * (0.06 + 0.94 * e(i));
     g.beginPath();
     for (let i = 0; i < 8; i++) { const [x, y] = pt(i, rad(i)); if (i) g.lineTo(x, y); else g.moveTo(x, y); }
     g.closePath(); g.fillStyle = 'rgba(255,91,31,.16)'; g.fill(); g.strokeStyle = '#ff5b1f'; g.lineWidth = 1.4; g.stroke(); g.lineWidth = 1;
     for (let i = 0; i < 8; i++) {
       const [x, y] = pt(i, rad(i)), c = groupCol(i), hot = energy[i] > 0.05;
-      g.fillStyle = c; g.beginPath(); g.arc(x, y, 2 + energy[i] * 2, 0, TAU); g.fill();
+      g.fillStyle = c; g.beginPath(); g.arc(x, y, 2 + e(i) * 2, 0, TAU); g.fill();
       const [lx, ly] = pt(i, r0 + 9);
       txt(g, String(i + 1), lx, ly + 3, hot ? '#ece3cc' : '#7b8796', 'center');
     }
@@ -133,23 +168,34 @@
     g.fillStyle = '#7b8796'; g.beginPath(); g.arc(cx, cy - R, 3, 0, TAU); g.fill();
   }
   function drawVu(g: CanvasRenderingContext2D, W: number, H: number) {
-    const N = 36, x0 = 12, w = W - x0 - 2, sw = w / N, rh = Math.floor((H - 12) / 2) - 1, pos = (d: number) => Math.min(1, Math.max(0, (d + 48) / 51));
+    const N = 36, x0 = 12, w = W - x0 - 2, sw = w / N, rh = Math.floor((H - 12) / 2) - 1, pos = vuPos, now = performance.now();
     [0, 1].forEach((ch) => {
-      const y = 1 + ch * (rh + 2);
+      const y = 1 + ch * (rh + 2), lit = Math.round(pos(masterDb[ch]) * N), hv = holdValue(feed.holds[ch], now), hs = Math.min(N - 1, Math.floor(pos(hv) * N));
       txt(g, ch ? 'R' : 'L', 2, y + rh - 1, '#f0a23a');
-      for (let q = 0; q < N; q++) { g.fillStyle = 'rgba(65,200,255,.07)'; g.fillRect(x0 + q * sw, y, sw - 2, rh); }
+      for (let q = 0; q < N; q++) {
+        const db = VU_MIN_DB + ((q + 1) / N) * (VU_MAX_DB - VU_MIN_DB);
+        g.fillStyle = q < lit || (q === hs && hv > VU_MIN_DB) ? meterColor(db) : 'rgba(65,200,255,.07)';
+        g.fillRect(x0 + q * sw, y, sw - 2, rh);
+      }
     });
     for (const d of [-40, -24, -12, -6, 0]) txt(g, String(d), x0 + pos(d) * w, H - 1, '#7b8796', 'center');
+    reads.vu = fmtPk(Math.max(holdValue(feed.holds[0], now), holdValue(feed.holds[1], now)));
   }
   function drawMini(g: CanvasRenderingContext2D, W: number, H: number) {
     const N = Math.max(8, Math.floor(H / 5)), cw = (W - 6) / 2;
-    [0, 1].forEach((ch) => { for (let q = 0; q < N; q++) { g.fillStyle = 'rgba(65,200,255,.07)'; g.fillRect(2 + ch * (cw + 2), H - (q + 1) * (H / N), cw, H / N - 2); } });
+    [0, 1].forEach((ch) => {
+      const lit = Math.round(vuPos(masterDb[ch]) * N);
+      for (let q = 0; q < N; q++) {
+        g.fillStyle = q < lit ? meterColor(VU_MIN_DB + ((q + 1) / N) * (VU_MAX_DB - VU_MIN_DB)) : 'rgba(65,200,255,.07)';
+        g.fillRect(2 + ch * (cw + 2), H - (q + 1) * (H / N), cw, H / N - 2);
+      }
+    });
   }
 
-  // Nothing here runs on a timer of its own. A panel is drawn when it appears, when its size
-  // changes and, for the orbit, while pad activity is decaying. The standby panels (scope, spectrum,
-  // meters) are static until the engine streams levels; a live feed will redraw them at the feed
-  // rate, not at the display's refresh rate.
+  // Nothing here runs on a timer of its own (apart from the clock). A panel is drawn when it appears,
+  // when its size changes, while activity is decaying (orbit, meters) and once per telemetry frame
+  // (scope, spectrum, meters), never faster than the display refreshes. Without a feed the panels
+  // stay in STANDBY.
   const painters: Record<string, (g: CanvasRenderingContext2D, W: number, H: number) => void> = {
     scope: drawScope, spec: drawSpec, orbit: drawOrbit, vu: drawVu, mini: drawMini,
   };
@@ -178,23 +224,36 @@
   }
 
   let orbitAt = 0;
-  function orbitTick() {
-    if (mini) return;
+  function activityTick() {
     const now = performance.now();
     // While decaying: at most ~30 fps (4 fps with reduced motion); the final, resting frame always draws.
-    if (isResting() || now - orbitAt >= (reduced() ? 250 : 33)) { orbitAt = now; schedule('orbit'); }
+    if (isResting() || now - orbitAt >= (reduced() ? 250 : 33)) {
+      orbitAt = now;
+      if (mini) schedule('mini'); else { schedule('orbit'); schedule('vu'); }
+    }
+  }
+  /** A telemetry frame arrived: keep the trace history and redraw the instruments that follow it. */
+  function feedTick() {
+    const frame = feed.frame;
+    if (!frame) return;
+    if (mini) { schedule('mini'); return; }
+    scopeHist = [frame.scope, ...scopeHist].slice(0, reduced() ? 1 : 4);
+    schedule('scope'); schedule('spec'); schedule('vu');
   }
 
   onMount(() => {
     const t0 = performance.now();
     const tick = () => {
       if (mini || document.hidden) return;
-      const sec = (performance.now() - t0) / 1000;
+      const now = performance.now(), sec = (now - t0) / 1000;
       clock = `T+${String(Math.floor(sec / 60)).padStart(2, '0')}:${(sec % 60).toFixed(1).padStart(4, '0')}`;
+      // A held peak keeps falling after the meters have come to rest.
+      if (feed.holds.some((h) => holdValue(h, now) > -99)) schedule('vu');
     };
     const timer = setInterval(tick, reduced() ? 1000 : 100);
-    const stopActivity = onActivity(orbitTick);
-    return () => { clearInterval(timer); stopActivity(); cancelAnimationFrame(flushRaf); };
+    const stopActivity = onActivity(activityTick);
+    const stopFeed = onFeed(feedTick);
+    return () => { clearInterval(timer); stopActivity(); stopFeed(); cancelAnimationFrame(flushRaf); };
   });
 </script>
 
@@ -210,9 +269,9 @@
       <span class="beats"><i></i><i></i><i></i><i></i></span>
       <button type="button" class="key small" title="Fold telemetry" tabindex="-1" onclick={() => onfold(true)}>▸</button>
     </div>
-    {#each [['scope', 'OSCILLOSCOPE', '— ms/div'], ['spec', 'SPECTRUM', '—'], ['orbit', 'ORBIT', 'IDLE · NO SEQ'], ['vu', 'MASTER L / R', 'PK −∞']] as [id, label, read]}
+    {#each [['scope', 'OSCILLOSCOPE'], ['spec', 'SPECTRUM'], ['orbit', 'ORBIT'], ['vu', 'MASTER L / R']] as [id, label]}
       <section class="tm {id}">
-        <div class="tm-h"><span class="silk">{label}</span><span class="lcd">{read}</span></div>
+        <div class="tm-h"><span class="silk">{label}</span><span class="lcd">{reads[id as keyof typeof reads]}</span></div>
         <div class="tm-g screen"><canvas bind:this={canvases[id]} use:watch={id}></canvas></div>
       </section>
     {/each}

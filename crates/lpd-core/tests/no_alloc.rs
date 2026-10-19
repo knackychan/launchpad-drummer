@@ -36,6 +36,54 @@ fn audition_paths_never_allocate_or_free() {
 }
 
 #[test]
+fn tapped_engine_never_allocates_even_with_full_queues() {
+    let (mut engine, _events, mut taps) = Engine::with_taps(48_000);
+    let sample = Arc::new(Sample {
+        rate: 48_000,
+        data: vec![0.25; 48_000 * 2],
+    });
+    let mut out = vec![0.0f32; 512 * 2];
+    let trigger = |engine: &mut Engine, pad: u16, group: u8| {
+        engine.handle(Command::Trigger {
+            pad,
+            sample: sample.clone(),
+            params: PlayParams {
+                gain: 1.0,
+                pitch_semitones: 0.0,
+                start_frame: 0,
+                end_frame: sample.frames(),
+                choke_group: None,
+                mix_group: group,
+                hold: false,
+            },
+        });
+    };
+    // Queues have room: trigger plus 4 blocks.
+    assert_no_alloc(|| {
+        trigger(&mut engine, 1, 0);
+        trigger(&mut engine, 2, 5);
+        for _ in 0..4 {
+            engine.render(&mut out);
+        }
+    });
+    // Nothing drained: both queues fill up and stay full while rendering goes on.
+    assert_no_alloc(|| {
+        for _ in 0..40 {
+            engine.render(&mut out);
+        }
+    });
+    assert_eq!(taps.scope.slots(), SCOPE_CAPACITY);
+    // Drained queues work again.
+    while taps.scope.pop().is_ok() {}
+    while taps.levels.pop().is_ok() {}
+    assert_no_alloc(|| {
+        for _ in 0..4 {
+            engine.render(&mut out);
+        }
+    });
+}
+
+#[test]
 fn audio_callback_never_allocates() {
     let (mut engine, mut events) = Engine::new(48_000);
     let (mut tx, mut rx) = rtrb::RingBuffer::new(256);

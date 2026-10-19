@@ -27,6 +27,17 @@ pub(crate) fn get_audio_status(state: State<'_, AppState>) -> AudioStatus {
     state.get_audio_status()
 }
 
+/// The UI wants (or no longer wants) the `telemetry` feed.
+#[tauri::command]
+pub(crate) fn set_telemetry(on: bool, state: State<'_, AppState>) {
+    state.set_telemetry(on);
+}
+
+#[tauri::command]
+pub(crate) fn reset_dropouts(state: State<'_, AppState>) {
+    state.reset_dropouts();
+}
+
 #[tauri::command]
 pub(crate) fn trigger_pad(x: u8, y: u8, state: State<'_, AppState>) {
     state.trigger_pad(x, y);

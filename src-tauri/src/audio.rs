@@ -2,11 +2,12 @@
 
 use anyhow::{bail, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use lpd_core::audio::{host, Command, Engine, Event};
+use lpd_core::audio::{host, Command, Engine, Event, Taps};
 use rtrb::{Consumer, Producer, RingBuffer};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -16,6 +17,70 @@ pub struct AudioStatus {
     pub sample_rate: u32,
     pub buffer_size: Option<u32>,
     pub channels: u16,
+    /// Callback gaps longer than 1.8 buffers since the stream started or the counter was reset.
+    /// Filled from `AudioStats` when the status is read.
+    #[serde(default)]
+    pub dropouts: u32,
+    #[serde(default)]
+    pub last_dropout_ago_ms: Option<u64>,
+}
+
+/// A callback that arrives later than 1.8 buffer durations after the previous one means the
+/// device ran dry.
+pub fn is_dropout(interval: Duration, frames: usize, rate: u32) -> bool {
+    if rate == 0 {
+        return false;
+    }
+    interval.as_secs_f64() > 1.8 * frames as f64 / rate as f64
+}
+
+/// Dropout counter shared between the audio callback (writer, atomics only) and the app.
+pub struct AudioStats {
+    started: Instant,
+    dropouts: AtomicU32,
+    /// Milliseconds since `started` at the last dropout.
+    last_dropout_ms: AtomicU64,
+}
+
+impl Default for AudioStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AudioStats {
+    pub fn new() -> Self {
+        AudioStats {
+            started: Instant::now(),
+            dropouts: AtomicU32::new(0),
+            last_dropout_ms: AtomicU64::new(0),
+        }
+    }
+
+    /// Safe on the audio thread: two atomic stores, no allocation.
+    pub fn record_dropout(&self, now: Instant) {
+        let ms = now.saturating_duration_since(self.started).as_millis() as u64;
+        self.last_dropout_ms.store(ms, Ordering::Relaxed);
+        self.dropouts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn dropouts(&self) -> u32 {
+        self.dropouts.load(Ordering::Relaxed)
+    }
+
+    /// `None` until a dropout has happened (and again after a reset).
+    pub fn last_dropout_ago_ms(&self, now: Instant) -> Option<u64> {
+        if self.dropouts() == 0 {
+            return None;
+        }
+        let at = self.last_dropout_ms.load(Ordering::Relaxed);
+        let since_start = now.saturating_duration_since(self.started).as_millis() as u64;
+        Some(since_start.saturating_sub(at))
+    }
+
+    pub fn reset(&self) {
+        self.dropouts.store(0, Ordering::Relaxed);
+    }
 }
 
 /// Failure flag of one output stream. The stream's error callback only sets it (no allocation,
@@ -54,6 +119,8 @@ pub struct AudioSystem {
     pub commands: Producer<Command>,
     pub events: Consumer<Event>,
     pub status: AudioStatus,
+    pub taps: Taps,
+    pub stats: Arc<AudioStats>,
 }
 
 pub fn start(asio: bool, buffer_frames: Option<u32>) -> Result<AudioSystem> {
@@ -74,13 +141,21 @@ pub fn start(asio: bool, buffer_frames: Option<u32>) -> Result<AudioSystem> {
         config.buffer_size = cpal::BufferSize::Fixed(frames);
     }
     let sample_rate = config.sample_rate.0;
-    let (engine, events) = Engine::new(sample_rate);
+    let (engine, events, taps) = Engine::with_taps(sample_rate);
     let (commands, rx) = RingBuffer::new(1024);
     let health = Arc::new(StreamHealth::default());
+    let stats = Arc::new(AudioStats::new());
+    let cb = Callback {
+        engine,
+        rx,
+        health: health.clone(),
+        stats: stats.clone(),
+        rate: sample_rate,
+    };
     let stream = match format {
-        cpal::SampleFormat::F32 => build::<f32>(&device, &config, engine, rx, health.clone())?,
-        cpal::SampleFormat::I32 => build::<i32>(&device, &config, engine, rx, health.clone())?,
-        cpal::SampleFormat::I16 => build::<i16>(&device, &config, engine, rx, health.clone())?,
+        cpal::SampleFormat::F32 => build::<f32>(&device, &config, cb)?,
+        cpal::SampleFormat::I32 => build::<i32>(&device, &config, cb)?,
+        cpal::SampleFormat::I16 => build::<i16>(&device, &config, cb)?,
         other => bail!("unsupported device sample format {other:?}"),
     };
     stream.play()?;
@@ -99,26 +174,52 @@ pub fn start(asio: bool, buffer_frames: Option<u32>) -> Result<AudioSystem> {
             sample_rate,
             buffer_size,
             channels,
+            dropouts: 0,
+            last_dropout_ago_ms: None,
         },
+        taps,
+        stats,
     })
+}
+
+/// Everything the output callback owns.
+struct Callback {
+    engine: Engine,
+    rx: Consumer<Command>,
+    health: Arc<StreamHealth>,
+    stats: Arc<AudioStats>,
+    rate: u32,
 }
 
 fn build<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    mut engine: Engine,
-    mut rx: Consumer<Command>,
-    health: Arc<StreamHealth>,
+    cb: Callback,
 ) -> Result<cpal::Stream>
 where
     T: cpal::SizedSample + cpal::FromSample<f32>,
 {
+    let Callback {
+        mut engine,
+        mut rx,
+        health,
+        stats,
+        rate,
+    } = cb;
     let channels = config.channels as usize;
     let mut scratch = host::scratch();
     let mut staging = vec![0.0f32; 4096 * channels];
+    let mut last_callback: Option<Instant> = None;
     let stream = device.build_output_stream(
         config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+            let now = Instant::now();
+            if let Some(prev) = last_callback {
+                if is_dropout(now.duration_since(prev), data.len() / channels.max(1), rate) {
+                    stats.record_dropout(now);
+                }
+            }
+            last_callback = Some(now);
             for chunk in data.chunks_mut(staging.len()) {
                 let buf = &mut staging[..chunk.len()];
                 host::process(&mut engine, &mut rx, &mut scratch, buf, channels);
@@ -142,4 +243,18 @@ fn asio_host() -> Result<cpal::Host> {
 #[cfg(not(feature = "asio"))]
 fn asio_host() -> Result<cpal::Host> {
     bail!("built without ASIO support; rebuild with `--features asio`")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropout_threshold_is_one_point_eight_buffers() {
+        // 256 frames at 48 kHz = 5.33 ms; threshold 9.6 ms.
+        assert!(is_dropout(Duration::from_millis(12), 256, 48_000));
+        assert!(!is_dropout(Duration::from_millis(6), 256, 48_000));
+        assert!(!is_dropout(Duration::from_millis(9), 256, 48_000));
+        assert!(!is_dropout(Duration::from_millis(100), 256, 0));
+    }
 }

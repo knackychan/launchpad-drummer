@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { decay, energy, hitGroup, isResting, onActivity, REST, runActivity } from './activity.ts';
+import {
+  decay, energy, feedLive, hitGroup, isResting, MASTER_FLOOR_DB, masterDb, onActivity, REST, runActivity,
+  setLevels, setMaster,
+} from './activity.ts';
 
 // A scheduler we drive by hand, standing in for the browser.
 const queue = new Map<number, (t: number) => void>();
@@ -63,6 +66,35 @@ test('the loop sleeps at rest, wakes on a hit and sleeps again', () => {
 
   unsubscribe();
   stop();
+});
+
+test('a level feed raises channel energy to the louder value and marks the feed live', () => {
+  energy.fill(0);
+  assert.equal(feedLive(performance.now() + 10_000), false);
+  energy[1] = 0.5;
+  setLevels([0.2, 0.1, 0.9, 0, 0, 0, 0, 0.3]);
+  assert.deepEqual([...energy].map((v) => Number(v.toFixed(2))), [0.2, 0.5, 0.9, 0, 0, 0, 0, 0.3]);
+  const now = performance.now();
+  assert.equal(feedLive(now), true);
+  assert.equal(feedLive(now + 999), true);
+  assert.equal(feedLive(now + 1001), false, 'no frame for a second: hit-based activity takes over again');
+  energy.fill(0);
+  queue.clear();
+});
+
+test('master levels follow the feed, fall 36 dB per second and rest at the floor', () => {
+  masterDb[0] = -100; masterDb[1] = -100;
+  setMaster([-6, -20]);
+  assert.deepEqual([masterDb[0], masterDb[1]], [-6, -20]);
+  setMaster([-30, -10]);
+  assert.deepEqual([masterDb[0], masterDb[1]], [-6, -10], 'a louder reading wins, a quieter one is ignored');
+  decay(100);
+  assert.ok(Math.abs(masterDb[0] - (-6 - 3.6)) < 1e-4);
+  assert.equal(isResting(), false, 'a moving meter keeps the loop alive');
+  for (let i = 0; i < 40; i++) decay(100);
+  assert.deepEqual([masterDb[0], masterDb[1]], [MASTER_FLOOR_DB, MASTER_FLOOR_DB]);
+  assert.ok(isResting());
+  queue.clear();
 });
 
 test('hits are ignored for unknown channels and clamped otherwise', () => {

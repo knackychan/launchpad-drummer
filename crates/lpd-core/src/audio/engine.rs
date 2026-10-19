@@ -1,4 +1,5 @@
-use super::{LowPass, PlayParams, Sample, Voice};
+use super::taps::{self, TapSender};
+use super::{Levels, LowPass, PlayParams, Sample, Taps, Voice};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::f32::consts::{FRAC_PI_4, SQRT_2};
 use std::sync::Arc;
@@ -94,10 +95,22 @@ pub struct Engine {
     audition_attack: [usize; 2],
     audition_l: Vec<f32>,
     audition_r: Vec<f32>,
+    taps: Option<TapSender>,
 }
 
 impl Engine {
     pub fn new(sample_rate: u32) -> (Engine, Consumer<Event>) {
+        Self::build(sample_rate, None)
+    }
+
+    /// Like `new`, plus lock-free taps on the output for the telemetry display.
+    pub fn with_taps(sample_rate: u32) -> (Engine, Consumer<Event>, Taps) {
+        let (sender, taps) = taps::channel();
+        let (engine, rx) = Self::build(sample_rate, Some(sender));
+        (engine, rx, taps)
+    }
+
+    fn build(sample_rate: u32, taps: Option<TapSender>) -> (Engine, Consumer<Event>) {
         let (events, rx) = RingBuffer::new(1024);
         let groups = (0..GROUPS)
             .map(|_| GroupState {
@@ -120,6 +133,7 @@ impl Engine {
             audition_attack: [0; 2],
             audition_l: vec![0.0; MAX_BLOCK],
             audition_r: vec![0.0; MAX_BLOCK],
+            taps,
         };
         (engine, rx)
     }
@@ -285,7 +299,8 @@ impl Engine {
         }
         let any_solo = self.groups.iter().any(|g| g.params.solo);
         out.fill(0.0);
-        for g in &mut self.groups {
+        let mut levels = Levels::default();
+        for (gi, g) in self.groups.iter_mut().enumerate() {
             let p = g.params;
             if p.mute || (any_solo && !p.solo) {
                 continue;
@@ -293,10 +308,15 @@ impl Engine {
             let angle = (p.pan.clamp(-1.0, 1.0) + 1.0) * FRAC_PI_4;
             let gl = angle.cos() * SQRT_2 * p.gain;
             let gr = angle.sin() * SQRT_2 * p.gain;
+            let mut peak = 0.0f32;
             for i in 0..n {
-                out[2 * i] += g.lp_l.process(g.buf_l[i]) * gl;
-                out[2 * i + 1] += g.lp_r.process(g.buf_r[i]) * gr;
+                let l = g.lp_l.process(g.buf_l[i]) * gl;
+                let r = g.lp_r.process(g.buf_r[i]) * gr;
+                out[2 * i] += l;
+                out[2 * i + 1] += r;
+                peak = peak.max(l.abs()).max(r.abs());
             }
+            levels.groups[gi] = peak;
         }
         let attack_frames = self.frames_for(RESTART_FADE_MS).max(1);
         for (slot, voice) in self.auditions.iter_mut().enumerate() {
@@ -316,6 +336,18 @@ impl Engine {
         }
         for s in out.iter_mut() {
             *s = soft_clip(*s * self.master_gain);
+        }
+        if let Some(taps) = &mut self.taps {
+            // A full queue drops the rest of the block; the reader catches up next time.
+            let mut scope_open = true;
+            for frame in out.chunks_exact(2) {
+                levels.master[0] = levels.master[0].max(frame[0].abs());
+                levels.master[1] = levels.master[1].max(frame[1].abs());
+                if scope_open {
+                    scope_open = taps.scope.push((frame[0] + frame[1]) * 0.5).is_ok();
+                }
+            }
+            let _ = taps.levels.push(levels);
         }
     }
 }

@@ -602,7 +602,7 @@ Task 7 verification (2026-10-19): `padAriaLabel` test (the three plan examples) 
 
 ## Phase C — Audio and telemetry
 
-### Task 8: Engine taps, FFT, telemetry stream, dropout counter
+### Task 8: Engine taps, FFT, telemetry stream, dropout counter — DONE
 
 **Purpose.** UI spec 4.8 and 7.3 "Telemetry stream"; engine spec 9 dropouts.
 
@@ -662,7 +662,9 @@ pub fn to_dbfs(x: f32) -> f32;   // 20·log10(x), floor −100
 
 **Do not:** compute the FFT on the audio thread; send telemetry while the window is hidden or on another screen; change the telemetry look.
 
-**Done when:** [ ] tests first → PASS; [ ] full verification + build; commit `feat: telemetry stream from engine taps, FFT and dropout counter`.
+**Done when:** [x] tests first → PASS; [x] full verification + build; commit `feat: telemetry stream from engine taps, FFT and dropout counter`.
+
+Task 8 verification (2026-10-19): written first and RED (missing items): `audio_fft.rs` (5), `audio_taps.rs` (6), `no_alloc.rs` tapped case incl. both queues full, `is_dropout` unit test, `src-tauri/tests/telemetry.rs` (7: frame shape, 3-decimal rounding, feed off drains and resets peaks, peak max-then-reset, dropout counter/reset/age), TS `telemetry.test.ts`, `activity.test.ts` (setLevels, master fall) and `status.test.ts` (dropoutRecent). fmt clean; cargo test --workspace all passed; npm test 52 passed; npm run check 0 errors/0 warnings; npm run build passed. Browser preview (Chrome, synthetic `pushFrame` calls at 60 Hz, since there is no engine in the preview): scope trace with afterglow, 28 coloured bars with caps, `PEAK 1.2 kHz`, orbit radar, master meters with `PK −2.0 dB`, group and master mixer fills all move; with zero frames the scope shows `STANDBY · PLAY A PAD` after 500 ms, meters fall to nothing and `PK −∞`; reload without a feed shows the old STANDBY drawing, no console errors. Deviations/notes: `trigger_index` searches `1..len/2` as written in the contract (so 1024 samples always follow it); the DC bin is ignored for `peakHz`; `AudioStats` also exposes `dropouts()`, `record_dropout(now)`, `reset()` and `last_dropout_ago_ms(now)` (None when the count is 0); `AppState` gained `taps`, `set_taps`, `set_audio_stats`, `set_telemetry`, `reset_dropouts`; the lib-side feed state lives in `src/lib/telemetry.ts` (subscribed in App so the mixer fills work while the telemetry column is hidden), `activity.ts` gained `setLevels`, `setMaster`, `masterDb`, `feedLive`; spectrum bars fall by ×0.88 per frame (mockup law) for "~12 % per frame". `DROPS {n}` already existed in the status strip; the AUDIO lamp is amber while `lastDropoutAgoMs` + time since the status arrived is under 10 s (re-evaluated every second), and the same flag feeds `dropoutRecent`. Task 9 still has to swap `taps` and `stats` on a stream restart and send `audio-status` with `state: "lost"`. Not verified here: real audio device (dropout counting, taps under real callbacks, telemetry events through Tauri), `set_telemetry` toggling in the desktop app, the reduced-motion afterglow rule (no OS media query), feel of the meters.
 
 ### Task 9: Audio controller, SETUP › AUDIO, SETUP as racks
 

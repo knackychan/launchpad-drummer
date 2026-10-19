@@ -49,7 +49,10 @@ export interface SetModel {
 }
 
 export interface AudioStatus {
+  /** Output callbacks that arrived late since the stream started (or the last reset). */
   dropouts?: number;
+  /** Milliseconds since the last dropout when the status was read; null when none. */
+  lastDropoutAgoMs?: number | null;
   state: string;
   deviceName: string;
   sampleRate: number;

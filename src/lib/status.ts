@@ -25,6 +25,14 @@ export function audioLabel(audio: AudioStatus | null): string {
   return audio?.state === 'error' ? 'AUDIO ERROR' : 'AUDIO STOPPED';
 }
 
+/** A dropout counts as recent for this long; the AUDIO lamp turns amber and the notice shows. */
+export const DROPOUT_RECENT_MS = 10_000;
+
+/** `lastDropoutAgoMs` from the backend, plus the time since that status arrived. */
+export function dropoutRecent(lastDropoutAgoMs: number | null | undefined, sinceStatusMs: number): boolean {
+  return lastDropoutAgoMs != null && lastDropoutAgoMs + sinceStatusMs < DROPOUT_RECENT_MS;
+}
+
 export interface NoticeInputs {
   tauri: boolean;
   deviceState: string;
