@@ -41,6 +41,7 @@ fn fake_starter(fail_on: Option<&'static str>) -> (launchpad_drummer_lib::audio:
             },
             taps,
             stats: Arc::new(AudioStats::new()),
+            trash: None,
         })
     });
     (starter, Fake { prefs, queues })
@@ -69,14 +70,20 @@ fn start_swaps_queues_taps_and_status_and_resends_the_mixer() {
 
     let mut queue = fake.queues.recv().unwrap();
     let mut mixer = 0;
+    let mut keys = 0;
     while let Ok(c) = queue.pop() {
-        assert!(matches!(
-            c,
-            Command::SetGroup { .. } | Command::SetMasterGain(_)
-        ));
-        mixer += 1;
+        match c {
+            Command::SetGroup { .. } | Command::SetMasterGain(_) => mixer += 1,
+            // The keys' sound, route and wheels follow the mixer (Task 15).
+            Command::KeysSound(_)
+            | Command::KeysRoute { .. }
+            | Command::KeysPitch(_)
+            | Command::KeysMod(_) => keys += 1,
+            other => panic!("unexpected {other:?}"),
+        }
     }
     assert_eq!(mixer, 9);
+    assert_eq!(keys, 4);
 }
 
 #[test]
@@ -169,6 +176,7 @@ fn healthy(p: &AudioPrefs) -> AudioSystem {
         },
         taps,
         stats: Arc::new(AudioStats::new()),
+        trash: None,
     }
 }
 

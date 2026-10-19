@@ -134,3 +134,56 @@ fn audio_callback_never_allocates() {
     });
     while events.pop().is_ok() {}
 }
+
+#[test]
+fn keys_paths_never_allocate_or_free() {
+    use lpd_core::instrument::{BasicKeys, KeysSound};
+    let (mut engine, _) = Engine::new(48_000);
+    // Created before the guard, as the host does.
+    let replacement: Box<dyn lpd_core::instrument::Instrument> = Box::new(BasicKeys::new(48_000));
+    let mut out = [0.0; 2048];
+    assert_no_alloc(|| {
+        engine.handle(Command::KeysSound(KeysSound::SynthPad));
+        engine.handle(Command::KeysRoute {
+            gain: 0.5,
+            group: Some(3),
+        });
+        engine.handle(Command::KeysNoteOn {
+            note: 60,
+            velocity: 100,
+        });
+        engine.handle(Command::KeysPitch(1.5));
+        engine.handle(Command::KeysMod(0.7));
+        for _ in 0..4 {
+            engine.render(&mut out);
+        }
+        engine.handle(Command::KeysNoteOff { note: 60 });
+        engine.handle(Command::KeysRoute {
+            gain: 0.5,
+            group: None,
+        });
+        engine.handle(Command::KeysNoteOn {
+            note: 64,
+            velocity: 90,
+        });
+        engine.render(&mut out);
+        engine.handle(Command::KeysAllOff);
+        engine.handle(Command::SetInstrument(replacement));
+        engine.render(&mut out);
+    });
+}
+
+#[test]
+fn a_full_trash_queue_leaks_instead_of_freeing() {
+    use lpd_core::instrument::{BasicKeys, Instrument};
+    let (mut engine, _) = Engine::new(48_000);
+    // Nobody collects: the queue (capacity 4) fills up; the fifth and later boxes are leaked.
+    let mut boxes: Vec<Option<Box<dyn Instrument>>> = (0..8)
+        .map(|_| Some(Box::new(BasicKeys::new(48_000)) as Box<dyn Instrument>))
+        .collect();
+    assert_no_alloc(|| {
+        for slot in boxes.iter_mut() {
+            engine.handle(Command::SetInstrument(slot.take().unwrap()));
+        }
+    });
+}

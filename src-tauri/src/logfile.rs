@@ -12,6 +12,9 @@ const KEEP: u32 = 3;
 struct Target {
     dir: PathBuf,
     limit: u64,
+    /// Tests only: the thread whose lines are logged, so other tests running in parallel cannot
+    /// write into the file a test is checking. `None` in the app: every thread logs.
+    owner: Option<std::thread::ThreadId>,
 }
 
 static TARGET: Mutex<Option<Target>> = Mutex::new(None);
@@ -23,7 +26,8 @@ pub fn init(dir: PathBuf) {
 
 fn init_with_limit(dir: PathBuf, limit: u64) {
     let _ = std::fs::create_dir_all(&dir);
-    *TARGET.lock().unwrap_or_else(PoisonError::into_inner) = Some(Target { dir, limit });
+    let owner = cfg!(test).then(|| std::thread::current().id());
+    *TARGET.lock().unwrap_or_else(PoisonError::into_inner) = Some(Target { dir, limit, owner });
 }
 
 /// Append `[YYYY-MM-DD HH:MM:SS] line`. Does nothing before `init`; write errors are ignored.
@@ -34,6 +38,12 @@ pub fn log(line: impl AsRef<str>) {
     let Some(target) = guard.as_ref() else {
         return;
     };
+    if target
+        .owner
+        .is_some_and(|o| o != std::thread::current().id())
+    {
+        return;
+    }
     let path = target.dir.join("lpd.log");
     if std::fs::metadata(&path).is_ok_and(|m| m.len() >= target.limit) {
         rotate(target);

@@ -230,8 +230,8 @@ pub fn apply_mixer_param(mixer: &mut Mixer, id: &str, value: ParamValue) -> bool
     }
 }
 
-/// Apply a set-level parameter (`bank.*`, `seq.bpm`, `seq.swing`). The keys parameters are
-/// applied by their own task. True when the value changed.
+/// Apply a set-level parameter (`bank.*`, `seq.bpm`, `seq.swing`, `keys.volume`). True when the
+/// value changed.
 pub fn apply_set_param(set: &mut Set, id: &str, value: ParamValue) -> bool {
     match (parse_id(id), value) {
         (Some(ParamId::SeqBpm), ParamValue::Continuous(v)) => {
@@ -239,6 +239,9 @@ pub fn apply_set_param(set: &mut Set, id: &str, value: ParamValue) -> bool {
         }
         (Some(ParamId::SeqSwing), ParamValue::Continuous(v)) => {
             replace(&mut set.pattern.swing, v.clamp(50.0, 75.0))
+        }
+        (Some(ParamId::KeysVolume), ParamValue::Continuous(v)) => {
+            replace(&mut set.keys.volume_db, v.clamp(-40.0, 6.0))
         }
         (Some(ParamId::Bank(i, what)), value) => {
             let Some(bank) = set.banks.get_mut(i) else {

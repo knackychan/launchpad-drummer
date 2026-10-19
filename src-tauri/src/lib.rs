@@ -73,6 +73,10 @@ pub fn run() {
                 // is read. It starts in the background (opening a device can take seconds); the
                 // UI hears about it through `audio-status`, and a failure shows as "error" in SETUP.
                 let _ = app_handle.set(app.handle().clone());
+                let keys_app = app.handle().clone();
+                app_state.set_keys_notifier(Arc::new(move |status| {
+                    let _ = keys_app.emit("keys-status", status.clone());
+                }));
                 audio_controller.start_detached(app_state.get_config().audio);
                 launchpad::start(app.handle().clone(), app_state.clone());
                 devices::start(app.handle().clone(), app_state.clone());
@@ -146,7 +150,12 @@ pub fn run() {
             commands::seq_rec,
             commands::seq_update,
             commands::seq_add_lane,
-            commands::seq_audition_step
+            commands::seq_audition_step,
+            commands::keys_status,
+            commands::keys_note,
+            commands::keys_pitch,
+            commands::keys_mod,
+            commands::set_keys
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Launchpad Drummer");

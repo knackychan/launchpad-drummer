@@ -21,6 +21,7 @@ use crate::store::{prepare_sample, KitManager, LoadedKit};
 use lpd_core::audio::{Command, Event, Sample, Taps};
 use lpd_core::devices::launchpad::LpEvent;
 use lpd_core::devices::lcxl::LcxlEvent;
+use lpd_core::instrument::{BasicKeys, Instrument, KeysSettings, SoundFontKeys};
 use lpd_core::kit::learn;
 use lpd_core::kit::{self, History, Pad, Set};
 use rtrb::{Consumer, Producer};
@@ -83,6 +84,20 @@ pub struct KeysStatus {
     pub name: String,
     pub error: Option<String>,
 }
+
+impl KeysStatus {
+    pub fn builtin() -> Self {
+        KeysStatus {
+            engine: "builtin".into(),
+            name: "BUILT-IN".into(),
+            error: None,
+        }
+    }
+}
+
+/// Called when the keys engine changes without a command asking for it (a SoundFont reloaded
+/// after the audio stream restarted).
+pub type KeysNotifier = Arc<dyn Fn(&KeysStatus) + Send + Sync>;
 
 /// The app config and the file it lives in (none in tests until `restore`).
 #[derive(Default)]
@@ -175,6 +190,9 @@ pub struct AppState {
     mixer_dirty: Arc<AtomicBool>,
     /// A learned control changed the set (bank parameters) since `set-changed` was last emitted.
     set_dirty: Arc<AtomicBool>,
+    /// Which engine plays the keys, and the hook that tells the UI when a background reload changes it.
+    keys_status: Arc<Mutex<KeysStatus>>,
+    keys_notifier: Arc<Mutex<Option<KeysNotifier>>>,
     /// The sequencer clock state (shared with the router's record hook and the clock thread).
     seq: Arc<Mutex<SeqState>>,
     saver: Arc<Mutex<Saver>>,
@@ -222,6 +240,8 @@ impl AppState {
             wheel: Arc::default(),
             mixer_dirty: Arc::new(AtomicBool::new(false)),
             set_dirty: Arc::new(AtomicBool::new(false)),
+            keys_status: Arc::new(Mutex::new(KeysStatus::builtin())),
+            keys_notifier: Arc::default(),
             seq,
             saver: Arc::new(Mutex::new(Saver::new())),
             save_gate: Arc::new(Mutex::new(())),
@@ -494,6 +514,9 @@ impl AppState {
             if changed {
                 self.set_dirty.store(true, Ordering::SeqCst);
                 touched = true;
+                if id.starts_with("keys.") {
+                    r.send_keys();
+                }
             }
         }
         drop(r);
@@ -659,12 +682,14 @@ impl AppState {
     /// Housekeeping from the device thread: voice events in, freed samples out. The samples are
     /// dropped here, after the router lock is released, never on the audio thread.
     pub fn maintain(&self) {
-        let reclaimed = {
+        let (reclaimed, trash) = {
             let mut r = lock(&self.router);
             r.poll_audio_events();
-            r.drain_reclaimable()
+            (r.drain_reclaimable(), r.drain_trash())
         };
         drop(reclaimed);
+        // Replaced keys instruments (a SoundFont synth is big) are freed here, not on the audio thread.
+        drop(trash);
     }
 
     pub fn set_audio_status(&self, status: AudioStatus) {
@@ -729,7 +754,80 @@ impl AppState {
         self.set_audio_stats(stats);
         // Pad lights followed voices of the old stream.
         lock(&self.painter).invalidate();
+        self.reload_soundfont();
         self.get_audio_status()
+    }
+
+    /// The new engine starts with the built-in synth; a configured SoundFont is loaded again for
+    /// its sample rate, in the background.
+    fn reload_soundfont(&self) {
+        let Some(path) = self.get_config().soundfont else {
+            *lock(&self.keys_status) = KeysStatus::builtin();
+            return;
+        };
+        let state = self.clone();
+        std::thread::spawn(move || {
+            let status = state.load_keys_instrument(Some(&path));
+            if let Some(notify) = lock(&state.keys_notifier).clone() {
+                notify(&status);
+            }
+        });
+    }
+
+    /// The router takes the instrument-trash queue of the new engine.
+    pub fn install_trash(&self, trash: Option<Consumer<Box<dyn Instrument>>>) {
+        lock(&self.router).set_trash(trash);
+    }
+
+    pub fn set_keys_notifier(&self, notifier: KeysNotifier) {
+        *lock(&self.keys_notifier) = Some(notifier);
+    }
+
+    pub fn keys_status(&self) -> KeysStatus {
+        lock(&self.keys_status).clone()
+    }
+
+    /// Build the keys instrument (the built-in synth, or the SoundFont at `path`) for the current
+    /// output rate and hand it to the engine. A load error keeps the current instrument. Slow:
+    /// call it off the UI thread. Without a running stream nothing is loaded (the engine does
+    /// it when the stream starts).
+    pub fn load_keys_instrument(&self, path: Option<&str>) -> KeysStatus {
+        let rate = self.sample_rate();
+        let status = match path {
+            None => {
+                if rate > 0 {
+                    lock(&self.router).set_instrument(Box::new(BasicKeys::new(rate)));
+                }
+                KeysStatus::builtin()
+            }
+            Some(_) if rate == 0 => KeysStatus::builtin(),
+            Some(p) => match SoundFontKeys::load(Path::new(p), rate) {
+                Ok(keys) => {
+                    lock(&self.router).set_instrument(Box::new(keys));
+                    KeysStatus {
+                        engine: "soundfont".into(),
+                        name: Path::new(p)
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().to_uppercase())
+                            .unwrap_or_else(|| "SOUNDFONT".into()),
+                        error: None,
+                    }
+                }
+                Err(e) => {
+                    let file = Path::new(p)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| p.to_string());
+                    logfile::log(format!("SoundFont {p}: {e:#}"));
+                    KeysStatus {
+                        error: Some(format!("Couldn't load {file}: {e:#}")),
+                        ..self.keys_status()
+                    }
+                }
+            },
+        };
+        *lock(&self.keys_status) = status.clone();
+        status
     }
 
     /// The stream could not be (re)started: no taps, fresh counters, status "error".
@@ -1161,14 +1259,40 @@ impl AppState {
         self.update_config(|c| c.library_dir = dir)
     }
 
-    /// Remembers the `.sf2` file. The keys instrument stays built-in until Task 15.
+    /// Remembers the `.sf2` file and loads it (slow: run it off the UI thread). `None` goes back
+    /// to the built-in synth.
     pub fn set_soundfont(&self, path: Option<String>) -> Result<KeysStatus, String> {
-        self.update_config(|c| c.soundfont = path)?;
-        Ok(KeysStatus {
-            engine: "builtin".into(),
-            name: "BUILT-IN".into(),
-            error: None,
-        })
+        self.update_config(|c| c.soundfont = path.clone())?;
+        Ok(self.load_keys_instrument(path.as_deref()))
+    }
+
+    /// A key played on the screen: the engine and the mirror (`keys-note`, for the caller to emit).
+    pub fn keys_note(&self, note: u8, velocity: u8, on: bool) -> UiEvent {
+        lock(&self.router).keys_note(note, velocity, on);
+        UiEvent::KeysNote {
+            note,
+            velocity: if on { velocity } else { 0 },
+            on,
+        }
+    }
+
+    /// The screen's pitch wheel, −1..1.
+    pub fn keys_pitch(&self, value: f32) {
+        lock(&self.router).keys_pitch_value(value);
+    }
+
+    pub fn keys_mod(&self, value: f32) {
+        lock(&self.router).keys_mod_value(value);
+    }
+
+    /// The keys settings are an undoable edit (a slider drag is one step); the engine follows.
+    pub fn set_keys(&self, settings: KeysSettings) -> Set {
+        let set = self.edit(Some("keys"), |set| {
+            set.keys = settings;
+            set.clone()
+        });
+        lock(&self.router).send_keys();
+        set
     }
 
     /// Pads whose sample failed to load or is not loaded: bank, then top row first, then x.
@@ -1772,6 +1896,151 @@ mod tests {
         while rx.pop().is_ok() {}
         state.seq_audition_step(0, 0, 0);
         assert!(rx.pop().is_err());
+    }
+
+    fn with_audio_rate(state: &AppState, rate: u32) {
+        state.set_audio_status(AudioStatus {
+            state: "running".into(),
+            sample_rate: rate,
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn a_missing_soundfont_keeps_the_instrument_and_reports_the_error() {
+        let (state, mut rx) = app();
+        with_audio_rate(&state, 48_000);
+        while rx.pop().is_ok() {}
+        let status = state
+            .set_soundfont(Some("does-not-exist.sf2".into()))
+            .unwrap();
+        assert_eq!(status.engine, "builtin");
+        assert_eq!(status.name, "BUILT-IN");
+        let error = status.error.clone().expect("an error line");
+        assert!(
+            error.starts_with("Couldn't load does-not-exist.sf2: "),
+            "{error}"
+        );
+        assert_eq!(state.keys_status(), status);
+        assert!(rx.pop().is_err(), "no instrument was sent");
+        assert_eq!(
+            state.get_config().soundfont.as_deref(),
+            Some("does-not-exist.sf2")
+        );
+    }
+
+    #[test]
+    fn clearing_the_soundfont_sends_a_fresh_builtin_instrument() {
+        let (state, mut rx) = app();
+        with_audio_rate(&state, 48_000);
+        while rx.pop().is_ok() {}
+        let status = state.set_soundfont(None).unwrap();
+        assert_eq!(status, KeysStatus::builtin());
+        let mut sent_instrument = false;
+        while let Ok(c) = rx.pop() {
+            sent_instrument |= matches!(c, Command::SetInstrument(_));
+        }
+        assert!(sent_instrument);
+    }
+
+    #[test]
+    fn set_keys_is_one_undo_step_per_drag_and_reaches_the_engine() {
+        let (state, mut rx) = app();
+        while rx.pop().is_ok() {}
+        for volume in [-10.0, -12.0, -14.0] {
+            let set = state.set_keys(KeysSettings {
+                sound: lpd_core::instrument::KeysSound::Organ,
+                volume_db: volume,
+                output: Some(2),
+            });
+            assert_eq!(set.keys.volume_db, volume);
+        }
+        let mut routes = 0;
+        while let Ok(c) = rx.pop() {
+            if let Command::KeysRoute { group: Some(2), .. } = c {
+                routes += 1;
+            }
+        }
+        assert_eq!(routes, 3);
+        let undone = state.undo().unwrap();
+        assert_eq!(
+            undone.keys,
+            KeysSettings::default(),
+            "one step undoes the drag"
+        );
+    }
+
+    #[test]
+    fn screen_keys_reach_the_engine_and_tell_the_mirror() {
+        let (state, mut rx) = app();
+        while rx.pop().is_ok() {}
+        let on = state.keys_note(60, 100, true);
+        assert_eq!(
+            on,
+            UiEvent::KeysNote {
+                note: 60,
+                velocity: 100,
+                on: true
+            }
+        );
+        let off = state.keys_note(60, 100, false);
+        assert_eq!(
+            off,
+            UiEvent::KeysNote {
+                note: 60,
+                velocity: 0,
+                on: false
+            }
+        );
+        state.keys_pitch(0.5);
+        state.keys_mod(2.0);
+        let sent: Vec<Command> = std::iter::from_fn(|| rx.pop().ok()).collect();
+        assert!(matches!(
+            sent[0],
+            Command::KeysNoteOn {
+                note: 60,
+                velocity: 100
+            }
+        ));
+        assert!(matches!(sent[1], Command::KeysNoteOff { note: 60 }));
+        assert!(matches!(sent[2], Command::KeysPitch(p) if (p - 1.0).abs() < 1e-6));
+        assert!(
+            matches!(sent[3], Command::KeysMod(m) if m == 1.0),
+            "clamped to 1"
+        );
+    }
+
+    #[test]
+    fn a_learned_keys_volume_edits_the_set_and_the_engine_follows() {
+        let (state, mut rx) = app();
+        state.arm_learn(LearnTarget::Param("keys.volume".into()));
+        state.on_midi(
+            "K",
+            "other",
+            MidiMsg::Cc {
+                ch: 0,
+                cc: 20,
+                value: 0,
+            },
+            false,
+        );
+        while rx.pop().is_ok() {}
+        state.on_midi(
+            "K",
+            "other",
+            MidiMsg::Cc {
+                ch: 0,
+                cc: 20,
+                value: 127,
+            },
+            false,
+        );
+        assert_eq!(state.get_current_set().keys.volume_db, 6.0);
+        let mut routed = false;
+        while let Ok(c) = rx.pop() {
+            routed |= matches!(c, Command::KeysRoute { gain, .. } if gain > 1.9);
+        }
+        assert!(routed);
     }
 
     #[test]

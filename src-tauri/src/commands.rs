@@ -7,6 +7,7 @@ use crate::startup::Startup;
 use crate::state::{
     AppState, DropReport, HistoryState, InputMode, KeysStatus, MissingPad, OpenResult, SamplePeaks,
 };
+use lpd_core::instrument::KeysSettings;
 use lpd_core::kit::{Group, LightModes, Pad, Set};
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -170,12 +171,51 @@ pub(crate) async fn set_midi_role(
     Ok(())
 }
 
+/// Load a General MIDI `.sf2` as the keys sound (or `null`: back to the built-in synth).
 #[tauri::command]
 pub(crate) async fn set_soundfont(
     path: Option<String>,
     state: State<'_, AppState>,
+    app: AppHandle,
 ) -> Result<KeysStatus, String> {
-    worker(&state, move |s| s.set_soundfont(path)).await
+    let status = worker(&state, move |s| s.set_soundfont(path)).await?;
+    let _ = app.emit("keys-status", status.clone());
+    Ok(status)
+}
+
+#[tauri::command]
+pub(crate) fn keys_status(state: State<'_, AppState>) -> KeysStatus {
+    state.keys_status()
+}
+
+/// A key played on the screen. Also emits `keys-note` so every mirror of the keybed shows it.
+#[tauri::command]
+pub(crate) fn keys_note(
+    note: u8,
+    velocity: u8,
+    on: bool,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) {
+    let event = state.keys_note(note.min(127), velocity.min(127), on);
+    let _ = app.emit(event.name(), event.payload());
+}
+
+/// The screen's pitch wheel, −1..1 (±2 semitones).
+#[tauri::command]
+pub(crate) fn keys_pitch(value: f32, state: State<'_, AppState>) {
+    state.keys_pitch(value);
+}
+
+/// The screen's mod wheel, 0..1.
+#[tauri::command]
+pub(crate) fn keys_mod(value: f32, state: State<'_, AppState>) {
+    state.keys_mod(value);
+}
+
+#[tauri::command]
+pub(crate) fn set_keys(settings: KeysSettings, state: State<'_, AppState>) -> Set {
+    state.set_keys(settings)
 }
 
 #[tauri::command]

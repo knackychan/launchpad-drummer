@@ -16,6 +16,9 @@ pub struct Set {
     /// The step sequencer's pattern (Task 13); old files get the default.
     #[serde(default)]
     pub pattern: crate::seq::Pattern,
+    /// The keys instrument's sound, level and output (Task 15).
+    #[serde(default)]
+    pub keys: crate::instrument::KeysSettings,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -150,6 +153,7 @@ impl Set {
             },
             learn: Vec::new(),
             pattern: crate::seq::Pattern::default(),
+            keys: crate::instrument::KeysSettings::default(),
         }
     }
 

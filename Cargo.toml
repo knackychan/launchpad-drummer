@@ -13,3 +13,4 @@ symphonia = { version = "0.5", features = ["mp3"] }
 hound = "3.5"
 tempfile = "3"
 assert_no_alloc = "1.1"
+rustysynth = "1"

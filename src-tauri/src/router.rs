@@ -6,6 +6,7 @@ use crate::sequencer::{Fired, SeqState};
 use lpd_core::audio::{db_to_gain, fader_gain, Command, Event, Sample};
 use lpd_core::devices::launchpad::LpEvent;
 use lpd_core::devices::lcxl::{self, LcxlEvent};
+use lpd_core::instrument::Instrument;
 use lpd_core::kit::learn::{self, Binding, LearnKind, ParamValue, Target};
 use lpd_core::kit::{self, Set};
 use lpd_core::seq::VEL_ACCENT;
@@ -131,6 +132,8 @@ pub struct Router {
     last_cc: Vec<(String, u8, u8)>,
     /// The sequencer clock state, shared with the clock thread (a leaf below the router lock).
     seq: Arc<Mutex<SeqState>>,
+    /// Replaced keys instruments coming back from the audio thread; dropped off it (see `drain_trash`).
+    trash: Option<Consumer<Box<dyn Instrument>>>,
 }
 
 impl Router {
@@ -141,7 +144,7 @@ impl Router {
         audio_rx: Consumer<Event>,
     ) -> Self {
         Self::send_mixer_commands(&set, &mut audio_tx);
-        Self {
+        let mut router = Self {
             set,
             samples,
             retired: Vec::new(),
@@ -158,7 +161,10 @@ impl Router {
             learn_ignored_sent: false,
             last_cc: Vec::new(),
             seq: Arc::default(),
-        }
+            trash: None,
+        };
+        router.send_keys();
+        router
     }
 
     /// The sequencer state, for `AppState` and the clock thread.
@@ -296,7 +302,7 @@ impl Router {
         set: Set,
         samples: HashMap<String, Arc<Sample>>,
     ) -> Result<(), Box<Rejected>> {
-        let needed = 1 + set.mixer.groups.len() + 1;
+        let needed = 1 + set.mixer.groups.len() + 1 + 2;
         if self.audio_tx.slots() < needed {
             return Err(Box::new(Rejected {
                 reason: "The audio engine is busy. Try again in a moment.".into(),
@@ -308,6 +314,7 @@ impl Router {
         Self::send_mixer_commands(&set, &mut self.audio_tx);
         self.held.clear();
         self.set = set;
+        self.send_keys();
         let old = std::mem::replace(&mut self.samples, samples);
         self.retire(old.into_values());
         Ok(())
@@ -321,7 +328,72 @@ impl Router {
         self.audio_rx = rx;
         self.forget_voices();
         self.send_mixer();
-        // keys: Task 15 (re-send the keys settings to the new engine here)
+        self.send_keys();
+        self.send_wheels();
+    }
+
+    /// The consumer of instruments the audio thread replaced (from the new stream's engine).
+    pub fn set_trash(&mut self, trash: Option<Consumer<Box<dyn Instrument>>>) {
+        self.trash = trash;
+    }
+
+    /// Replaced instruments, for the caller to drop once the router lock is released (a SoundFont
+    /// synth is big).
+    pub fn drain_trash(&mut self) -> Vec<Box<dyn Instrument>> {
+        let mut out = Vec::new();
+        if let Some(trash) = &mut self.trash {
+            while let Ok(old) = trash.pop() {
+                out.push(old);
+            }
+        }
+        out
+    }
+
+    /// Swap the engine's keys instrument (built off the audio thread). The sound and the wheels
+    /// are sent again so the new one starts in the current state.
+    pub fn set_instrument(&mut self, instrument: Box<dyn Instrument>) {
+        // A full queue hands the box back; it is dropped here, on the router thread.
+        let _ = self.audio_tx.push(Command::SetInstrument(instrument));
+        self.send_keys();
+        self.send_wheels();
+    }
+
+    /// The keys' sound, level and output from the set to the engine.
+    pub fn send_keys(&mut self) {
+        let k = self.set.keys;
+        let _ = self.audio_tx.push(Command::KeysSound(k.sound));
+        let _ = self.audio_tx.push(Command::KeysRoute {
+            gain: db_to_gain(k.volume_db),
+            group: k.output,
+        });
+    }
+
+    fn send_wheels(&mut self) {
+        let _ = self
+            .audio_tx
+            .push(Command::KeysPitch(self.keys_pitch * 2.0));
+        let _ = self.audio_tx.push(Command::KeysMod(self.keys_mod));
+    }
+
+    /// A key played on the screen.
+    pub fn keys_note(&mut self, note: u8, velocity: u8, on: bool) {
+        let _ = self.audio_tx.push(if on {
+            Command::KeysNoteOn { note, velocity }
+        } else {
+            Command::KeysNoteOff { note }
+        });
+    }
+
+    /// The screen's pitch wheel, −1..1 (±2 semitones).
+    pub fn keys_pitch_value(&mut self, value: f32) {
+        let _ = self
+            .audio_tx
+            .push(Command::KeysPitch(value.clamp(-1.0, 1.0) * 2.0));
+    }
+
+    /// The screen's mod wheel, 0..1.
+    pub fn keys_mod_value(&mut self, value: f32) {
+        let _ = self.audio_tx.push(Command::KeysMod(value.clamp(0.0, 1.0)));
     }
 
     /// The engine that owned the voices is gone: drop voice counts and holds.
@@ -365,6 +437,7 @@ impl Router {
     /// current mixer values (`restore_keeping_mixer`), so nothing is sent to the engine.
     pub fn install_set(&mut self, set: Set) {
         self.set = set;
+        self.send_keys();
     }
 
     /// Push every group and the master gain to the engine.
@@ -547,22 +620,30 @@ impl Router {
 
     fn keys_event(&mut self, msg: MidiMsg) -> Option<UiEvent> {
         match msg {
-            MidiMsg::NoteOn { note, vel, .. } => Some(UiEvent::KeysNote {
-                note,
-                velocity: vel,
-                on: true,
-            }),
-            MidiMsg::NoteOff { note, .. } => Some(UiEvent::KeysNote {
-                note,
-                velocity: 0,
-                on: false,
-            }),
+            MidiMsg::NoteOn { note, vel, .. } => {
+                self.keys_note(note, vel, true);
+                Some(UiEvent::KeysNote {
+                    note,
+                    velocity: vel,
+                    on: true,
+                })
+            }
+            MidiMsg::NoteOff { note, .. } => {
+                self.keys_note(note, 0, false);
+                Some(UiEvent::KeysNote {
+                    note,
+                    velocity: 0,
+                    on: false,
+                })
+            }
             MidiMsg::PitchBend { value, .. } => {
                 self.keys_pitch = f32::from(value) / 8192.0;
+                self.keys_pitch_value(self.keys_pitch);
                 Some(self.wheel_event())
             }
             MidiMsg::Cc { cc: 1, value, .. } => {
                 self.keys_mod = f32::from(value) / 127.0;
+                self.keys_mod_value(self.keys_mod);
                 Some(self.wheel_event())
             }
             MidiMsg::Cc { .. } => None,
@@ -614,8 +695,8 @@ impl Router {
     }
 
     /// A CC bound to parameter `id`. Group and master values apply here (no history); `bank.*`
-    /// goes back in the outcome, as do the sequencer's tempo and swing; `seq.play` starts or stops the
-    /// clock; the keys parameters are applied by their own task (15) and do nothing yet.
+    /// goes back in the outcome, as do the sequencer's tempo and swing and the keys volume; `seq.play` starts or stops the
+    /// clock; `keys.mod` moves the mod wheel, `keys.volume` is a set edit.
     fn apply_learned_cc(&mut self, port: &str, cc: u8, value: u8, id: &str, out: &mut MidiOutcome) {
         let Some(param) = learn::param_value(id, value) else {
             return;
@@ -639,6 +720,12 @@ impl Router {
                 self.send_group(group);
                 out.mixer_changed = true;
             }
+        } else if id == "keys.mod" {
+            if let ParamValue::Continuous(v) = param {
+                self.keys_mod = v;
+                self.keys_mod_value(v);
+                out.event = Some(self.wheel_event());
+            }
         } else if id == "seq.play" {
             let params = crate::sequencer::Params::from(&self.set.pattern);
             let mut s = self.seq.lock().unwrap_or_else(PoisonError::into_inner);
@@ -647,7 +734,7 @@ impl Router {
             } else {
                 s.start(Instant::now(), params);
             }
-        } else if id.starts_with("bank.") || matches!(id, "seq.bpm" | "seq.swing") {
+        } else if id.starts_with("bank.") || matches!(id, "seq.bpm" | "seq.swing" | "keys.volume") {
             out.set_param = Some((id.to_string(), param));
         }
     }
@@ -1430,19 +1517,137 @@ mod tests {
         assert_eq!(other, None);
     }
 
+    fn drain(rx: &mut Consumer<Command>) -> Vec<Command> {
+        let mut v = Vec::new();
+        while let Ok(c) = rx.pop() {
+            v.push(c);
+        }
+        v
+    }
+
     #[test]
-    fn midi_input_never_triggers_pads_or_audio() {
+    fn an_unbound_keys_note_plays_the_keys_not_a_pad() {
         let (mut r, mut rx) = router_with_pad(0.0, 0.0);
-        key(
-            &mut r,
-            "keys",
-            MidiMsg::NoteOn {
-                ch: 0,
-                note: 36,
-                vel: 127,
-            },
+        key(&mut r, "keys", note_on(36, 127));
+        key(&mut r, "keys", MidiMsg::NoteOff { ch: 0, note: 36 });
+        let sent = drain(&mut rx);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [
+                    Command::KeysNoteOn {
+                        note: 36,
+                        velocity: 127
+                    },
+                    Command::KeysNoteOff { note: 36 }
+                ]
+            ),
+            "{sent:?}"
         );
+    }
+
+    #[test]
+    fn a_note_bound_to_a_pad_triggers_the_pad_instead_of_the_keys() {
+        let (mut r, mut rx) = router_with_pad(0.0, 0.0);
+        r.set_mut().learn.push(bound(
+            "K",
+            LearnKind::Note,
+            36,
+            Target::Pad {
+                bank: 0,
+                x: 0,
+                y: 0,
+            },
+        ));
+        r.on_midi("K", "keys", note_on(36, 127));
+        let sent = drain(&mut rx);
+        assert!(
+            sent.iter().any(|c| matches!(c, Command::Trigger { .. })),
+            "{sent:?}"
+        );
+        assert!(
+            !sent.iter().any(|c| matches!(c, Command::KeysNoteOn { .. })),
+            "{sent:?}"
+        );
+    }
+
+    #[test]
+    fn the_wheels_reach_the_engine() {
+        let (mut r, mut rx) = router_with_pad(0.0, 0.0);
+        key(&mut r, "keys", MidiMsg::PitchBend { ch: 0, value: 4096 });
+        key(&mut r, "keys", cc_msg(1, 127));
+        let sent = drain(&mut rx);
+        assert!(
+            matches!(sent[0], Command::KeysPitch(p) if (p - 1.0).abs() < 1e-6),
+            "{sent:?}"
+        );
+        assert!(
+            matches!(sent[1], Command::KeysMod(m) if m == 1.0),
+            "{sent:?}"
+        );
+    }
+
+    #[test]
+    fn another_role_sends_nothing_to_the_engine() {
+        let (mut r, mut rx) = router_with_pad(0.0, 0.0);
+        key(&mut r, "other", note_on(36, 100));
         assert!(rx.pop().is_err());
+    }
+
+    #[test]
+    fn keys_settings_reach_the_engine_and_a_new_instrument_starts_in_the_current_state() {
+        let (mut r, mut rx) = router_with_pad(0.0, 0.0);
+        r.set_mut().keys.sound = lpd_core::instrument::KeysSound::Organ;
+        r.set_mut().keys.volume_db = -12.0;
+        r.set_mut().keys.output = Some(3);
+        r.send_keys();
+        let sent = drain(&mut rx);
+        assert!(matches!(
+            sent[0],
+            Command::KeysSound(lpd_core::instrument::KeysSound::Organ)
+        ));
+        assert!(
+            matches!(sent[1], Command::KeysRoute { gain, group: Some(3) } if (gain - db_to_gain(-12.0)).abs() < 1e-6)
+        );
+        r.set_instrument(Box::new(lpd_core::instrument::BasicKeys::new(48_000)));
+        let sent = drain(&mut rx);
+        assert!(matches!(sent[0], Command::SetInstrument(_)));
+        assert!(matches!(sent[1], Command::KeysSound(_)));
+        assert!(matches!(sent[2], Command::KeysRoute { .. }));
+        assert!(matches!(sent[3], Command::KeysPitch(_)));
+        assert!(matches!(sent[4], Command::KeysMod(_)));
+    }
+
+    #[test]
+    fn a_learned_keys_mod_moves_the_wheel() {
+        let (mut r, mut rx) = router_with_pad(0.0, 0.0);
+        r.set_mut().learn.push(bound(
+            "K",
+            LearnKind::Cc,
+            9,
+            Target::Param("keys.mod".into()),
+        ));
+        let out = r.on_midi("K", "other", cc_msg(9, 127));
+        assert_eq!(
+            out.event,
+            Some(UiEvent::KeysWheel {
+                pitch: 0.0,
+                r#mod: 1.0
+            })
+        );
+        assert!(matches!(drain(&mut rx)[..], [Command::KeysMod(m)] if m == 1.0));
+        // keys.volume is a set edit handled by AppState.
+        r.set_mut().learn.push(bound(
+            "K",
+            LearnKind::Cc,
+            10,
+            Target::Param("keys.volume".into()),
+        ));
+        let out = r.on_midi("K", "other", cc_msg(10, 127));
+        assert_eq!(
+            out.set_param,
+            Some(("keys.volume".to_string(), ParamValue::Continuous(6.0)))
+        );
     }
 
     #[test]
@@ -1542,7 +1747,20 @@ mod tests {
             .enumerate()
             .all(|(i, c)| matches!(c, Command::SetGroup { group, .. } if *group as usize == i)));
         assert!(matches!(first[8], Command::SetMasterGain(_)));
-        assert!(new_rx.pop().is_err(), "nothing else is queued");
+        // Then the keys: sound, route and the wheels (nothing else).
+        let keys = drain(&mut new_rx);
+        assert!(
+            matches!(
+                keys.as_slice(),
+                [
+                    Command::KeysSound(_),
+                    Command::KeysRoute { .. },
+                    Command::KeysPitch(_),
+                    Command::KeysMod(_)
+                ]
+            ),
+            "{keys:?}"
+        );
 
         // A trigger now lands in the new queue only.
         router.trigger_pad(0, 0);

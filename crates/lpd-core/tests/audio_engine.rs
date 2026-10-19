@@ -316,3 +316,166 @@ fn faders_at_the_floor_render_exact_silence() {
     e.handle(Command::SetMasterGain(lpd_core::audio::fader_gain(-40.0)));
     assert!(sound(&mut e).iter().any(|s| *s != 0.0));
 }
+
+// ---- keys instrument (Task 15) ----
+
+fn peak(out: &[f32]) -> f32 {
+    out.iter().fold(0.0f32, |m, v| m.max(v.abs()))
+}
+
+fn play_keys(engine: &mut Engine) -> Vec<f32> {
+    engine.handle(Command::KeysNoteOn {
+        note: 60,
+        velocity: 110,
+    });
+    // Skip the attack.
+    render(engine, 4800);
+    render(engine, 2400)
+}
+
+fn mute_group(engine: &mut Engine, group: u8) {
+    engine.handle(Command::SetGroup {
+        group,
+        params: GroupParams {
+            mute: true,
+            ..Default::default()
+        },
+    });
+}
+
+#[test]
+fn keys_on_the_master_are_audible_even_with_every_group_muted() {
+    let (mut engine, _) = Engine::new(SR);
+    engine.handle(Command::KeysSound(lpd_core::instrument::KeysSound::Organ));
+    for g in 0..8 {
+        mute_group(&mut engine, g);
+    }
+    assert!(peak(&play_keys(&mut engine)) > 0.01);
+}
+
+#[test]
+fn keys_routed_to_a_muted_channel_are_silent_but_other_channels_pass_them() {
+    let (mut engine, _) = Engine::new(SR);
+    engine.handle(Command::KeysSound(lpd_core::instrument::KeysSound::Organ));
+    engine.handle(Command::KeysRoute {
+        gain: 1.0,
+        group: Some(2),
+    });
+    mute_group(&mut engine, 2);
+    assert_eq!(peak(&play_keys(&mut engine)), 0.0);
+    // Unmute: the keys come through the channel again.
+    engine.handle(Command::SetGroup {
+        group: 2,
+        params: GroupParams::default(),
+    });
+    assert!(peak(&render(&mut engine, 2400)) > 0.01);
+}
+
+#[test]
+fn a_solo_on_another_channel_silences_keys_routed_to_a_channel() {
+    let (mut engine, _) = Engine::new(SR);
+    engine.handle(Command::KeysSound(lpd_core::instrument::KeysSound::Organ));
+    engine.handle(Command::KeysRoute {
+        gain: 1.0,
+        group: Some(2),
+    });
+    engine.handle(Command::SetGroup {
+        group: 5,
+        params: GroupParams {
+            solo: true,
+            ..Default::default()
+        },
+    });
+    assert_eq!(peak(&play_keys(&mut engine)), 0.0);
+}
+
+#[test]
+fn keys_gain_zero_is_silent() {
+    let (mut engine, _) = Engine::new(SR);
+    engine.handle(Command::KeysSound(lpd_core::instrument::KeysSound::Organ));
+    engine.handle(Command::KeysRoute {
+        gain: 0.0,
+        group: None,
+    });
+    assert_eq!(peak(&play_keys(&mut engine)), 0.0);
+}
+
+#[test]
+fn keys_obey_the_master_gain() {
+    let (mut engine, _) = Engine::new(SR);
+    engine.handle(Command::KeysSound(lpd_core::instrument::KeysSound::Organ));
+    engine.handle(Command::SetMasterGain(0.0));
+    assert_eq!(peak(&play_keys(&mut engine)), 0.0);
+}
+
+#[test]
+fn keys_group_ignores_the_group_pitch() {
+    // D5: the pitch offset of a channel does not retune the keys routed into it.
+    let crossings = |pitch: f32| {
+        let (mut engine, _) = Engine::new(SR);
+        engine.handle(Command::KeysSound(lpd_core::instrument::KeysSound::Organ));
+        engine.handle(Command::KeysRoute {
+            gain: 1.0,
+            group: Some(1),
+        });
+        engine.handle(Command::SetGroup {
+            group: 1,
+            params: GroupParams {
+                pitch_semitones: pitch,
+                ..Default::default()
+            },
+        });
+        engine.handle(Command::KeysNoteOn {
+            note: 60,
+            velocity: 100,
+        });
+        render(&mut engine, 4800);
+        let x = left(&render(&mut engine, 24_000));
+        x.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count()
+    };
+    assert_eq!(crossings(0.0), crossings(7.0));
+}
+
+#[test]
+fn keys_show_in_the_level_tap_of_their_channel() {
+    let (mut engine, _events, mut taps) = Engine::with_taps(SR);
+    engine.handle(Command::KeysSound(lpd_core::instrument::KeysSound::Organ));
+    engine.handle(Command::KeysRoute {
+        gain: 1.0,
+        group: Some(4),
+    });
+    play_keys(&mut engine);
+    let mut group4 = 0.0f32;
+    let mut others = 0.0f32;
+    while let Ok(l) = taps.levels.pop() {
+        group4 = group4.max(l.groups[4]);
+        others = others.max(l.groups[0]).max(l.groups[7]);
+    }
+    assert!(group4 > 0.0);
+    assert_eq!(others, 0.0);
+}
+
+#[derive(Debug)]
+struct Silent;
+impl lpd_core::instrument::Instrument for Silent {
+    fn note_on(&mut self, _: u8, _: u8) {}
+    fn note_off(&mut self, _: u8) {}
+    fn pitch_bend(&mut self, _: f32) {}
+    fn modulation(&mut self, _: f32) {}
+    fn set_sound(&mut self, _: lpd_core::instrument::KeysSound) {}
+    fn all_notes_off(&mut self) {}
+    fn render_add(&mut self, _: &mut [f32], _: &mut [f32]) {}
+}
+
+#[test]
+fn set_instrument_hands_the_old_one_to_the_trash() {
+    let (mut engine, _) = Engine::new(SR);
+    let mut trash = engine.take_trash().expect("the consumer is available once");
+    assert!(engine.take_trash().is_none());
+    engine.handle(Command::KeysSound(lpd_core::instrument::KeysSound::Organ));
+    engine.handle(Command::SetInstrument(Box::new(Silent)));
+    assert!(trash.pop().is_ok(), "the replaced BasicKeys came back");
+    assert!(trash.pop().is_err());
+    // The new instrument is silent.
+    assert_eq!(peak(&play_keys(&mut engine)), 0.0);
+}

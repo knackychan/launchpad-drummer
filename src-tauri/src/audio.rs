@@ -6,6 +6,7 @@ use crate::state::AppState;
 use anyhow::{bail, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use lpd_core::audio::{host, Command, Engine, Event, Taps};
+use lpd_core::instrument::Instrument;
 use rtrb::{Consumer, Producer, RingBuffer};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -211,6 +212,8 @@ pub struct AudioSystem {
     pub status: AudioStatus,
     pub taps: Taps,
     pub stats: Arc<AudioStats>,
+    /// Instruments the engine replaced come back here, to be dropped off the audio thread.
+    pub trash: Option<Consumer<Box<dyn Instrument>>>,
 }
 
 fn is_asio(backend: &str) -> bool {
@@ -267,7 +270,8 @@ pub fn start(prefs: &AudioPrefs) -> Result<AudioSystem> {
         config.buffer_size = cpal::BufferSize::Fixed(frames);
     }
     let sample_rate = config.sample_rate.0;
-    let (engine, events, taps) = Engine::with_taps(sample_rate);
+    let (mut engine, events, taps) = Engine::with_taps(sample_rate);
+    let trash = engine.take_trash();
     let (commands, rx) = RingBuffer::new(1024);
     let stats = Arc::new(AudioStats::new());
     let cb = Callback {
@@ -303,6 +307,7 @@ pub fn start(prefs: &AudioPrefs) -> Result<AudioSystem> {
         },
         taps,
         stats,
+        trash,
     })
 }
 
@@ -479,6 +484,7 @@ impl AudioController {
                     let work = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         match start_with_fallback(&mut starter, &prefs) {
                             Ok(sys) => {
+                                state.install_trash(sys.trash);
                                 let status = state.install_audio(
                                     sys.commands,
                                     sys.events,
