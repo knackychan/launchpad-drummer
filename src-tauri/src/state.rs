@@ -10,9 +10,10 @@
 
 use crate::audio::{self, AudioStats, AudioStatus};
 use crate::config::{self, AppConfig, AudioPrefs};
+use crate::devices::{self, MidiDevice, MidiMsg};
 use crate::lights::LightPainter;
 use crate::logfile;
-use crate::router::Router;
+use crate::router::{Router, UiEvent};
 use crate::saver::{SaveState, SaveStatus, Saver};
 use crate::startup::{self, Startup};
 use crate::store::{prepare_sample, KitManager, LoadedKit};
@@ -162,6 +163,8 @@ pub struct AppState {
     /// What the app opened at launch, or the set opened since.
     pub startup: Arc<Mutex<Startup>>,
     config: Arc<Mutex<ConfigFile>>,
+    /// Known MIDI devices (a leaf lock; the Launchpad bridge and the input poller report here).
+    pub midi: devices::SharedRegistry,
     saver: Arc<Mutex<Saver>>,
     save_gate: Arc<Mutex<()>>,
     writer: Writer,
@@ -202,6 +205,7 @@ impl AppState {
             history: Arc::new(Mutex::new(History::new())),
             startup: Arc::new(Mutex::new(Startup::FirstRun)),
             config: Arc::default(),
+            midi: Arc::default(),
             saver: Arc::new(Mutex::new(Saver::new())),
             save_gate: Arc::new(Mutex::new(())),
             writer,
@@ -317,6 +321,41 @@ impl AppState {
         if let LpEvent::PadDown { x, y } = ev {
             self.record_hit(x, y);
         }
+    }
+
+    /// A message from a generic MIDI input. The returned events are for the caller to emit once
+    /// no lock is held.
+    pub fn on_midi(&self, port: &str, role: &str, msg: MidiMsg) -> Vec<UiEvent> {
+        lock(&self.router).on_midi(port, role, msg)
+    }
+
+    pub fn midi_devices(&self) -> Vec<MidiDevice> {
+        lock(&self.midi).list()
+    }
+
+    pub fn midi_status(&self, port: &str) -> Option<String> {
+        lock(&self.midi).get(port).map(|d| d.status.clone())
+    }
+
+    /// Choose how a generic input is used and remember it. Launchpad and LCXL ports have a fixed
+    /// role. Returns the new device list when the registry changed (the poller reopens the
+    /// port on its next round).
+    pub fn set_midi_role(&self, port: &str, role: &str) -> Result<Option<Vec<MidiDevice>>, String> {
+        if !matches!(role, "keys" | "other") {
+            return Err(format!("Unknown MIDI role: {role}"));
+        }
+        let current = devices::classify(port, &self.get_config().midi_roles);
+        if matches!(current, "launchpad" | "lcxl") {
+            return Err(format!("{port} has a fixed role"));
+        }
+        self.update_config(|c| {
+            c.midi_roles.insert(port.to_string(), role.to_string());
+        })?;
+        let mut registry = lock(&self.midi);
+        let Some(status) = registry.get(port).map(|d| d.status.clone()) else {
+            return Ok(None);
+        };
+        Ok(registry.set(port, role, &status).then(|| registry.list()))
     }
 
     pub fn input_mode(&self) -> InputMode {
@@ -1198,6 +1237,51 @@ mod tests {
             "values are not undone"
         );
         assert!(state.undo().is_none());
+    }
+
+    #[test]
+    fn midi_role_is_saved_and_updates_the_listed_device() {
+        let (state, _rx) = app();
+        lock(&state.midi).set("Some Synth", "other", "connected");
+        let list = state.set_midi_role("Some Synth", "keys").unwrap().unwrap();
+        assert_eq!(list[0].role, "keys");
+        assert_eq!(list[0].status, "connected");
+        assert_eq!(
+            state
+                .get_config()
+                .midi_roles
+                .get("Some Synth")
+                .map(String::as_str),
+            Some("keys")
+        );
+        // Nothing changes the second time; an unplugged port is still remembered.
+        assert_eq!(state.set_midi_role("Some Synth", "keys").unwrap(), None);
+        assert_eq!(state.set_midi_role("Gone Synth", "keys").unwrap(), None);
+        assert!(state.get_config().midi_roles.contains_key("Gone Synth"));
+    }
+
+    #[test]
+    fn midi_role_rejects_fixed_devices_and_unknown_roles() {
+        let (state, _rx) = app();
+        assert!(state.set_midi_role("Launchpad MK2", "keys").is_err());
+        assert!(state.set_midi_role("Launch Control XL", "other").is_err());
+        assert!(state.set_midi_role("Some Synth", "launchpad").is_err());
+        assert!(state.get_config().midi_roles.is_empty());
+    }
+
+    #[test]
+    fn on_midi_hands_the_events_back_to_the_caller() {
+        let (state, _rx) = app();
+        let events = state.on_midi(
+            "Keystation 49 MK3",
+            "keys",
+            MidiMsg::NoteOn {
+                ch: 0,
+                note: 60,
+                vel: 90,
+            },
+        );
+        assert_eq!(events.len(), 2);
     }
 
     #[test]

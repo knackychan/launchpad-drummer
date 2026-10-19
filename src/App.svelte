@@ -10,6 +10,7 @@
   import CrtLayers from './components/CrtLayers.svelte';
   import SetupAudio from './components/SetupAudio.svelte';
   import SetupDisplay from './components/SetupDisplay.svelte';
+  import SetupMidi from './components/SetupMidi.svelte';
   import HordeGame from './components/HordeGame.svelte';
   import ConsoleBackdrop from './components/ConsoleBackdrop.svelte';
   import NoticeLcd from './components/NoticeLcd.svelte';
@@ -29,7 +30,8 @@
   import { CRT_FACTORS, readDisplay, saveDisplay } from './lib/display.ts';
   import type { CrtLevel } from './lib/display.ts';
   import { createEmptySet, createPreviewSet, GROUP_COLORS, padAriaLabel, padLabel } from './lib/model.ts';
-  import type { AppConfig, AudioStatus, DropReport, Group, LightModes, MissingPad, OpenResult, Pad, SamplePeaks, SetModel, Startup } from './lib/model.ts';
+  import type { AppConfig, AudioStatus, DropReport, Group, LightModes, MidiDevice, MissingPad, OpenResult, Pad, SamplePeaks, SetModel, Startup } from './lib/model.ts';
+  import { PREVIEW_MIDI, pushLog, roleStatus } from './lib/midi.ts';
   import { solvePlayLayout } from './lib/layout.ts';
   import { feedLive, hitAmount, hitGroup, runActivity } from './lib/activity.ts';
   import { audioLabel, dropoutRecent, IDLE_SAVE, padEditKey } from './lib/status.ts';
@@ -50,6 +52,9 @@
   let gameFull = $state(false);
   let deviceState = $state<NoticeInputs['launchpad']>('disconnected');
   let midiLog = $state<{ time: string; text: string }[]>([]);
+  let midiDevices = $state<MidiDevice[]>(tauri ? [] : structuredClone(PREVIEW_MIDI));
+  // A `midi-devices` event is newer than the initial fetch.
+  let midiEventSeen = false;
   let crt = $state<CrtLevel>('low');
   let leds = $state<readonly Rgb[]>(createLedFrame());
   let frameSeen = $state(false);
@@ -225,9 +230,13 @@
     if (!statusStamp.has(status)) statusStamp.set(status, performance.now());
     return dropoutRecent(status.lastDropoutAgoMs, performance.now() - statusStamp.get(status)!);
   });
+  // The registry knows the LCXL (Task 11 bridge reports it); no row means disconnected.
+  const lcxlStatus = $derived(roleStatus(midiDevices, 'lcxl'));
+  const lcxlState = $derived<NoticeInputs['lcxl']>(lcxlStatus === 'bootloader' ? 'disconnected' : lcxlStatus);
+  const launchpadStatus = $derived(roleStatus(midiDevices, 'launchpad'));
   const notices = $derived(activeNotices({ learnArmed: null, audioLost: audioStatus?.state === 'lost' || audioStatus?.state === 'error',
     backup, saveFailed: saveStatus.state === 'failed' ? saveStatus.reason : null,
-    launchpad: tauri ? deviceState : 'connected', lcxl: tauri ? 'disconnected' : 'connected', missing: missing.length,
+    launchpad: tauri ? deviceState : 'connected', lcxl: tauri ? lcxlState : 'connected', missing: missing.length,
     asioFallback: audioStatus?.asioFallback ?? false, dropoutRecent: dropoutIsRecent, confirmations, keysAbsent: false, dismissed }));
   const lampClass = (state: string) => ({ connected: 'ok', running: 'ok', busy: 'warn', bootloader: 'error', stopped: 'error', lost: 'error', error: 'error' } as Record<string, string>)[state] ?? '';
   const audioLamp = $derived(audioStatus?.state === 'running' && dropoutIsRecent ? 'warn' : lampClass(audioStatus?.state ?? 'stopped'));
@@ -240,7 +249,7 @@
   });
 
   function logMidi(text: string) {
-    midiLog = [{ time: new Date().toLocaleTimeString(), text }, ...midiLog].slice(0, 40);
+    midiLog = pushLog(midiLog, { time: new Date().toLocaleTimeString(), text });
   }
   /** A message about something the player just did, shown in the notice LCD for a while. */
   function showToast(text: string) {
@@ -286,6 +295,8 @@
       // The preview answers with a demo status; the desktop app with the live one.
       const fetched = await invoke<AudioStatus>('get_audio_status');
       if (!audioEventSeen) audioStatus = fetched;
+      const devices = await invoke<MidiDevice[]>('midi_devices');
+      if (devices && !midiEventSeen) midiDevices = structuredClone(devices);
       if (!tauri) return;
       const [set, b, save] = await Promise.all([
         invoke<SetModel>('get_current_set'),
@@ -339,6 +350,8 @@
         leds = event.map(([r, g, b]) => [r, g, b] as const);
         frameSeen = true;
       });
+      subscribe<MidiDevice[]>('midi-devices', (event) => { midiEventSeen = true; midiDevices = event; });
+      subscribe<{ text: string }>('midi-log', (event) => logMidi(event.text));
       subscribe<SaveStatus>('save-status', (event) => { saveStatus = event; });
       subscribe<AudioStatus>('audio-status', (event) => { audioEventSeen = true; audioStatus = event; });
       subscribe<TelemetryFrame>('telemetry', (event) => pushFrame(event));
@@ -484,6 +497,12 @@
   function updateMaster(masterDb: number) {
     currentSet.mixer.masterDb = masterDb;
     void invoke('update_master_db', { masterDb });
+  }
+  /** KEYS | OTHER for a generic input: the switch moves at once, the backend saves it. */
+  async function setMidiRole(port: string, role: 'keys' | 'other') {
+    midiDevices = midiDevices.map(d => d.port === port ? { ...d, role } : d);
+    try { await invoke('set_midi_role', { port, role }); }
+    catch (e) { showToast(errorText(e)); const list = await invoke<MidiDevice[]>('midi_devices').catch(() => null); if (list) midiDevices = list; }
   }
   function stopAll() {
     void invoke('stop_all');
@@ -632,7 +651,7 @@
 
     <main class="bay" aria-label={mode === 'play' ? 'Play' : mode === 'games' ? 'Games' : 'Setup'} bind:clientWidth={bayW} bind:clientHeight={bayH}>
       {#if mode === 'play' && startup.kind !== 'loaded'}
-        <PowerOn {startup} error={powerError} launchpad={deviceState} lcxl="disconnected" audio={audioStatus?.state ?? 'stopped'} onnew={() => void manageSet(true)} onopen={() => void manageSet(false)} />
+        <PowerOn {startup} error={powerError} launchpad={deviceState} lcxl={lcxlState} audio={audioStatus?.state ?? 'stopped'} onnew={() => void manageSet(true)} onopen={() => void manageSet(false)} />
       {:else if mode === 'play'}
         <section
           class="play-screen"
@@ -745,18 +764,19 @@
         <div class="setup-scroll">
           <div class="setup">
             <SetupAudio status={audioStatus} dropoutRecent={dropoutIsRecent} onstatus={status => { audioStatus = status; }} onerror={showToast} />
-            <SetupDisplay level={crt} status={deviceState} events={midiLog} reconnect={() => void invoke('refresh_leds').catch(() => {})} onchange={setCrt} />
+            <SetupMidi devices={midiDevices} events={midiLog} onrole={(port, role) => void setMidiRole(port, role)} />
+            <SetupDisplay level={crt} onchange={setCrt} />
           </div>
         </div>
       {/if}
     </main>
 
     <footer class="status-strip">
-      <button class="device-status" onclick={() => setMode('setup')} aria-label="LAUNCHPAD: {deviceState}. Open Setup">
-        <span class="lamp {lampClass(deviceState)}"></span><span class="silk">LAUNCHPAD</span>
+      <button class="device-status" onclick={() => setMode('setup')} aria-label="LAUNCHPAD: {launchpadStatus}. Open Setup">
+        <span class="lamp {lampClass(launchpadStatus)}"></span><span class="silk">LAUNCHPAD</span>
       </button>
-      <button class="device-status" onclick={() => setMode('setup')} aria-label="LCXL: not connected. Open Setup">
-        <span class="lamp"></span><span class="silk">LCXL</span>
+      <button class="device-status" onclick={() => setMode('setup')} aria-label="LCXL: {lcxlStatus}. Open Setup">
+        <span class="lamp {lampClass(lcxlStatus)}"></span><span class="silk">LCXL</span>
       </button>
       <button class="device-status" onclick={() => setMode('setup')} aria-label="AUDIO: {audioStatus?.state ?? 'stopped'}. Open Setup">
         <span class="lamp {audioLamp}"></span><span class="silk">AUDIO</span>

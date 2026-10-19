@@ -230,3 +230,8 @@ export function createPreviewSet(): SetModel {
   }));
   return set;
 }
+
+/** One row of SETUP › MIDI DEVICES (the Rust `devices::MidiDevice`). */
+export type MidiRole = 'launchpad' | 'lcxl' | 'keys' | 'other';
+export type MidiStatus = 'connected' | 'disconnected' | 'busy' | 'bootloader';
+export interface MidiDevice { port: string; role: MidiRole; status: MidiStatus }

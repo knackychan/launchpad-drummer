@@ -1,4 +1,5 @@
 import { createPreviewSet } from './model.ts';
+import { PREVIEW_MIDI } from './midi.ts';
 import type { AudioDevice, AudioPrefs, AudioStatus } from './model.ts';
 const tauri = typeof window !== 'undefined' ? window.__TAURI__ : undefined;
 export const isTauri = !!tauri;
@@ -30,6 +31,7 @@ const PREVIEW: Record<string, (args?: Record<string, unknown>) => unknown> = {
   asio_available: () => ({ available: false, reason: 'Built without ASIO support' }),
   set_audio: (args) => previewStatus(args?.prefs as AudioPrefs),
   audio_reconnect: () => previewStatus(),
+  midi_devices: () => PREVIEW_MIDI,
   get_config: () => ({ lastSet: null, libraryDir: null, soundfont: null,
     audio: { backend: 'wasapi', device: null, bufferFrames: null }, midiRoles: {} }),
 };

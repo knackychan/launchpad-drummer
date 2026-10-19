@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod commands;
 pub mod config;
+pub mod devices;
 mod launchpad;
 pub mod lights;
 pub mod logfile;
@@ -72,6 +73,7 @@ pub fn run() {
                 let _ = app_handle.set(app.handle().clone());
                 audio_controller.start_detached(app_state.get_config().audio);
                 launchpad::start(app.handle().clone(), app_state.clone());
+                devices::start(app.handle().clone(), app_state.clone());
                 let handle = app.handle().clone();
                 let telemetry_handle = handle.clone();
                 let telemetry_state = app_state.clone();
@@ -103,6 +105,8 @@ pub fn run() {
             commands::get_config,
             commands::set_library_dir,
             commands::set_soundfont,
+            commands::midi_devices,
+            commands::set_midi_role,
             commands::pick_folder,
             commands::pick_file,
             commands::reveal_path,

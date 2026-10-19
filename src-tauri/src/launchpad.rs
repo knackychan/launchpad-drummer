@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 const RECHECK: Duration = Duration::from_secs(2);
+/// The Launchpad's row in the shared MIDI device registry (SETUP › MIDI DEVICES).
+const REGISTRY_PORT: &str = "Launchpad MK2";
 
 /// Latest game LED frame, replaced (never queued) by each new one.
 #[derive(Clone, Default)]
@@ -34,6 +36,10 @@ enum DeviceStatus {
 }
 
 impl DeviceStatus {
+    fn name(self) -> &'static str {
+        self.payload().state
+    }
+
     fn payload(self) -> StatusEvent {
         match self {
             Self::Connected => StatusEvent {
@@ -335,6 +341,13 @@ fn report_status(app: &AppHandle, previous: &mut Option<DeviceStatus>, current: 
         crate::logfile::log(format!("Launchpad: {}", current.payload().message));
         *previous = Some(current);
     }
+    crate::devices::report(
+        app,
+        &crate::devices::registry_of(app),
+        REGISTRY_PORT,
+        "launchpad",
+        current.name(),
+    );
     // Repeat the current state quietly so a UI listener mounted after startup receives it.
     if let Err(error) = app.emit("launchpad-status", current.payload()) {
         crate::logfile::log(format!("Launchpad status event failed: {error}"));

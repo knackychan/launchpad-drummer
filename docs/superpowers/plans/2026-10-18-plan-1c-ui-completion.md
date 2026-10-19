@@ -719,7 +719,7 @@ Task 9 verification (2026-10-19): written first: router `replace_audio_swaps_que
 
 ## Phase D — MIDI
 
-### Task 10: Device registry, generic MIDI inputs, SETUP › MIDI DEVICES
+### Task 10: Device registry, generic MIDI inputs, SETUP › MIDI DEVICES — DONE
 
 **Purpose.** Engine spec 7 ("All connected MIDI inputs are listened to"), UI spec 8 item 2, status lamps.
 
@@ -761,7 +761,9 @@ impl Registry {
 
 **Do not:** open Launchpad or LCXL ports in `devices.rs`; play the keys instrument (Task 15); bind learn (Task 12).
 
-**Done when:** [ ] tests first → PASS; [ ] full verification + build; commit `feat: MIDI device registry, roles and setup MIDI rack`.
+**Done when:** [x] tests first → PASS; [x] full verification + build; commit `feat: MIDI device registry, roles and setup MIDI rack`.
+
+Task 10 verification (2026-10-19): written first (failing on `unimplemented!()` stubs): `devices.rs` units (`classify` for all listed names plus overrides and fixed-role protection, `parse` for every listed message incl. pitch bend 0 / 8191 / −8192, SysEx, running status and short messages → None, `Registry::set` false for an identical update, `remove_absent` keeps the Launchpad and LCXL rows, camelCase JSON), `router.rs` units (`on_midi`: keys NoteOn/NoteOff → `KeysNote`, wheel events carry both last values, CC 1 → mod, other CCs and role `other` only log, MIDI never queues an audio command, `UiEvent` names and payloads), `state.rs` units (`set_midi_role` saves and updates the row, refuses fixed devices and unknown roles; `on_midi` hands events back), TS `midi.test.ts` (lamps, status texts, fixed role text, `roleStatus`, 40-entry log cap). fmt clean; cargo test --workspace all passed; npm test 62 passed; npm run check 0 errors/0 warnings; npm run build passed. Browser preview (Chrome): SETUP shows AUDIO, MIDI DEVICES (table with lamps, fixed LAUNCHPAD / LCXL text, KEYS | OTHER switch that moves on click, event log below) and DISPLAY; status strip LAUNCHPAD lamp green and LCXL plain from the demo registry; no console errors. Deviations/notes: `UiEvent` lives in `router.rs` (`KeysWheel` has a `r#mod` field; JSON key `mod`); `AppState.midi` holds the shared `Arc<Mutex<Registry>>` (leaf lock) and `devices::report` updates it and emits `midi-devices`; the Launchpad bridge reports under the fixed row name `Launchpad MK2` (not the Windows port name) from `report_status`; `remove_absent` keeps launchpad/lcxl rows (their bridges own them; no LCXL bridge exists until Task 11, so that row is absent = disconnected); `set_midi_role` also updates the registry row at once and emits `midi-devices` (the poller then reopens the port on its next round, reconnecting when the role changed); `set_midi_role` refuses Launchpad/LCXL ports; the UI switch is optimistic and reloads the list on error; the `keys-note` / `keys-wheel` events are emitted but nothing in the UI listens yet (Tasks 15/16); `midi-log` and the existing `launchpad-status` / `launchpad-pad` lines feed the one log (40 cap, `pushLog`). The old `RETRY FRAME` key was removed from the UI (the `refresh_leds` command stays). `PowerOn` gets the LCXL state from the registry. Not verified here: real MIDI hardware (port enumeration and connect on Windows, busy detection with another app holding a port, hot-plug, Keystation notes and wheels reaching the log, bootloader row, role persistence across restarts).
 
 ### Task 11: Launch Control XL
 

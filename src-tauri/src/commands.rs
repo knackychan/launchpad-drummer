@@ -1,5 +1,6 @@
 use crate::audio::{self, AsioInfo, AudioController, AudioDevice, AudioStatus};
 use crate::config::{AppConfig, AudioPrefs};
+use crate::devices::MidiDevice;
 use crate::saver::SaveStatus;
 use crate::startup::Startup;
 use crate::state::{
@@ -147,6 +148,25 @@ pub(crate) async fn set_library_dir(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     worker(&state, move |s| s.set_library_dir(dir)).await
+}
+
+#[tauri::command]
+pub(crate) fn midi_devices(state: State<'_, AppState>) -> Vec<MidiDevice> {
+    state.midi_devices()
+}
+
+/// `role`: "keys" | "other". Saved in the app config; the input poller reopens the port.
+#[tauri::command]
+pub(crate) async fn set_midi_role(
+    port: String,
+    role: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    if let Some(list) = worker(&state, move |s| s.set_midi_role(&port, &role)).await? {
+        let _ = app.emit("midi-devices", list);
+    }
+    Ok(())
 }
 
 #[tauri::command]
