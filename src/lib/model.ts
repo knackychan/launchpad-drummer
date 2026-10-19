@@ -42,10 +42,20 @@ export interface Mixer {
   masterDb: number;
 }
 
+/** MIDI learn (Rust `kit::learn`): a note or CC of an input port bound to a pad or a parameter id. */
+export type LearnTargetModel = { pad: { bank: number; x: number; y: number } } | { param: string };
+export interface Binding {
+  device: string;
+  kind: 'note' | 'cc';
+  number: number;
+  target: LearnTargetModel;
+}
+
 export interface SetModel {
   version: number;
   banks: Bank[];
   mixer: Mixer;
+  learn: Binding[];
 }
 
 export interface AudioLatency {
@@ -196,6 +206,7 @@ export function createEmptySet(): SetModel {
       })),
       masterDb: 0,
     },
+    learn: [],
   };
 }
 

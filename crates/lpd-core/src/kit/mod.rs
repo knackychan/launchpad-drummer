@@ -2,6 +2,7 @@
 
 mod decode;
 mod history;
+pub mod learn;
 mod model;
 pub mod ops;
 mod params;

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, setContext } from 'svelte';
   import Plate from './components/Plate.svelte';
   import LaunchpadPanel from './components/LaunchpadPanel.svelte';
   import MixerStrip from './components/MixerStrip.svelte';
@@ -11,6 +11,7 @@
   import SetupAudio from './components/SetupAudio.svelte';
   import SetupDisplay from './components/SetupDisplay.svelte';
   import SetupMidi from './components/SetupMidi.svelte';
+  import SetupLearn from './components/SetupLearn.svelte';
   import HordeGame from './components/HordeGame.svelte';
   import ConsoleBackdrop from './components/ConsoleBackdrop.svelte';
   import NoticeLcd from './components/NoticeLcd.svelte';
@@ -18,19 +19,21 @@
   import PowerOn from './components/PowerOn.svelte';
   import SampleBrowser from './components/SampleBrowser.svelte';
   import DragGhost from './components/DragGhost.svelte';
-  import ContextMenu from './components/ContextMenu.svelte';
+  import ContextMenu, { type MenuItem } from './components/ContextMenu.svelte';
   import { BANK_HOVER_MS, dropTag, hitTest, isAudioName, passedThreshold, physicalToCss, type DropTarget } from './lib/dnd.ts';
   import { invoke as call, listen, isTauri } from './lib/api.ts';
   import { activeNotices, type Confirmation, type Level, type Notice, type NoticeInputs } from './lib/notices.ts';
   import { middleTruncate } from './lib/format.ts';
   import { padForKey } from './lib/keymap.ts';
   import { pushEsc, runEsc } from './lib/esc.ts';
+  import { bindingLabel, boundIds } from './lib/learn.ts';
+  import { LEARN, type LearnCtx } from './lib/learnable.ts';
   import { createLedFrame, ledToCss } from './lib/led.ts';
   import type { PadInput, Rgb } from './lib/led.ts';
   import { CRT_FACTORS, readDisplay, saveDisplay } from './lib/display.ts';
   import type { CrtLevel } from './lib/display.ts';
   import { createEmptySet, createPreviewSet, GROUP_COLORS, padAriaLabel, padLabel } from './lib/model.ts';
-  import type { AppConfig, AudioStatus, DropReport, Group, LightModes, MidiDevice, MissingPad, OpenResult, Pad, SamplePeaks, SetModel, Startup } from './lib/model.ts';
+  import type { AppConfig, AudioStatus, Binding, DropReport, Group, LightModes, MidiDevice, MissingPad, OpenResult, Pad, SamplePeaks, SetModel, Startup } from './lib/model.ts';
   import { PREVIEW_MIDI, pushLog, roleStatus } from './lib/midi.ts';
   import { solvePlayLayout } from './lib/layout.ts';
   import { feedLive, hitAmount, hitGroup, runActivity } from './lib/activity.ts';
@@ -40,7 +43,7 @@
   import type { TelemetryFrame } from './lib/telemetry.ts';
 
   const tauri = isTauri;
-  const editCommands = new Set(['update_pad', 'clear_pad', 'move_pad', 'drop_files', 'locate_sample', 'update_group', 'rename_bank', 'update_bank_lights', 'update_bank_humanize']);
+  const editCommands = new Set(['update_pad', 'clear_pad', 'move_pad', 'drop_files', 'locate_sample', 'update_group', 'rename_bank', 'update_bank_lights', 'update_bank_humanize', 'unbind']);
   async function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     const result = await call<T>(cmd, args);
     if (editCommands.has(cmd)) refreshHistory();
@@ -83,6 +86,55 @@
   const confirmationTimers = new Set<number>();
   let peaksNonce = $state(0);
   let padMenu = $state<{ x: number; y: number; at: { x: number; y: number } } | null>(null);
+
+  // MIDI learn (plan 1C Task 12): the control being learned, and the one shared menu of learnable controls.
+  let learnArmed = $state<{ id: string; kind: 'cc' | 'note' } | null>(null);
+  let learnMenu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const learnBound = $derived(boundIds(currentSet));
+  $effect(() => { if (learnArmed) return pushEsc(cancelLearn); });
+  async function startLearn(id: string, kind: 'cc' | 'note', target: unknown) {
+    learnArmed = { id, kind };
+    try { await call('arm_learn', { target }); }
+    catch (e) { learnArmed = null; showToast(errorText(e)); }
+  }
+  function cancelLearn() {
+    if (!learnArmed) return;
+    learnArmed = null;
+    void call('cancel_learn').catch(() => {});
+  }
+  const learnPadId = (bank: number, x: number, y: number) => `pad:${bank}:${x}:${y}`;
+  const armLearnPad = (bank: number, x: number, y: number) => startLearn(learnPadId(bank, x, y), 'note', { pad: { bank, x, y } });
+  setContext<LearnCtx>(LEARN, {
+    armed: () => learnArmed?.id ?? null,
+    isBound: (id) => learnBound.has(id),
+    arm: (id) => void startLearn(id, 'cc', { param: id }),
+    openMenu: (x, y, items) => { learnMenu = { x, y, items }; },
+  });
+  async function onLearnBound(binding: Binding) {
+    learnArmed = null;
+    try {
+      const set = await call<SetModel>('get_current_set');
+      if (set) currentSet = set;
+      confirm(`Learned ${bindingLabel(binding, currentSet)}`);
+      refreshHistory();
+    } catch (e) { showToast(errorText(e)); }
+  }
+  function padHit(bank: number, x: number, y: number) {
+    if (bank !== activeBank) return;
+    const note = (y + 1) * 10 + x + 1;
+    padInput({ note, pressed: true, source: 'hardware' });
+    window.setTimeout(() => padInput({ note, pressed: false, source: 'hardware' }), 120);
+  }
+  async function unbindAt(index: number) {
+    try { const set = await invoke<SetModel>('unbind', { index }); if (set) currentSet = set; }
+    catch (e) { showToast(errorText(e)); }
+  }
+  const padBinding = $derived.by(() => {
+    if (!selXY) return null;
+    const i = currentSet.learn.findIndex(b => b.kind === 'note' && 'pad' in b.target && b.target.pad.bank === activeBank && b.target.pad.x === selXY.x && b.target.pad.y === selXY.y);
+    const b = currentSet.learn[i];
+    return b ? { index: i, number: b.number, device: b.device } : null;
+  });
 
   let drawer = $state<'editor' | 'browser' | null>(null);
   let libraryDir = $state<string | null>(null);
@@ -234,7 +286,7 @@
   const lcxlStatus = $derived(roleStatus(midiDevices, 'lcxl'));
   const lcxlState = $derived<NoticeInputs['lcxl']>(lcxlStatus === 'bootloader' ? 'disconnected' : lcxlStatus);
   const launchpadStatus = $derived(roleStatus(midiDevices, 'launchpad'));
-  const notices = $derived(activeNotices({ learnArmed: null, audioLost: audioStatus?.state === 'lost' || audioStatus?.state === 'error',
+  const notices = $derived(activeNotices({ learnArmed: learnArmed?.kind ?? null, audioLost: audioStatus?.state === 'lost' || audioStatus?.state === 'error',
     backup, saveFailed: saveStatus.state === 'failed' ? saveStatus.reason : null,
     launchpad: tauri ? deviceState : 'connected', lcxl: tauri ? lcxlState : 'connected', missing: missing.length,
     asioFallback: audioStatus?.asioFallback ?? false, dropoutRecent: dropoutIsRecent, confirmations, keysAbsent: false, dismissed }));
@@ -355,6 +407,10 @@
       subscribe<{ groups: SetModel['mixer']['groups']; masterDb: number }>('mixer-changed', (event) => {
         currentSet = { ...currentSet, mixer: { ...currentSet.mixer, groups: event.groups, masterDb: event.masterDb } };
       });
+      subscribe<{ binding: Binding }>('learn-bound', (event) => void onLearnBound(event.binding));
+      subscribe<{ reason: string }>('learn-ignored', (event) => showToast(event.reason));
+      subscribe<{ bank: number; x: number; y: number }>('pad-hit', (event) => padHit(event.bank, event.x, event.y));
+      subscribe<SetModel>('set-changed', (event) => { currentSet = event; });
       subscribe<SaveStatus>('save-status', (event) => { saveStatus = event; });
       subscribe<AudioStatus>('audio-status', (event) => { audioEventSeen = true; audioStatus = event; });
       subscribe<TelemetryFrame>('telemetry', (event) => pushFrame(event));
@@ -486,7 +542,7 @@
     const { x, y } = padMenu, pad = bank.pads.find(p => p.x === x && p.y === y);
     const filled = !!pad?.sample;
     return [
-      { label: 'Learn MIDI note…', disabled: true },
+      { label: 'Learn MIDI note…', action: () => void armLearnPad(activeBank, x, y) },
       ...(filled ? [
         { label: 'Clear pad', shortcut: 'Del', action: () => clearPad(x, y) },
         { label: 'Show sample in Explorer', action: () => void invoke('reveal_path', { path: pad!.sample }).catch(e => showToast(errorText(e))) },
@@ -627,6 +683,7 @@
   onpointerup={e => { if (drag && !drag.external) { drag.ctrl = e.ctrlKey; void finishDrop(); } }} onpointercancel={cancelDrag} />
 
 {#if drag?.active}<DragGhost x={drag.x} y={drag.y} color={drag.color} label={drag.label} />{/if}
+{#if learnMenu}<ContextMenu x={learnMenu.x} y={learnMenu.y} items={learnMenu.items} onclose={() => { learnMenu = null; }} />{/if}
 {#if padMenu}<ContextMenu x={padMenu.at.x} y={padMenu.at.y} items={padMenuItems} onclose={() => { padMenu = null; }} />{/if}
 
 <div class="instrument" data-crt={crt} style:--crt={CRT_FACTORS[crt]}>
@@ -721,6 +778,10 @@
                 onupdate={updatePad}
                 onlocate={() => void locateSample(selXY.x, selXY.y)}
                 onclear={() => clearPad(selXY.x, selXY.y)}
+                learning={learnArmed?.id === learnPadId(activeBank, selXY.x, selXY.y)}
+                binding={padBinding}
+                onlearn={() => void armLearnPad(activeBank, selXY.x, selXY.y)}
+                onunbind={(index) => void unbindAt(index)}
                 ontrigger={(x, y) => void invoke('trigger_pad', { x, y })}
                 onrelease={(x, y) => void invoke('release_pad', { x, y })}
               />
@@ -768,6 +829,7 @@
           <div class="setup">
             <SetupAudio status={audioStatus} dropoutRecent={dropoutIsRecent} onstatus={status => { audioStatus = status; }} onerror={showToast} />
             <SetupMidi devices={midiDevices} events={midiLog} onrole={(port, role) => void setMidiRole(port, role)} />
+            <SetupLearn set={currentSet} onunbind={(index) => void unbindAt(index)} />
             <SetupDisplay level={crt} onchange={setCrt} />
           </div>
         </div>

@@ -10,6 +10,9 @@ pub struct Set {
     pub version: u32,
     pub banks: Vec<Bank>,
     pub mixer: Mixer,
+    /// MIDI learn bindings (Task 12); old files have none.
+    #[serde(default)]
+    pub learn: Vec<super::learn::Binding>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -142,6 +145,7 @@ impl Set {
                 groups,
                 master_db: 0.0,
             },
+            learn: Vec::new(),
         }
     }
 

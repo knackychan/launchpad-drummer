@@ -6,8 +6,12 @@
   import { ledToCss } from '../lib/led.ts';
   import { DB_FLOOR, fmtDb, fmtSemis } from '../lib/mix.ts';
 
-  let { bank, x, y, pad, groups, peaks, missing, onupdate, onlocate, onclear, ontrigger, onrelease, drop = false }: {
+  let { bank, x, y, pad, groups, peaks, missing, learning = false, binding = null, onupdate, onlocate, onclear, onlearn, onunbind, ontrigger, onrelease, drop = false }: {
     drop?: boolean;
+    /** MIDI learn is armed for this pad. */
+    learning?: boolean;
+    /** The note bound to this pad (`index` into the set's bindings), if any. */
+    binding?: { index: number; number: number; device: string } | null;
     bank: number;
     /** The pad's sample file cannot be found. */
     missing: boolean;
@@ -21,6 +25,8 @@
     onupdate: (pad: Pad, field?: string) => void;
     onlocate: () => void;
     onclear: () => void;
+    onlearn: () => void;
+    onunbind: (index: number) => void;
     ontrigger: (x: number, y: number) => void;
     onrelease: (x: number, y: number) => void;
   } = $props();
@@ -199,8 +205,13 @@
     <div class="ed-sec">
       <span class="silk">MIDI</span>
       <div class="ed-row">
-        <button type="button" class="key" aria-disabled="true" title="MIDI learn — not wired yet">LEARN</button>
-        <span class="tooltip-note">Bind a note from another MIDI device</span>
+        <button type="button" class="key" class:on={learning} class:amber={learning} aria-pressed={learning} title="Bind a note from another MIDI device" onclick={onlearn}>LEARN</button>
+        {#if binding}
+          <span class="lcd learn-lcd">NOTE {binding.number} · {binding.device}</span>
+          <button type="button" class="key small" aria-label="Clear MIDI binding" onclick={() => onunbind(binding.index)}>×</button>
+        {:else}
+          <span class="tooltip-note">Bind a note from another MIDI device</span>
+        {/if}
       </div>
     </div>
   {/if}
@@ -212,6 +223,7 @@
   .ed-name { font-size: 16px; color: #fff; font-weight: 500; }
   .clear { margin-left: auto; color: var(--error); }
   .small { font-size: 11px; }
+  .learn-lcd { font-size: 11px; color: var(--warn); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ed-sec { display: flex; flex-direction: column; gap: 6px; }
   .ed-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   .ed-row.between { justify-content: space-between; }

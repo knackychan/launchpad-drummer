@@ -285,7 +285,9 @@ fn check_connection(
         "launchpad-drummer-in",
         move |_, msg, _| {
             if let Some(ev) = lp::decode(msg) {
-                app_state.on_lp_event(ev);
+                if let Some(ignored) = app_state.on_lp_event(ev) {
+                    let _ = receiver.emit(ignored.name(), ignored.payload());
+                }
             }
             if let Some(pad) = decode_pad(msg) {
                 if let Err(error) = receiver.emit("launchpad-pad", pad) {

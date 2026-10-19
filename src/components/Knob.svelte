@@ -1,14 +1,19 @@
 <script lang="ts">
+  import { getContext } from 'svelte';
+  import { isLearned, isLearning, learnable, LEARN, type LearnCtx } from '../lib/learnable.ts';
   // Vector-ring knob (UI spec 4.5): vertical drag (150 px = full range, Shift 10× finer), wheel steps,
   // double-click = default, arrows when focused (Shift fine), Home / End = min / max.
   let {
-    label = '', ariaLabel, value, min, max, def, step = 1, fine = 0.1, size = 40, fmt, row = false, onchange,
+    label = '', ariaLabel, value, min, max, def, step = 1, fine = 0.1, size = 40, fmt, row = false, learnId, onchange,
   }: {
     label?: string; ariaLabel?: string; value: number; min: number; max: number; def: number;
     step?: number; fine?: number; size?: number; fmt: (v: number) => string; row?: boolean;
+    /** MIDI-learnable parameter id (right-click → Learn MIDI CC / Reset). */
+    learnId?: string;
     onchange: (v: number) => void;
   } = $props();
 
+  const learn = getContext<LearnCtx | undefined>(LEARN);
   const t = $derived((Math.min(max, Math.max(min, value)) - min) / (max - min));
   const clamp = (v: number) => Math.min(max, Math.max(min, v));
   const quant = (v: number, s: number) => Math.round(v / s) * s;
@@ -51,6 +56,10 @@
   {#if label}<div class="silk">{label}</div>{/if}
   <div
     class="knob"
+    class:learning={isLearning(learn, learnId)}
+    class:learned={isLearned(learn, learnId)}
+    data-learn={learnId}
+    use:learnable={{ ctx: learn, id: learnId, reset: () => apply(def) }}
     role="slider"
     tabindex="0"
     aria-label={ariaLabel ?? label}

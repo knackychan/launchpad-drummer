@@ -2,6 +2,8 @@
   import { pushEsc } from "../lib/esc.ts";
   $effect(() => { if (renaming !== null) return pushEsc(() => { renaming = null; }); });
   // Launchpad MK2 mirror (UI spec 4.1–4.2): top buttons, 8×8 pads, side bank buttons + scribble strips, bank strip.
+  import { getContext } from 'svelte';
+  import { isLearned, isLearning, learnable, LEARN, type LearnCtx } from '../lib/learnable.ts';
   import PadGrid from './PadGrid.svelte';
   import Knob from './Knob.svelte';
   import type { PadInput, Rgb } from '../lib/led.ts';
@@ -34,6 +36,7 @@
     onstop: () => void;
   } = $props();
 
+  const learn = getContext<LearnCtx | undefined>(LEARN);
   const TOP = ['▲', '▼', '◀', '▶', 'S', 'U1', 'U2'];
   const LIGHTS: [keyof LightModes, string, string][] = [
     ['flash', 'FLASH', 'White flash decaying on pad hit'],
@@ -61,7 +64,7 @@
     {#each TOP as glyph}
       <span class="key round dim" aria-hidden="true" title="Not used in Part 1">{glyph}</span>
     {/each}
-    <button type="button" class="key round" title="Stop all · Esc" aria-label="Stop all" onclick={onstop}>■</button>
+    <button type="button" class="key round" class:learning={isLearning(learn, 'stopAll')} class:learned={isLearned(learn, 'stopAll')} data-learn="stopAll" use:learnable={{ ctx: learn, id: 'stopAll' }} title="Stop all · Esc" aria-label="Stop all" onclick={onstop}>■</button>
   </div>
   <div></div><div></div>
 
@@ -106,7 +109,7 @@
     {#if bank}
       <span class="silk strip-title">BANK {activeBank + 1} LIGHTS</span>
       {#each LIGHTS as [key, text, tip]}
-        <button type="button" class="key" class:on={bank.lights[key]} aria-pressed={bank.lights[key]} title={tip} onclick={() => onlight(key, !bank.lights[key])}>{text}</button>
+        <button type="button" class="key" class:on={bank.lights[key]} class:learning={isLearning(learn, `bank.${activeBank}.${key}`)} class:learned={isLearned(learn, `bank.${activeBank}.${key}`)} data-learn="bank.{activeBank}.{key}" use:learnable={{ ctx: learn, id: `bank.${activeBank}.${key}` }} aria-pressed={bank.lights[key]} title={tip} onclick={() => onlight(key, !bank.lights[key])}>{text}</button>
       {/each}
       <div class="sep"></div>
       <Knob
@@ -120,6 +123,7 @@
         fine={0.1}
         size={30}
         fmt={(v) => (v ? `±${(v / 2).toFixed(2)} dB` : 'OFF')}
+        learnId="bank.{activeBank}.humanize"
         onchange={onhumanize}
       />
     {/if}

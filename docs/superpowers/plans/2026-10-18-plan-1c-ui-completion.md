@@ -805,7 +805,7 @@ pub const USER_TEMPLATE: u8 = 0;
 
 Task 11 verification (2026-10-19): `lcxl.rs` codec tests were RED (module missing) then GREEN (9 tests). The router, state and bridge tests were written together with the code, so they were not seen RED first. fmt clean; `cargo test --workspace` all passed (68 lib tests); `npm test` 62 passed; `npm run check` 0 errors, 0 warnings; `npm run build` passed. Implementation notes: `Router::on_lcxl` returns whether the mixer changed (a release or the same value again changes nothing) and goes through `update_group`, so no history. `AppState::on_lcxl` sets a dirty flag and calls `touch()`; the bridge thread (11 ms tick) emits `mixer-changed` when the flag is set and ≥ 33 ms passed since the last emit (trailing edge: the flag stays until emitted), and diffs mute/solo against the last LED state every 16 ms, so screen changes light the LEDs too; a new connection sends all 16 LEDs. The bridge reports its row `Launch Control XL` (role `lcxl`) into the registry. LCXL input is not offered to learn yet (Task 12 adds the `LearnIgnored` hook). Not verified: a real Launch Control XL (D6: protocol values are the spec's expected ones), hot-plug, LED colours, how the faders feel.
 
-### Task 12: MIDI learn
+### Task 12: MIDI learn — DONE
 
 **Purpose.** UI spec 8.1, 8 item 3, 4.3 item 7 and 4.5 (right-click Learn / Reset); engine spec 7.
 
@@ -874,7 +874,9 @@ Toggle: the router fires when the CC value crosses from < 64 to ≥ 64 (it keeps
 
 **Do not:** let learn override the LCXL defaults; bind from the Launchpad; bind anything in the browser preview (arming shows the notice; nothing binds).
 
-**Done when:** [ ] tests first → PASS; [ ] preview: right-click a mixer knob → menu → Learn shows the notice and the blinking outline; Esc cancels; [ ] full verification + build; commit `feat: MIDI learn for pads and on-screen controls`.
+**Done when:** [x] tests first → PASS; [x] preview: right-click a mixer knob → menu → Learn shows the notice and the blinking outline; Esc cancels; [x] full verification + build; commit `feat: MIDI learn for pads and on-screen controls`.
+
+Task 12 verification (2026-10-19): `kit_learn.rs` (18 tests) and `learn.test.ts` were written before the code (RED: module missing). The router and state learn tests were written together with the implementation. fmt clean; `cargo test --workspace` all passed (86 lib tests); `npm test` 67 passed; `npm run check` 0 errors, 0 warnings; `npm run build` passed. Edge/Chrome preview: right-click on a mixer knob opens `Learn MIDI CC` / `Reset`, Learn shows the notice and `.learning`, Esc clears both; the pad menu `Learn MIDI note…` is enabled and arms `Hit a key or pad on any MIDI device · Esc cancels`; SETUP lists AUDIO, MIDI DEVICES, MIDI LEARN, DISPLAY with the exact empty text; 54 controls carry `data-learn`. Design notes: the router returns a `MidiOutcome` (binding to add, pad hit, parameter changes) and `AppState::on_midi` finishes it under the same router lock through `edit_in` (bindings are undoable, `bank.*` parameters coalesce under `learn:{id}`, group and master parameters are mixer changes without history). `mixer-changed` and a new `set-changed` event are emitted by the LCXL bridge thread (≤ 1 per 33 ms, trailing edge); `on_lp_event` and `on_lcxl` now return the `learn-ignored` event for the caller to emit. The `LearnTarget` type serves as the command DTO. The parameters `keys.volume`, `keys.mod`, `seq.play`, `seq.bpm` and `seq.swing` are valid ids and show in the UI, but their CC values are not applied yet: Tasks 13 and 15 add that to `apply_learned_cc`. Not verified: a real controller, hot-plug during learn, `pad-hit` against hardware. The user's uncommitted `PadEditor.svelte` CSS edit was kept out of the commit.
 
 ---
 

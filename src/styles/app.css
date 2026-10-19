@@ -172,3 +172,10 @@ legend { padding: 0 0 10px; }
 .switch input { position: absolute; width: 100%; height: 100%; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
 .switch label:has(:focus-visible) { outline: 2px solid var(--focus); outline-offset: 3px; }
 @media (prefers-reduced-motion: reduce) { .key { transition: none; } }
+
+/* MIDI learn (plan 1C Task 12; mockup 187–189): a learned control carries a dot, a control waiting for MIDI blinks. */
+[data-learn] { position: relative; }
+[data-learn].learned::after { content: ''; position: absolute; top: -2px; right: -2px; width: 6px; height: 6px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 4px var(--warn); pointer-events: none; }
+.learning { animation: learnblink .5s steps(1) infinite; outline-offset: 2px; }
+@keyframes learnblink { 50% { outline: 2px solid var(--warn); } }
+@media (prefers-reduced-motion: reduce) { .learning { animation: none; outline: 2px solid var(--warn); } }

@@ -1,16 +1,21 @@
 <script lang="ts">
+  import { getContext } from 'svelte';
+  import { isLearned, isLearning, learnable, LEARN, type LearnCtx } from '../lib/learnable.ts';
   // Channel fader: recessed tray, light slot rail, two-face cap; level fill(s) beside the slot.
   import { dbToPos, fmtDb, posToDb } from '../lib/mix.ts';
 
   let {
-    label, value, def = 0, height, color = '#5d6779', meters = [], onchange,
+    label, value, def = 0, height, color = '#5d6779', meters = [], learnId, onchange,
   }: {
     label: string; value: number; def?: number; height: number; color?: string;
+    /** MIDI-learnable parameter id (right-click → Learn MIDI CC / Reset). */
+    learnId?: string;
     /** One entry per level fill: a mixer channel index for activity fills, or 'L' / 'R' for master. */
     meters?: (number | 'L' | 'R')[];
     onchange: (db: number) => void;
   } = $props();
 
+  const learn = getContext<LearnCtx | undefined>(LEARN);
   const CAP = 28;
   const pos = $derived(dbToPos(value));
   const apply = (p: number) => {
@@ -43,6 +48,10 @@
 
 <div
   class="fader"
+  class:learning={isLearning(learn, learnId)}
+  class:learned={isLearned(learn, learnId)}
+  data-learn={learnId}
+  use:learnable={{ ctx: learn, id: learnId, reset: () => apply(dbToPos(def)) }}
   role="slider"
   tabindex="0"
   aria-label={label}

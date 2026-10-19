@@ -5,8 +5,10 @@ use crate::lights::PaintSnapshot;
 use lpd_core::audio::{db_to_gain, fader_gain, Command, Event, Sample};
 use lpd_core::devices::launchpad::LpEvent;
 use lpd_core::devices::lcxl::{self, LcxlEvent};
+use lpd_core::kit::learn::{self, Binding, LearnKind, ParamValue, Target};
 use lpd_core::kit::{self, Set};
 use rtrb::{Consumer, Producer};
+use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,9 +19,30 @@ const TOP_MIXER: u8 = 7;
 /// after the lock is released.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiEvent {
-    KeysNote { note: u8, velocity: u8, on: bool },
-    KeysWheel { pitch: f32, r#mod: f32 },
-    MidiLog { text: String },
+    KeysNote {
+        note: u8,
+        velocity: u8,
+        on: bool,
+    },
+    KeysWheel {
+        pitch: f32,
+        r#mod: f32,
+    },
+    MidiLog {
+        text: String,
+    },
+    /// A learned note played a pad (the UI selects it, never re-triggers it).
+    PadHit {
+        bank: u8,
+        x: u8,
+        y: u8,
+    },
+    LearnBound {
+        binding: Binding,
+    },
+    LearnIgnored {
+        reason: String,
+    },
 }
 
 impl UiEvent {
@@ -29,6 +52,9 @@ impl UiEvent {
             Self::KeysNote { .. } => "keys-note",
             Self::KeysWheel { .. } => "keys-wheel",
             Self::MidiLog { .. } => "midi-log",
+            Self::PadHit { .. } => "pad-hit",
+            Self::LearnBound { .. } => "learn-bound",
+            Self::LearnIgnored { .. } => "learn-ignored",
         }
     }
 
@@ -39,8 +65,35 @@ impl UiEvent {
             }
             Self::KeysWheel { pitch, r#mod } => serde_json::json!({ "pitch": pitch, "mod": r#mod }),
             Self::MidiLog { text } => serde_json::json!({ "text": text }),
+            Self::PadHit { bank, x, y } => serde_json::json!({ "bank": bank, "x": x, "y": y }),
+            Self::LearnBound { binding } => serde_json::json!({ "binding": binding }),
+            Self::LearnIgnored { reason } => serde_json::json!({ "reason": reason }),
         }
     }
+}
+
+/// What the next learnable input will be bound to (JS: `{ pad: { bank, x, y } }` or `{ param: id }`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LearnTarget {
+    Pad { bank: u8, x: u8, y: u8 },
+    Param(String),
+}
+
+/// What one MIDI message did, for `AppState::on_midi` to finish once it holds the router lock:
+/// set edits go through the history path, which the router cannot reach.
+#[derive(Debug, Default, PartialEq)]
+pub struct MidiOutcome {
+    /// The event for the UI (keys notes and wheels, pad hits).
+    pub event: Option<UiEvent>,
+    /// Learn: add this binding (an undoable edit) and tell the UI.
+    pub bind: Option<Binding>,
+    /// A learned note played this pad `(bank, x, y)`: the light painter flashes it.
+    pub hit: Option<(usize, u8, u8)>,
+    /// A learned CC changed the mixer (already applied).
+    pub mixer_changed: bool,
+    /// A learned CC changed a set parameter: apply it with `learn:{id}` history coalescing.
+    pub set_param: Option<(String, ParamValue)>,
 }
 
 /// A refused set replacement: nothing changed and the inputs are handed back.
@@ -69,6 +122,11 @@ pub struct Router {
     /// Last wheel positions of the keys inputs, so each `keys-wheel` event carries both.
     keys_pitch: f32,
     keys_mod: f32,
+    learn_armed: Option<LearnTarget>,
+    /// `LearnIgnored` is sent once per arm.
+    learn_ignored_sent: bool,
+    /// Last CC value per (device, cc), for the toggle's rising edge.
+    last_cc: Vec<(String, u8, u8)>,
 }
 
 impl Router {
@@ -92,6 +150,9 @@ impl Router {
             rng: time_seed(),
             keys_pitch: 0.0,
             keys_mod: 0.0,
+            learn_armed: None,
+            learn_ignored_sent: false,
+            last_cc: Vec::new(),
         }
     }
 
@@ -384,14 +445,50 @@ impl Router {
         }
     }
 
-    /// A message from a generic MIDI input (`role` is "keys" or "other"). Returns the event the
-    /// UI should hear, if any; it is plain data (no allocation under the lock) and the caller emits
-    /// it after releasing the router lock. The log line is built by the caller.
-    pub fn on_midi(&mut self, role: &str, msg: MidiMsg) -> Option<UiEvent> {
-        // Role "other" acts only through learn bindings (Task 12).
-        if role != "keys" {
-            return None;
+    /// A message from a generic MIDI input (`role` is "keys" or "other") on `port`. Learn and
+    /// bindings come first (a bound note never reaches the keys); what is left becomes keys
+    /// events for role `keys`. Everything the caller must finish or emit is plain data in the
+    /// outcome (nothing is emitted here).
+    pub fn on_midi(&mut self, port: &str, role: &str, msg: MidiMsg) -> MidiOutcome {
+        let mut out = MidiOutcome::default();
+        if !matches!(role, "keys" | "other") {
+            return out;
         }
+        if let Some(binding) = self.armed_binding(port, &msg) {
+            self.learn_armed = None;
+            out.bind = Some(binding);
+            return out;
+        }
+        match msg {
+            MidiMsg::NoteOn { note, vel, .. } => {
+                if let Some((bank, x, y)) = self.bound_pad(port, note) {
+                    self.trigger_pad_in(usize::from(bank), x, y, f32::from(vel) / 127.0);
+                    out.hit = Some((usize::from(bank), x, y));
+                    out.event = Some(UiEvent::PadHit { bank, x, y });
+                    return out;
+                }
+            }
+            MidiMsg::NoteOff { note, .. } => {
+                if let Some((bank, x, y)) = self.bound_pad(port, note) {
+                    self.release_pad_in(usize::from(bank), x, y);
+                    return out;
+                }
+            }
+            MidiMsg::Cc { cc, value, .. } => {
+                if let Some(id) = self.bound_param(port, cc) {
+                    self.apply_learned_cc(port, cc, value, &id, &mut out);
+                    return out;
+                }
+            }
+            MidiMsg::PitchBend { .. } => {}
+        }
+        if role == "keys" {
+            out.event = self.keys_event(msg);
+        }
+        out
+    }
+
+    fn keys_event(&mut self, msg: MidiMsg) -> Option<UiEvent> {
         match msg {
             MidiMsg::NoteOn { note, vel, .. } => Some(UiEvent::KeysNote {
                 note,
@@ -413,6 +510,127 @@ impl Router {
             }
             MidiMsg::Cc { .. } => None,
         }
+    }
+
+    /// The binding the armed target wants from this message: a note for a pad, a CC for a
+    /// parameter. Anything else is not learned (it plays or acts as usual).
+    fn armed_binding(&self, port: &str, msg: &MidiMsg) -> Option<Binding> {
+        match (self.learn_armed.as_ref()?, msg) {
+            (LearnTarget::Pad { bank, x, y }, MidiMsg::NoteOn { note, .. }) => Some(Binding {
+                device: port.to_string(),
+                kind: LearnKind::Note,
+                number: *note,
+                target: Target::Pad {
+                    bank: *bank,
+                    x: *x,
+                    y: *y,
+                },
+            }),
+            (LearnTarget::Param(id), MidiMsg::Cc { cc, .. }) => Some(Binding {
+                device: port.to_string(),
+                kind: LearnKind::Cc,
+                number: *cc,
+                target: Target::Param(id.clone()),
+            }),
+            _ => None,
+        }
+    }
+
+    fn bound_pad(&self, port: &str, note: u8) -> Option<(u8, u8, u8)> {
+        self.set.learn.iter().find_map(|b| match &b.target {
+            Target::Pad { bank, x, y }
+                if b.kind == LearnKind::Note && b.number == note && b.device == port =>
+            {
+                Some((*bank, *x, *y))
+            }
+            _ => None,
+        })
+    }
+
+    fn bound_param(&self, port: &str, cc: u8) -> Option<String> {
+        self.set.learn.iter().find_map(|b| match &b.target {
+            Target::Param(id) if b.kind == LearnKind::Cc && b.number == cc && b.device == port => {
+                Some(id.clone())
+            }
+            _ => None,
+        })
+    }
+
+    /// A CC bound to parameter `id`. Group and master values apply here (no history); `bank.*`
+    /// goes back in the outcome; the keys and sequencer parameters are applied by their own
+    /// tasks (13 and 15) and do nothing yet.
+    fn apply_learned_cc(&mut self, port: &str, cc: u8, value: u8, id: &str, out: &mut MidiOutcome) {
+        let Some(param) = learn::param_value(id, value) else {
+            return;
+        };
+        if param == ParamValue::Toggle {
+            let last = self.swap_last_cc(port, cc, value);
+            if !(last < 64 && value >= 64) {
+                return;
+            }
+        }
+        if id == "stopAll" {
+            self.stop_all();
+        } else if id == "master" {
+            if learn::apply_mixer_param(&mut self.set.mixer, id, param) {
+                let gain = fader_gain(self.set.mixer.master_db);
+                let _ = self.audio_tx.push(Command::SetMasterGain(gain));
+                out.mixer_changed = true;
+            }
+        } else if let Some(group) = learn::group_index(id) {
+            if learn::apply_mixer_param(&mut self.set.mixer, id, param) {
+                self.send_group(group);
+                out.mixer_changed = true;
+            }
+        } else if id.starts_with("bank.") {
+            out.set_param = Some((id.to_string(), param));
+        }
+    }
+
+    fn swap_last_cc(&mut self, port: &str, cc: u8, value: u8) -> u8 {
+        if let Some(entry) = self
+            .last_cc
+            .iter_mut()
+            .find(|(device, number, _)| device == port && *number == cc)
+        {
+            return std::mem::replace(&mut entry.2, value);
+        }
+        self.last_cc.push((port.to_string(), cc, value));
+        0
+    }
+
+    fn send_group(&mut self, group: usize) {
+        if let Some(g) = self.set.mixer.groups.get(group) {
+            let params = kit::group_params(g);
+            let _ = self.audio_tx.push(Command::SetGroup {
+                group: group as u8,
+                params,
+            });
+        }
+    }
+
+    pub fn arm_learn(&mut self, target: LearnTarget) {
+        self.learn_armed = Some(target);
+        self.learn_ignored_sent = false;
+    }
+
+    pub fn cancel_learn(&mut self) {
+        self.learn_armed = None;
+    }
+
+    pub fn learn_armed(&self) -> bool {
+        self.learn_armed.is_some()
+    }
+
+    /// Launchpad or LCXL input while learning is armed is not bound; the UI is told once per arm.
+    pub fn learn_ignore(&mut self, reason: &str) -> Option<UiEvent> {
+        if self.learn_armed.is_none() || self.learn_ignored_sent {
+            return None;
+        }
+        self.learn_ignored_sent = true;
+        Some(UiEvent::LearnIgnored {
+            reason: reason.to_string(),
+        })
     }
 
     /// A keys input went away: both wheels return to rest. `None` when they already were.
@@ -563,6 +781,10 @@ mod tests {
         assert!(gains.iter().all(|g| *g == db_to_gain(-6.0)), "{gains:?}");
     }
 
+    fn key(r: &mut Router, role: &str, msg: MidiMsg) -> Option<UiEvent> {
+        r.on_midi("K", role, msg).event
+    }
+
     fn router() -> Router {
         router_with_pad(0.0, 0.0).0
     }
@@ -639,10 +861,285 @@ mod tests {
         assert!(r.set().mixer.groups[3].solo);
     }
 
+    fn cc_msg(cc: u8, value: u8) -> MidiMsg {
+        MidiMsg::Cc { ch: 0, cc, value }
+    }
+
+    fn note_on(note: u8, vel: u8) -> MidiMsg {
+        MidiMsg::NoteOn { ch: 0, note, vel }
+    }
+
+    fn bound(device: &str, kind: LearnKind, number: u8, target: Target) -> Binding {
+        Binding {
+            device: device.into(),
+            kind,
+            number,
+            target,
+        }
+    }
+
+    #[test]
+    fn an_armed_param_binds_the_next_cc_and_disarms() {
+        let mut r = router();
+        r.arm_learn(LearnTarget::Param("group.2.volume".into()));
+        let out = r.on_midi("Pad Kontrol", "other", cc_msg(21, 64));
+        assert_eq!(
+            out.bind,
+            Some(bound(
+                "Pad Kontrol",
+                LearnKind::Cc,
+                21,
+                Target::Param("group.2.volume".into())
+            ))
+        );
+        assert!(!r.learn_armed());
+        // The binding is added by the caller; the router changed nothing else.
+        assert!(r.set().learn.is_empty());
+        assert!(!out.mixer_changed);
+    }
+
+    #[test]
+    fn an_armed_pad_binds_the_next_note_and_keeps_it_from_the_keys() {
+        let mut r = router();
+        r.arm_learn(LearnTarget::Pad {
+            bank: 1,
+            x: 2,
+            y: 3,
+        });
+        let out = r.on_midi("K", "keys", note_on(60, 100));
+        assert_eq!(
+            out.bind,
+            Some(bound(
+                "K",
+                LearnKind::Note,
+                60,
+                Target::Pad {
+                    bank: 1,
+                    x: 2,
+                    y: 3
+                }
+            ))
+        );
+        assert_eq!(out.event, None, "the learning note does not play the keys");
+    }
+
+    #[test]
+    fn the_wrong_kind_of_message_is_not_learned() {
+        let mut r = router();
+        r.arm_learn(LearnTarget::Param("master".into()));
+        let out = r.on_midi("K", "keys", note_on(60, 100));
+        assert_eq!(out.bind, None);
+        assert!(r.learn_armed());
+        r.arm_learn(LearnTarget::Pad {
+            bank: 0,
+            x: 0,
+            y: 0,
+        });
+        assert_eq!(r.on_midi("K", "keys", cc_msg(7, 9)).bind, None);
+        assert!(r.learn_armed());
+        r.cancel_learn();
+        assert!(!r.learn_armed());
+    }
+
+    #[test]
+    fn learn_ignored_is_reported_once_per_arm() {
+        let mut r = router();
+        assert_eq!(r.learn_ignore("x"), None, "not armed");
+        r.arm_learn(LearnTarget::Param("master".into()));
+        assert_eq!(
+            r.learn_ignore("Launchpad pads are fixed"),
+            Some(UiEvent::LearnIgnored {
+                reason: "Launchpad pads are fixed".into()
+            })
+        );
+        assert_eq!(r.learn_ignore("Launchpad pads are fixed"), None);
+        r.arm_learn(LearnTarget::Param("master".into()));
+        assert!(r.learn_ignore("again").is_some(), "a new arm starts over");
+    }
+
+    #[test]
+    fn a_bound_note_triggers_the_pad_and_reports_a_hit() {
+        let (mut r, mut rx) = router_with_pad(0.0, 0.0);
+        r.set_mut().learn.push(bound(
+            "K",
+            LearnKind::Note,
+            36,
+            Target::Pad {
+                bank: 0,
+                x: 0,
+                y: 0,
+            },
+        ));
+        let out = r.on_midi("K", "keys", note_on(36, 127));
+        assert_eq!(
+            out.event,
+            Some(UiEvent::PadHit {
+                bank: 0,
+                x: 0,
+                y: 0
+            })
+        );
+        assert_eq!(out.hit, Some((0, 0, 0)));
+        assert_eq!(
+            trigger_gains(&mut rx),
+            vec![1.0],
+            "velocity 127 is full gain"
+        );
+        // Another device's note 36 is not bound.
+        let other = r.on_midi("Other", "keys", note_on(36, 127));
+        assert_eq!(other.hit, None);
+        assert!(matches!(other.event, Some(UiEvent::KeysNote { .. })));
+    }
+
+    #[test]
+    fn a_bound_note_off_releases_and_never_reaches_the_keys() {
+        let (mut r, mut rx) = router_with_pad(0.0, 0.0);
+        r.set_mut().learn.push(bound(
+            "K",
+            LearnKind::Note,
+            36,
+            Target::Pad {
+                bank: 0,
+                x: 0,
+                y: 0,
+            },
+        ));
+        r.on_midi("K", "keys", note_on(36, 100));
+        let off = r.on_midi("K", "keys", MidiMsg::NoteOff { ch: 0, note: 36 });
+        assert_eq!(off.event, None);
+        let mut released = false;
+        while let Ok(cmd) = rx.pop() {
+            released |= matches!(cmd, Command::Release { .. });
+        }
+        assert!(released);
+    }
+
+    #[test]
+    fn a_bound_cc_sets_the_group_volume() {
+        let (mut r, mut rx) = router_with_pad(0.0, 0.0);
+        r.set_mut().learn.push(bound(
+            "K",
+            LearnKind::Cc,
+            7,
+            Target::Param("group.1.volume".into()),
+        ));
+        let out = r.on_midi("K", "other", cc_msg(7, 127));
+        assert!(out.mixer_changed);
+        assert_eq!(r.set().mixer.groups[1].volume_db, 6.0);
+        let sent = set_group_commands(&mut rx);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, 1);
+        // The same value again changes nothing.
+        assert!(!r.on_midi("K", "other", cc_msg(7, 127)).mixer_changed);
+    }
+
+    #[test]
+    fn a_bound_master_cc_sets_the_master() {
+        let mut r = router();
+        r.set_mut()
+            .learn
+            .push(bound("K", LearnKind::Cc, 9, Target::Param("master".into())));
+        assert!(r.on_midi("K", "keys", cc_msg(9, 127)).mixer_changed);
+        assert_eq!(r.set().mixer.master_db, 6.0);
+    }
+
+    #[test]
+    fn a_toggle_fires_only_on_the_rising_edge() {
+        let mut r = router();
+        r.set_mut().learn.push(bound(
+            "K",
+            LearnKind::Cc,
+            64,
+            Target::Param("group.0.mute".into()),
+        ));
+        let mut toggles = 0;
+        for v in [0, 100, 120, 10, 90] {
+            if r.on_midi("K", "other", cc_msg(64, v)).mixer_changed {
+                toggles += 1;
+            }
+        }
+        assert_eq!(toggles, 2);
+        assert!(
+            !r.set().mixer.groups[0].mute,
+            "two toggles end where they began"
+        );
+    }
+
+    #[test]
+    fn a_bank_parameter_is_handed_back_for_the_history_path() {
+        let mut r = router();
+        r.set_mut().learn.push(bound(
+            "K",
+            LearnKind::Cc,
+            20,
+            Target::Param("bank.2.humanize".into()),
+        ));
+        let out = r.on_midi("K", "other", cc_msg(20, 127));
+        assert_eq!(
+            out.set_param,
+            Some(("bank.2.humanize".to_string(), ParamValue::Continuous(6.0)))
+        );
+        assert_eq!(r.set().banks[2].humanize_db, 0.0, "applied by AppState");
+    }
+
+    #[test]
+    fn stop_all_is_a_learnable_toggle() {
+        let (mut r, mut rx) = router_with_pad(0.0, 0.0);
+        r.set_mut().learn.push(bound(
+            "K",
+            LearnKind::Cc,
+            30,
+            Target::Param("stopAll".into()),
+        ));
+        r.on_midi("K", "other", cc_msg(30, 127));
+        let mut stopped = false;
+        while let Ok(cmd) = rx.pop() {
+            stopped |= matches!(cmd, Command::StopAll);
+        }
+        assert!(stopped);
+    }
+
+    #[test]
+    fn learn_events_have_the_registry_names() {
+        let hit = UiEvent::PadHit {
+            bank: 1,
+            x: 2,
+            y: 3,
+        };
+        assert_eq!(hit.name(), "pad-hit");
+        assert_eq!(
+            hit.payload(),
+            serde_json::json!({ "bank": 1, "x": 2, "y": 3 })
+        );
+        let ignored = UiEvent::LearnIgnored { reason: "r".into() };
+        assert_eq!(ignored.name(), "learn-ignored");
+        assert_eq!(ignored.payload(), serde_json::json!({ "reason": "r" }));
+        let b = bound("K", LearnKind::Cc, 1, Target::Param("master".into()));
+        let ev = UiEvent::LearnBound { binding: b };
+        assert_eq!(ev.name(), "learn-bound");
+        assert_eq!(ev.payload()["binding"]["target"]["param"], "master");
+    }
+
+    #[test]
+    fn learn_targets_parse_from_the_js_shapes() {
+        let pad: LearnTarget = serde_json::from_str(r#"{"pad":{"bank":0,"x":1,"y":2}}"#).unwrap();
+        assert_eq!(
+            pad,
+            LearnTarget::Pad {
+                bank: 0,
+                x: 1,
+                y: 2
+            }
+        );
+        let param: LearnTarget = serde_json::from_str(r#"{"param":"group.2.volume"}"#).unwrap();
+        assert_eq!(param, LearnTarget::Param("group.2.volume".into()));
+    }
+
     #[test]
     fn keys_notes_become_keys_note_events() {
         let mut r = router();
-        let on = r.on_midi(
+        let on = key(
+            &mut r,
             "keys",
             MidiMsg::NoteOn {
                 ch: 0,
@@ -658,7 +1155,7 @@ mod tests {
                 on: true
             })
         );
-        let off = r.on_midi("keys", MidiMsg::NoteOff { ch: 0, note: 60 });
+        let off = key(&mut r, "keys", MidiMsg::NoteOff { ch: 0, note: 60 });
         assert_eq!(
             off,
             Some(UiEvent::KeysNote {
@@ -672,7 +1169,7 @@ mod tests {
     #[test]
     fn wheel_events_carry_both_last_values() {
         let mut r = router();
-        let bend = r.on_midi("keys", MidiMsg::PitchBend { ch: 0, value: 4096 });
+        let bend = key(&mut r, "keys", MidiMsg::PitchBend { ch: 0, value: 4096 });
         assert_eq!(
             bend,
             Some(UiEvent::KeysWheel {
@@ -680,7 +1177,8 @@ mod tests {
                 r#mod: 0.0
             })
         );
-        let modw = r.on_midi(
+        let modw = key(
+            &mut r,
             "keys",
             MidiMsg::Cc {
                 ch: 0,
@@ -695,7 +1193,8 @@ mod tests {
                 r#mod: 1.0
             })
         );
-        let low = r.on_midi(
+        let low = key(
+            &mut r,
             "keys",
             MidiMsg::PitchBend {
                 ch: 0,
@@ -715,7 +1214,7 @@ mod tests {
     fn resetting_the_wheels_reports_only_when_they_moved() {
         let mut r = router();
         assert_eq!(r.reset_keys_wheels(), None);
-        r.on_midi("keys", MidiMsg::PitchBend { ch: 0, value: 4096 });
+        key(&mut r, "keys", MidiMsg::PitchBend { ch: 0, value: 4096 });
         assert_eq!(
             r.reset_keys_wheels(),
             Some(UiEvent::KeysWheel {
@@ -729,7 +1228,8 @@ mod tests {
     #[test]
     fn other_ccs_and_other_roles_say_nothing() {
         let mut r = router();
-        let cc = r.on_midi(
+        let cc = key(
+            &mut r,
             "keys",
             MidiMsg::Cc {
                 ch: 0,
@@ -738,7 +1238,8 @@ mod tests {
             },
         );
         assert_eq!(cc, None);
-        let other = r.on_midi(
+        let other = key(
+            &mut r,
             "other",
             MidiMsg::NoteOn {
                 ch: 1,
@@ -752,7 +1253,8 @@ mod tests {
     #[test]
     fn midi_input_never_triggers_pads_or_audio() {
         let (mut r, mut rx) = router_with_pad(0.0, 0.0);
-        r.on_midi(
+        key(
+            &mut r,
             "keys",
             MidiMsg::NoteOn {
                 ch: 0,

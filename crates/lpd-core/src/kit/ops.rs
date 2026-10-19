@@ -1,3 +1,4 @@
+use super::learn::{retarget_pad, swap_pad_bindings};
 use super::{Bank, Pad, Set};
 use serde::Serialize;
 use std::path::Path;
@@ -91,6 +92,16 @@ pub fn move_pad(
         }
     }
     set.banks[tb].set_pad(source);
+    let (f, t) = ((fb as u8, fx, fy), (tb as u8, tx, ty));
+    match result {
+        PadMove::Move => {
+            // The target had no sample but may carry a binding: the moved pad's wins.
+            retarget_pad(&mut set.learn, t, None);
+            retarget_pad(&mut set.learn, f, Some(t));
+        }
+        PadMove::Swap => swap_pad_bindings(&mut set.learn, f, t),
+        PadMove::Copy => {}
+    }
     Some(result)
 }
 pub fn clear_pad(set: &mut Set, bank: usize, x: u8, y: u8) -> bool {
@@ -99,5 +110,7 @@ pub fn clear_pad(set: &mut Set, bank: usize, x: u8, y: u8) -> bool {
     };
     let before = b.pads.len();
     b.pads.retain(|p| (p.x, p.y) != (x, y));
-    before != b.pads.len()
+    let cleared = before != b.pads.len();
+    retarget_pad(&mut set.learn, (bank as u8, x, y), None);
+    cleared
 }

@@ -2,6 +2,8 @@
   import { pushEsc } from "../lib/esc.ts";
   $effect(() => { if (renaming !== null) return pushEsc(() => { renaming = null; }); });
   // 1:1 Launch Control XL mirror + master (UI spec 7.1): label column, 8 channel columns, master.
+  import { getContext } from 'svelte';
+  import { isLearned, isLearning, learnable, LEARN, type LearnCtx } from '../lib/learnable.ts';
   import Knob from './Knob.svelte';
   import Fader from './Fader.svelte';
   import type { Group } from '../lib/model.ts';
@@ -22,6 +24,7 @@
     onstopall?: () => void;
   } = $props();
 
+  const learn = getContext<LearnCtx | undefined>(LEARN);
   const DEFAULT_DIMS: MixDims = {
     cw: 50,
     fh: 120,
@@ -97,13 +100,13 @@
             ondblclick={() => { renaming = i; }}
           ><span class="nm">{groupLegend(i, group.name)}</span></button>
         {/if}
-        <Knob ariaLabel="{group.name} pan" value={group.pan} min={-1} max={1} def={0} step={0.02} fine={0.01} size={d.kn} fmt={fmtPan} onchange={(v) => set(i, 'pan', v)} />
-        <Knob ariaLabel="{group.name} pitch" value={group.pitchSemitones} min={-12} max={12} def={0} step={1} fine={0.1} size={d.kn} fmt={fmtSemis} onchange={(v) => set(i, 'pitchSemitones', v)} />
-        <Knob ariaLabel="{group.name} low-pass" value={lpToKnob(group.lowpassHz)} min={0} max={1} def={1} step={0.01} fine={0.002} size={d.kn} fmt={fmtLp} onchange={(t) => set(i, 'lowpassHz', t >= 0.999 ? 20000 : knobToLp(t))} />
-        <Fader label="{group.name} volume" value={group.volumeDb} height={d.fh} meters={[i]} onchange={(db) => set(i, 'volumeDb', db)} />
+        <Knob ariaLabel="{group.name} pan" value={group.pan} min={-1} max={1} def={0} step={0.02} fine={0.01} size={d.kn} fmt={fmtPan} learnId="group.{i}.pan" onchange={(v) => set(i, 'pan', v)} />
+        <Knob ariaLabel="{group.name} pitch" value={group.pitchSemitones} min={-12} max={12} def={0} step={1} fine={0.1} size={d.kn} fmt={fmtSemis} learnId="group.{i}.pitch" onchange={(v) => set(i, 'pitchSemitones', v)} />
+        <Knob ariaLabel="{group.name} low-pass" value={lpToKnob(group.lowpassHz)} min={0} max={1} def={1} step={0.01} fine={0.002} size={d.kn} fmt={fmtLp} learnId="group.{i}.lowpass" onchange={(t) => set(i, 'lowpassHz', t >= 0.999 ? 20000 : knobToLp(t))} />
+        <Fader label="{group.name} volume" value={group.volumeDb} height={d.fh} meters={[i]} learnId="group.{i}.volume" onchange={(db) => set(i, 'volumeDb', db)} />
         <span class="lcd">{fmtDbShort(group.volumeDb)}</span>
-        <button type="button" class="key" class:on={group.mute} class:amber={group.mute} aria-pressed={group.mute} aria-label="{group.name} mute" onclick={() => set(i, 'mute', !group.mute)}>{narrow ? 'M' : 'MUTE'}</button>
-        <button type="button" class="key" class:on={group.solo} class:green={group.solo} aria-pressed={group.solo} aria-label="{group.name} solo" onclick={() => set(i, 'solo', !group.solo)}>{narrow ? 'S' : 'SOLO'}</button>
+        <button type="button" class="key" class:on={group.mute} class:amber={group.mute} class:learning={isLearning(learn, `group.${i}.mute`)} class:learned={isLearned(learn, `group.${i}.mute`)} data-learn="group.{i}.mute" use:learnable={{ ctx: learn, id: `group.${i}.mute` }} aria-pressed={group.mute} aria-label="{group.name} mute" onclick={() => set(i, 'mute', !group.mute)}>{narrow ? 'M' : 'MUTE'}</button>
+        <button type="button" class="key" class:on={group.solo} class:green={group.solo} class:learning={isLearning(learn, `group.${i}.solo`)} class:learned={isLearned(learn, `group.${i}.solo`)} data-learn="group.{i}.solo" use:learnable={{ ctx: learn, id: `group.${i}.solo` }} aria-pressed={group.solo} aria-label="{group.name} solo" onclick={() => set(i, 'solo', !group.solo)}>{narrow ? 'S' : 'SOLO'}</button>
       </div>
     {/each}
   </div>
@@ -111,7 +114,7 @@
   <div class="mx-col mx-master">
     <div class="scrib screen active master-scrib"><span class="nm">MASTER</span></div>
     <div></div><div></div><div></div>
-    <Fader label="Master volume" value={masterDb} height={d.fh} color="#ff5b1f" meters={['L', 'R']} onchange={onupdatemaster} />
+    <Fader label="Master volume" value={masterDb} height={d.fh} color="#ff5b1f" meters={['L', 'R']} learnId="master" onchange={onupdatemaster} />
     <span class="lcd">{fmtDbShort(masterDb)}</span>
     <div></div><div></div>
   </div>

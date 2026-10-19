@@ -111,6 +111,7 @@ fn run(app: AppHandle, state: AppState) {
     let start = Instant::now();
     let mut next_check = start;
     let mut last_emit = start;
+    let mut last_set_emit = start;
     let mut last_led = start;
     loop {
         let now = Instant::now();
@@ -128,6 +129,13 @@ fn run(app: AppHandle, state: AppState) {
                 crate::logfile::log(format!("Launch Control XL mixer event failed: {error}"));
             }
             last_emit = now;
+        }
+        if emit_due(last_set_emit, now) && state.take_set_change() {
+            // A learned control changed the set (bank parameters): the screen takes it whole.
+            if let Err(error) = app.emit("set-changed", state.get_current_set()) {
+                crate::logfile::log(format!("set-changed event failed: {error}"));
+            }
+            last_set_emit = now;
         }
         if now.duration_since(last_led) >= LED_INTERVAL {
             last_led = now;
@@ -199,12 +207,15 @@ fn check_connection(
     }
     *connection = None;
     let app_state = state.clone();
+    let events = app.clone();
     let input_connection = match input.connect(
         &input_port,
         "launchpad-drummer-lcxl-in",
         move |_, msg, _| {
             if let Some(ev) = lcxl::decode(msg) {
-                app_state.on_lcxl(ev);
+                if let Some(ignored) = app_state.on_lcxl(ev) {
+                    let _ = events.emit(ignored.name(), ignored.payload());
+                }
             }
         },
         (),

@@ -13,13 +13,14 @@ use crate::config::{self, AppConfig, AudioPrefs};
 use crate::devices::{self, MidiDevice, MidiMsg};
 use crate::lights::LightPainter;
 use crate::logfile;
-use crate::router::{Router, UiEvent};
+use crate::router::{LearnTarget, Router, UiEvent};
 use crate::saver::{SaveState, SaveStatus, Saver};
 use crate::startup::{self, Startup};
 use crate::store::{prepare_sample, KitManager, LoadedKit};
 use lpd_core::audio::{Command, Event, Sample, Taps};
 use lpd_core::devices::launchpad::LpEvent;
 use lpd_core::devices::lcxl::LcxlEvent;
+use lpd_core::kit::learn;
 use lpd_core::kit::{self, History, Pad, Set};
 use rtrb::{Consumer, Producer};
 use std::collections::HashMap;
@@ -171,6 +172,8 @@ pub struct AppState {
     wheel: Arc<Mutex<Option<UiEvent>>>,
     /// The Launch Control XL moved the mixer since `mixer-changed` was last emitted.
     mixer_dirty: Arc<AtomicBool>,
+    /// A learned control changed the set (bank parameters) since `set-changed` was last emitted.
+    set_dirty: Arc<AtomicBool>,
     saver: Arc<Mutex<Saver>>,
     save_gate: Arc<Mutex<()>>,
     writer: Writer,
@@ -214,6 +217,7 @@ impl AppState {
             midi: Arc::default(),
             wheel: Arc::default(),
             mixer_dirty: Arc::new(AtomicBool::new(false)),
+            set_dirty: Arc::new(AtomicBool::new(false)),
             saver: Arc::new(Mutex::new(Saver::new())),
             save_gate: Arc::new(Mutex::new(())),
             writer,
@@ -317,29 +321,71 @@ impl AppState {
     }
 
     /// Hardware input. Ignored while a game owns the pads (decided under the router lock, so a
-    /// mode switch cannot interleave with a half-handled event).
-    pub fn on_lp_event(&self, ev: LpEvent) {
-        {
+    /// mode switch cannot interleave with a half-handled event). Returns the `learn-ignored`
+    /// event when learning is armed (the Launchpad is not learnable).
+    pub fn on_lp_event(&self, ev: LpEvent) -> Option<UiEvent> {
+        let ignored = {
             let mut r = lock(&self.router);
             if self.input_mode() != InputMode::Sampler {
-                return;
+                return None;
             }
             r.on_lp_event(ev);
-        }
+            match ev {
+                LpEvent::PadDown { .. } | LpEvent::SideDown(_) | LpEvent::TopDown(_) => {
+                    r.learn_ignore("Launchpad pads are fixed")
+                }
+                _ => None,
+            }
+        };
         if let LpEvent::PadDown { x, y } = ev {
             self.record_hit(x, y);
         }
+        ignored
     }
 
     /// A message from a generic MIDI input. Every message updates the router (wheel tracking,
-    /// later learn bindings); `log` says whether it also gets a `midi-log` line (the caller
-    /// throttles the controller floods). The returned events are for the caller to emit once no
-    /// lock is held; wheel moves are not returned but coalesced (see `take_wheel`). Nothing is
-    /// allocated or formatted under the router lock.
+    /// learn, bindings); `log` says whether it also gets a `midi-log` line (the caller throttles
+    /// the controller floods). The returned events are for the caller to emit once no lock is
+    /// held; wheel moves are not returned but coalesced (see `take_wheel`). A learned binding
+    /// is an undoable edit; a learned parameter is a mixer change (not undoable) or a set edit
+    /// coalesced under `learn:{id}`. The log line is formatted after the lock is released.
     pub fn on_midi(&self, port: &str, role: &str, msg: MidiMsg, log: bool) -> Vec<UiEvent> {
-        let event = lock(&self.router).on_midi(role, msg);
-        let mut events = Vec::with_capacity(2);
-        match event {
+        let now = Instant::now();
+        let mut events = Vec::with_capacity(3);
+        let mut r = lock(&self.router);
+        let out = r.on_midi(port, role, msg);
+        let active_bank = r.bank();
+        let mut touched = out.mixer_changed;
+        if let Some(binding) = out.bind {
+            self.edit_in(&mut r, None, now, |set| {
+                learn::bind(&mut set.learn, binding.clone())
+            });
+            touched = true;
+            events.push(UiEvent::LearnBound { binding });
+        }
+        if let Some((id, value)) = out.set_param {
+            let key = format!("learn:{id}");
+            let changed = self.edit_in(&mut r, Some(&key), now, |set| {
+                learn::apply_set_param(set, &id, value)
+            });
+            if changed {
+                self.set_dirty.store(true, Ordering::SeqCst);
+                touched = true;
+            }
+        }
+        drop(r);
+        if out.mixer_changed {
+            self.mixer_dirty.store(true, Ordering::SeqCst);
+        }
+        if touched {
+            self.touch();
+        }
+        if let Some((bank, x, y)) = out.hit {
+            if bank == active_bank {
+                self.record_hit(x, y);
+            }
+        }
+        match out.event {
             Some(wheel @ UiEvent::KeysWheel { .. }) => *lock(&self.wheel) = Some(wheel),
             Some(other) => events.push(other),
             None => {}
@@ -350,6 +396,23 @@ impl AppState {
             });
         }
         events
+    }
+
+    /// Arm learning for `target` (replacing any armed target).
+    pub fn arm_learn(&self, target: LearnTarget) {
+        lock(&self.router).arm_learn(target);
+    }
+
+    pub fn cancel_learn(&self) {
+        lock(&self.router).cancel_learn();
+    }
+
+    /// Remove one binding (an undoable edit); returns the set.
+    pub fn unbind(&self, index: usize) -> Set {
+        self.edit(None, |set| {
+            learn::unbind(&mut set.learn, index);
+            set.clone()
+        })
     }
 
     /// The latest unsent `keys-wheel` event, if any (called every ~16 ms by the emitter thread,
@@ -396,18 +459,29 @@ impl AppState {
     }
 
     /// A Launch Control XL control. Mixer values are not undoable (UI spec 7.3), but the set is
-    /// dirty for autosave and the screen is told (throttled, see `take_mixer_change`).
-    pub fn on_lcxl(&self, ev: LcxlEvent) {
-        let changed = lock(&self.router).on_lcxl(ev);
+    /// dirty for autosave and the screen is told (throttled, see `take_mixer_change`). Returns
+    /// the `learn-ignored` event when learning is armed (the LCXL is fixed in Part 1).
+    pub fn on_lcxl(&self, ev: LcxlEvent) -> Option<UiEvent> {
+        let (changed, ignored) = {
+            let mut r = lock(&self.router);
+            let changed = r.on_lcxl(ev);
+            (changed, r.learn_ignore("LCXL controls are fixed in Part 1"))
+        };
         if changed {
             self.mixer_dirty.store(true, Ordering::SeqCst);
             self.touch();
         }
+        ignored
     }
 
     /// True once per hardware mixer change; the LCXL bridge emits `mixer-changed` for it.
     pub fn take_mixer_change(&self) -> bool {
         self.mixer_dirty.swap(false, Ordering::SeqCst)
+    }
+
+    /// True once per learned set change; the sync thread emits `set-changed` for it.
+    pub fn take_set_change(&self) -> bool {
+        self.set_dirty.swap(false, Ordering::SeqCst)
     }
 
     pub fn mixer(&self) -> lpd_core::kit::Mixer {
@@ -1320,6 +1394,165 @@ mod tests {
         let (mute, solo) = state.mute_solo();
         assert!(mute[4] && !mute[6]);
         assert!(solo[6] && !solo[4]);
+    }
+
+    fn key_note(note: u8) -> MidiMsg {
+        MidiMsg::NoteOn {
+            ch: 0,
+            note,
+            vel: 100,
+        }
+    }
+
+    #[test]
+    fn learning_a_param_adds_an_undoable_binding_and_tells_the_ui() {
+        let (state, _rx) = app();
+        state.arm_learn(LearnTarget::Param("group.2.volume".into()));
+        let events = state.on_midi(
+            "K",
+            "other",
+            MidiMsg::Cc {
+                ch: 0,
+                cc: 21,
+                value: 5,
+            },
+            false,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [UiEvent::LearnBound { binding }] if binding.number == 21
+        ));
+        assert_eq!(state.get_current_set().learn.len(), 1);
+        assert!(state.history_state().can_undo);
+        assert!(state.undo().unwrap().learn.is_empty());
+        // Disarmed after the bind: the next CC does nothing.
+        let after = state.on_midi(
+            "K",
+            "other",
+            MidiMsg::Cc {
+                ch: 0,
+                cc: 22,
+                value: 5,
+            },
+            false,
+        );
+        assert!(after.is_empty());
+    }
+
+    #[test]
+    fn learning_a_pad_binds_a_note_and_unbind_removes_it() {
+        let (state, _rx) = app();
+        state.arm_learn(LearnTarget::Pad {
+            bank: 0,
+            x: 3,
+            y: 4,
+        });
+        state.on_midi("K", "keys", key_note(48), false);
+        assert_eq!(state.get_current_set().learn.len(), 1);
+        let set = state.unbind(0);
+        assert!(set.learn.is_empty());
+        assert!(
+            state.undo().unwrap().learn.len() == 1,
+            "unbinding is undoable"
+        );
+    }
+
+    #[test]
+    fn launchpad_and_lcxl_input_while_armed_say_so_once() {
+        let (state, _rx) = app();
+        assert!(state.on_lp_event(LpEvent::PadDown { x: 0, y: 0 }).is_none());
+        state.arm_learn(LearnTarget::Param("master".into()));
+        let first = state.on_lp_event(LpEvent::PadDown { x: 0, y: 0 });
+        assert_eq!(
+            first,
+            Some(UiEvent::LearnIgnored {
+                reason: "Launchpad pads are fixed".into()
+            })
+        );
+        assert!(state.on_lp_event(LpEvent::PadDown { x: 1, y: 0 }).is_none());
+        assert!(state
+            .on_lcxl(LcxlEvent::Fader { ch: 0, value: 100 })
+            .is_none());
+        assert!(state.get_current_set().learn.is_empty(), "nothing is bound");
+        // The LCXL still moved the mixer.
+        assert_ne!(state.get_current_set().mixer.groups[0].volume_db, 0.0);
+        state.arm_learn(LearnTarget::Param("master".into()));
+        assert_eq!(
+            state.on_lcxl(LcxlEvent::Fader { ch: 0, value: 50 }),
+            Some(UiEvent::LearnIgnored {
+                reason: "LCXL controls are fixed in Part 1".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_learned_mixer_cc_is_not_undoable_but_marks_the_mixer_and_set_dirty() {
+        let (state, _rx) = app();
+        state.arm_learn(LearnTarget::Param("group.3.volume".into()));
+        state.on_midi(
+            "K",
+            "other",
+            MidiMsg::Cc {
+                ch: 0,
+                cc: 7,
+                value: 0,
+            },
+            false,
+        );
+        let _ = state.take_mixer_change();
+        let before = save_rev(&state);
+        state.on_midi(
+            "K",
+            "other",
+            MidiMsg::Cc {
+                ch: 0,
+                cc: 7,
+                value: 127,
+            },
+            false,
+        );
+        assert_eq!(state.get_current_set().mixer.groups[3].volume_db, 6.0);
+        assert_eq!(save_rev(&state), before + 1);
+        assert!(state.take_mixer_change());
+        // Only the binding is in the history.
+        assert!(state.undo().unwrap().learn.is_empty());
+        assert!(!state.history_state().can_undo);
+    }
+
+    #[test]
+    fn a_learned_bank_cc_sweep_is_one_undo_step() {
+        let (state, _rx) = app();
+        state.arm_learn(LearnTarget::Param("bank.1.humanize".into()));
+        state.on_midi(
+            "K",
+            "other",
+            MidiMsg::Cc {
+                ch: 0,
+                cc: 20,
+                value: 0,
+            },
+            false,
+        );
+        for v in [10, 40, 80, 127] {
+            state.on_midi(
+                "K",
+                "other",
+                MidiMsg::Cc {
+                    ch: 0,
+                    cc: 20,
+                    value: v,
+                },
+                false,
+            );
+        }
+        assert_eq!(state.get_current_set().banks[1].humanize_db, 6.0);
+        assert!(state.take_set_change());
+        let undone = state.undo().unwrap();
+        assert_eq!(
+            undone.banks[1].humanize_db, 0.0,
+            "one step undoes the sweep"
+        );
+        assert_eq!(undone.learn.len(), 1, "the binding is still there");
     }
 
     #[test]

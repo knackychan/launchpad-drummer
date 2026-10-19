@@ -1,6 +1,7 @@
 use crate::audio::{self, AsioInfo, AudioController, AudioDevice, AudioStatus};
 use crate::config::{AppConfig, AudioPrefs};
 use crate::devices::MidiDevice;
+use crate::router::LearnTarget;
 use crate::saver::SaveStatus;
 use crate::startup::Startup;
 use crate::state::{
@@ -443,6 +444,22 @@ pub(crate) fn undo(state: State<'_, AppState>) -> Option<Set> {
 #[tauri::command]
 pub(crate) fn redo(state: State<'_, AppState>) -> Option<Set> {
     state.redo()
+}
+
+/// Learn the next MIDI input for `target` (`{ pad: { bank, x, y } }` or `{ param: id }`).
+#[tauri::command]
+pub(crate) fn arm_learn(target: LearnTarget, state: State<'_, AppState>) {
+    state.arm_learn(target);
+}
+
+#[tauri::command]
+pub(crate) fn cancel_learn(state: State<'_, AppState>) {
+    state.cancel_learn();
+}
+
+#[tauri::command]
+pub(crate) fn unbind(index: usize, state: State<'_, AppState>) -> Set {
+    state.unbind(index)
 }
 
 #[tauri::command]
