@@ -165,6 +165,9 @@ pub struct AppState {
     config: Arc<Mutex<ConfigFile>>,
     /// Known MIDI devices (a leaf lock; the Launchpad bridge and the input poller report here).
     pub midi: devices::SharedRegistry,
+    /// The newest `keys-wheel` event not emitted yet (a leaf lock): wheel messages arrive in
+    /// floods, so the emitter thread sends only the latest value at ~60 Hz.
+    wheel: Arc<Mutex<Option<UiEvent>>>,
     saver: Arc<Mutex<Saver>>,
     save_gate: Arc<Mutex<()>>,
     writer: Writer,
@@ -206,6 +209,7 @@ impl AppState {
             startup: Arc::new(Mutex::new(Startup::FirstRun)),
             config: Arc::default(),
             midi: Arc::default(),
+            wheel: Arc::default(),
             saver: Arc::new(Mutex::new(Saver::new())),
             save_gate: Arc::new(Mutex::new(())),
             writer,
@@ -323,10 +327,39 @@ impl AppState {
         }
     }
 
-    /// A message from a generic MIDI input. The returned events are for the caller to emit once
-    /// no lock is held.
-    pub fn on_midi(&self, port: &str, role: &str, msg: MidiMsg) -> Vec<UiEvent> {
-        lock(&self.router).on_midi(port, role, msg)
+    /// A message from a generic MIDI input. Every message updates the router (wheel tracking,
+    /// later learn bindings); `log` says whether it also gets a `midi-log` line (the caller
+    /// throttles the controller floods). The returned events are for the caller to emit once no
+    /// lock is held; wheel moves are not returned but coalesced (see `take_wheel`). Nothing is
+    /// allocated or formatted under the router lock.
+    pub fn on_midi(&self, port: &str, role: &str, msg: MidiMsg, log: bool) -> Vec<UiEvent> {
+        let event = lock(&self.router).on_midi(role, msg);
+        let mut events = Vec::with_capacity(2);
+        match event {
+            Some(wheel @ UiEvent::KeysWheel { .. }) => *lock(&self.wheel) = Some(wheel),
+            Some(other) => events.push(other),
+            None => {}
+        }
+        if log {
+            events.push(UiEvent::MidiLog {
+                text: format!("{port}: {msg:?}"),
+            });
+        }
+        events
+    }
+
+    /// The latest unsent `keys-wheel` event, if any (called every ~16 ms by the emitter thread,
+    /// so the last value always arrives).
+    pub fn take_wheel(&self) -> Option<UiEvent> {
+        lock(&self.wheel).take()
+    }
+
+    /// A keys input closed or changed role: its wheels go back to rest.
+    pub fn keys_input_closed(&self) {
+        let reset = lock(&self.router).reset_keys_wheels();
+        if reset.is_some() {
+            *lock(&self.wheel) = reset;
+        }
     }
 
     pub fn midi_devices(&self) -> Vec<MidiDevice> {
@@ -1270,18 +1303,39 @@ mod tests {
     }
 
     #[test]
-    fn on_midi_hands_the_events_back_to_the_caller() {
+    fn on_midi_hands_back_events_and_coalesces_wheels() {
         let (state, _rx) = app();
-        let events = state.on_midi(
-            "Keystation 49 MK3",
-            "keys",
-            MidiMsg::NoteOn {
-                ch: 0,
-                note: 60,
-                vel: 90,
-            },
+        let note = MidiMsg::NoteOn {
+            ch: 0,
+            note: 60,
+            vel: 90,
+        };
+        assert_eq!(state.on_midi("K", "keys", note, true).len(), 2);
+        let silent = state.on_midi("K", "keys", note, false);
+        assert!(matches!(silent.as_slice(), [UiEvent::KeysNote { .. }]));
+
+        // Every wheel message updates the router; only the newest value is kept for emitting.
+        for value in [100, 200, 300] {
+            let events = state.on_midi("K", "keys", MidiMsg::PitchBend { ch: 0, value }, false);
+            assert!(events.is_empty());
+        }
+        assert_eq!(
+            state.take_wheel(),
+            Some(UiEvent::KeysWheel {
+                pitch: 300.0 / 8192.0,
+                r#mod: 0.0
+            })
         );
-        assert_eq!(events.len(), 2);
+        assert_eq!(state.take_wheel(), None);
+
+        state.keys_input_closed();
+        assert_eq!(
+            state.take_wheel(),
+            Some(UiEvent::KeysWheel {
+                pitch: 0.0,
+                r#mod: 0.0
+            })
+        );
     }
 
     #[test]

@@ -1,13 +1,15 @@
 //! MIDI device registry and the generic input poller (every port that is not a Launchpad or a
 //! Launch Control XL).
 
+use crate::router::UiEvent;
 use crate::state::AppState;
 use lpd_core::devices::launchpad as lp;
 use midir::{MidiInput, MidiInputConnection};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
 const RECHECK: Duration = Duration::from_secs(2);
@@ -23,7 +25,9 @@ pub struct MidiDevice {
 }
 
 pub fn classify(port: &str, roles: &BTreeMap<String, String>) -> &'static str {
-    if lp::is_launchpad_port(port) {
+    // The bridge matches only the main port; secondary ports such as "MIDIIN2 (Launchpad MK2)"
+    // are classified too, so nobody opens them as a generic input.
+    if lp::is_launchpad_port(port) || port.contains("Launchpad MK2") {
         return "launchpad";
     }
     if port.contains("Launch Control XL") {
@@ -142,12 +146,116 @@ fn announce(app: &AppHandle, list: Vec<MidiDevice>) {
     }
 }
 
+/// Controller messages (pitch bend, CCs) reach the log at most this often per kind.
+const LOG_INTERVAL: Duration = Duration::from_millis(100);
+/// The emitter thread sends the newest wheel position this often (~60 Hz).
+const WHEEL_INTERVAL: Duration = Duration::from_millis(16);
+
+/// Decides which messages get a `midi-log` line: notes always, pitch bend and each CC number at
+/// most once per `LOG_INTERVAL`. Only the log is thinned; every message is still processed.
+pub struct LogThrottle {
+    bend: Option<Instant>,
+    cc: [Option<Instant>; 128],
+}
+
+impl LogThrottle {
+    pub fn new() -> Self {
+        Self {
+            bend: None,
+            cc: [None; 128],
+        }
+    }
+
+    pub fn allow(&mut self, msg: &MidiMsg, now: Instant) -> bool {
+        let last = match msg {
+            MidiMsg::NoteOn { .. } | MidiMsg::NoteOff { .. } => return true,
+            MidiMsg::PitchBend { .. } => &mut self.bend,
+            MidiMsg::Cc { cc, .. } => &mut self.cc[usize::from(*cc & 0x7F)],
+        };
+        if last.is_some_and(|t| now.duration_since(t) < LOG_INTERVAL) {
+            return false;
+        }
+        *last = Some(now);
+        true
+    }
+}
+
+impl Default for LogThrottle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Notes currently held on one input (a 128-bit set), shared by its callback and the poller so a
+/// closing input can release them.
+#[derive(Default)]
+struct Held([AtomicU64; 2]);
+
+impl Held {
+    fn set(&self, note: u8, on: bool) {
+        let bit = 1u64 << (note & 63);
+        let word = &self.0[usize::from((note >> 6) & 1)];
+        if on {
+            word.fetch_or(bit, Ordering::Relaxed);
+        } else {
+            word.fetch_and(!bit, Ordering::Relaxed);
+        }
+    }
+
+    fn take_all(&self) -> Vec<u8> {
+        let mut notes = Vec::new();
+        for (index, word) in self.0.iter().enumerate() {
+            let bits = word.swap(0, Ordering::Relaxed);
+            notes.extend(
+                (0..64u8)
+                    .filter(|n| (bits >> n) & 1 == 1)
+                    .map(|n| n + 64 * index as u8),
+            );
+        }
+        notes
+    }
+}
+
+struct Open {
+    role: &'static str,
+    held: Arc<Held>,
+    connection: MidiInputConnection<()>,
+}
+
+/// Close an input and tell the UI about what it leaves behind: notes still held are released
+/// and the wheels return to rest, so nothing stays stuck.
+fn release(app: &AppHandle, state: &AppState, open: Open) {
+    let Open {
+        role,
+        held,
+        connection,
+    } = open;
+    drop(connection);
+    for note in held.take_all() {
+        let off = UiEvent::KeysNote {
+            note,
+            velocity: 0,
+            on: false,
+        };
+        let _ = app.emit(off.name(), off.payload());
+    }
+    if role == "keys" {
+        state.keys_input_closed();
+    }
+}
+
 /// Poll the input ports every 2 s and listen to every generic one (role `keys` or `other`).
 /// Launchpad and LCXL ports are never opened here: their bridges own them.
 pub fn start(app: AppHandle, state: AppState) {
+    let (wheel_app, wheel_state) = (app.clone(), state.clone());
+    std::thread::spawn(move || loop {
+        std::thread::sleep(WHEEL_INTERVAL);
+        if let Some(wheel) = wheel_state.take_wheel() {
+            let _ = wheel_app.emit(wheel.name(), wheel.payload());
+        }
+    });
     std::thread::spawn(move || {
-        let mut connections: HashMap<String, (&'static str, MidiInputConnection<()>)> =
-            HashMap::new();
+        let mut connections: HashMap<String, Open> = HashMap::new();
         loop {
             poll(&app, &state, &mut connections);
             std::thread::sleep(RECHECK);
@@ -155,11 +263,7 @@ pub fn start(app: AppHandle, state: AppState) {
     });
 }
 
-fn poll(
-    app: &AppHandle,
-    state: &AppState,
-    connections: &mut HashMap<String, (&'static str, MidiInputConnection<()>)>,
-) {
+fn poll(app: &AppHandle, state: &AppState, connections: &mut HashMap<String, Open>) {
     let Ok(input) = MidiInput::new("launchpad-drummer-devices") else {
         return;
     };
@@ -170,7 +274,16 @@ fn poll(
         .collect();
     let roles = state.get_config().midi_roles;
     // A vanished port, or one whose role changed, is closed; the loop below reopens it.
-    connections.retain(|name, (role, _)| names.contains(name) && classify(name, &roles) == *role);
+    let stale: Vec<String> = connections
+        .iter()
+        .filter(|(name, open)| !names.contains(name) || classify(name, &roles) != open.role)
+        .map(|(name, _)| name.clone())
+        .collect();
+    for name in stale {
+        if let Some(open) = connections.remove(&name) {
+            release(app, state, open);
+        }
+    }
 
     let mut present = Vec::new();
     for name in &names {
@@ -183,19 +296,22 @@ fn poll(
             "connected"
         } else {
             match connect(app, state, name, role) {
-                Ok(connection) => {
-                    connections.insert(name.clone(), (role, connection));
+                Ok(open) => {
+                    connections.insert(name.clone(), open);
                     "connected"
                 }
                 Err(error) => {
-                    if state.midi_status(name) != Some("busy".to_string()) {
+                    if state.midi_status(name).as_deref() != Some("busy") {
                         crate::logfile::log(format!("MIDI input {name}: {error}"));
                     }
                     "busy"
                 }
             }
         };
-        report(app, &state.midi, name, role, status);
+        // The player may have flipped the role while this round ran: report the newest one, so
+        // the switch does not snap back (the next round reopens the port with it).
+        let current = classify(name, &state.get_config().midi_roles);
+        report(app, &state.midi, name, current, status);
     }
     let removed = {
         let mut r = state.midi.lock().unwrap_or_else(PoisonError::into_inner);
@@ -211,7 +327,7 @@ fn connect(
     state: &AppState,
     name: &str,
     role: &'static str,
-) -> Result<MidiInputConnection<()>, String> {
+) -> Result<Open, String> {
     let input = MidiInput::new("launchpad-drummer-generic-in").map_err(|e| e.to_string())?;
     let port = input
         .ports()
@@ -221,7 +337,10 @@ fn connect(
     let app = app.clone();
     let state = state.clone();
     let port_name = name.to_string();
-    input
+    let held = Arc::new(Held::default());
+    let callback_held = held.clone();
+    let mut throttle = LogThrottle::new();
+    let connection = input
         .connect(
             &port,
             "launchpad-drummer-generic-in",
@@ -229,14 +348,27 @@ fn connect(
                 let Some(msg) = parse(bytes) else {
                     return;
                 };
+                if role == "keys" {
+                    match msg {
+                        MidiMsg::NoteOn { note, .. } => callback_held.set(note, true),
+                        MidiMsg::NoteOff { note, .. } => callback_held.set(note, false),
+                        _ => {}
+                    }
+                }
+                let log = throttle.allow(&msg, Instant::now());
                 // The router lock is released before anything is emitted.
-                for event in state.on_midi(&port_name, role, msg) {
+                for event in state.on_midi(&port_name, role, msg, log) {
                     let _ = app.emit(event.name(), event.payload());
                 }
             },
             (),
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(Open {
+        role,
+        held,
+        connection,
+    })
 }
 
 /// Resolve `app.state()` once per bridge call site.
@@ -254,7 +386,12 @@ mod tests {
 
     #[test]
     fn classifies_by_port_name() {
-        for name in ["Launchpad MK2", "Launchpad MK2 16", "2- Launchpad MK2"] {
+        for name in [
+            "Launchpad MK2",
+            "Launchpad MK2 16",
+            "2- Launchpad MK2",
+            "MIDIIN2 (Launchpad MK2)",
+        ] {
             assert_eq!(classify(name, &none()), "launchpad", "{name}");
         }
         assert_eq!(classify("Launch Control XL", &none()), "lcxl");
@@ -361,6 +498,48 @@ mod tests {
         assert!(r.remove_absent(&["Some Synth".to_string()]));
         let ports: Vec<String> = r.list().into_iter().map(|d| d.port).collect();
         assert_eq!(ports, ["Launchpad MK2", "Launch Control XL", "Some Synth"]);
+    }
+
+    #[test]
+    fn log_throttle_thins_controllers_but_never_notes() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut t = LogThrottle::new();
+        let bend = MidiMsg::PitchBend { ch: 0, value: 1 };
+        let cc = |cc| MidiMsg::Cc {
+            ch: 0,
+            cc,
+            value: 1,
+        };
+        assert!(t.allow(&bend, ms(0)));
+        assert!(!t.allow(&bend, ms(50)));
+        assert!(!t.allow(&bend, ms(99)));
+        assert!(t.allow(&bend, ms(100)));
+        // Each CC number has its own interval, and bend and CC do not share one.
+        assert!(t.allow(&cc(1), ms(100)));
+        assert!(t.allow(&cc(7), ms(100)));
+        assert!(!t.allow(&cc(1), ms(150)));
+        assert!(t.allow(&cc(1), ms(200)));
+        let on = MidiMsg::NoteOn {
+            ch: 0,
+            note: 60,
+            vel: 1,
+        };
+        for n in 0..5 {
+            assert!(t.allow(&on, ms(200 + n)));
+            assert!(t.allow(&MidiMsg::NoteOff { ch: 0, note: 60 }, ms(200 + n)));
+        }
+    }
+
+    #[test]
+    fn held_notes_are_remembered_and_released_once() {
+        let held = Held::default();
+        for note in [0, 60, 63, 64, 127] {
+            held.set(note, true);
+        }
+        held.set(63, false);
+        assert_eq!(held.take_all(), vec![0, 60, 64, 127]);
+        assert!(held.take_all().is_empty());
     }
 
     #[test]

@@ -383,38 +383,45 @@ impl Router {
         }
     }
 
-    /// A message from a generic MIDI input (`role` is "keys" or "other"). Returns what the UI
-    /// should hear; the caller emits it after releasing the router lock.
-    pub fn on_midi(&mut self, port: &str, role: &str, msg: MidiMsg) -> Vec<UiEvent> {
-        let mut events = Vec::with_capacity(2);
-        if role == "keys" {
-            match msg {
-                MidiMsg::NoteOn { note, vel, .. } => events.push(UiEvent::KeysNote {
-                    note,
-                    velocity: vel,
-                    on: true,
-                }),
-                MidiMsg::NoteOff { note, .. } => events.push(UiEvent::KeysNote {
-                    note,
-                    velocity: 0,
-                    on: false,
-                }),
-                MidiMsg::PitchBend { value, .. } => {
-                    self.keys_pitch = f32::from(value) / 8192.0;
-                    events.push(self.wheel_event());
-                }
-                MidiMsg::Cc { cc: 1, value, .. } => {
-                    self.keys_mod = f32::from(value) / 127.0;
-                    events.push(self.wheel_event());
-                }
-                MidiMsg::Cc { .. } => {}
-            }
-        }
+    /// A message from a generic MIDI input (`role` is "keys" or "other"). Returns the event the
+    /// UI should hear, if any; it is plain data (no allocation under the lock) and the caller emits
+    /// it after releasing the router lock. The log line is built by the caller.
+    pub fn on_midi(&mut self, role: &str, msg: MidiMsg) -> Option<UiEvent> {
         // Role "other" acts only through learn bindings (Task 12).
-        events.push(UiEvent::MidiLog {
-            text: format!("{port}: {msg:?}"),
-        });
-        events
+        if role != "keys" {
+            return None;
+        }
+        match msg {
+            MidiMsg::NoteOn { note, vel, .. } => Some(UiEvent::KeysNote {
+                note,
+                velocity: vel,
+                on: true,
+            }),
+            MidiMsg::NoteOff { note, .. } => Some(UiEvent::KeysNote {
+                note,
+                velocity: 0,
+                on: false,
+            }),
+            MidiMsg::PitchBend { value, .. } => {
+                self.keys_pitch = f32::from(value) / 8192.0;
+                Some(self.wheel_event())
+            }
+            MidiMsg::Cc { cc: 1, value, .. } => {
+                self.keys_mod = f32::from(value) / 127.0;
+                Some(self.wheel_event())
+            }
+            MidiMsg::Cc { .. } => None,
+        }
+    }
+
+    /// A keys input went away: both wheels return to rest. `None` when they already were.
+    pub fn reset_keys_wheels(&mut self) -> Option<UiEvent> {
+        if self.keys_pitch == 0.0 && self.keys_mod == 0.0 {
+            return None;
+        }
+        self.keys_pitch = 0.0;
+        self.keys_mod = 0.0;
+        Some(self.wheel_event())
     }
 
     fn wheel_event(&self) -> UiEvent {
@@ -527,10 +534,9 @@ mod tests {
     }
 
     #[test]
-    fn keys_notes_become_keys_note_events_and_a_log_line() {
+    fn keys_notes_become_keys_note_events() {
         let mut r = router();
         let on = r.on_midi(
-            "Keystation 49 MK3",
             "keys",
             MidiMsg::NoteOn {
                 ch: 0,
@@ -540,45 +546,35 @@ mod tests {
         );
         assert_eq!(
             on,
-            vec![
-                UiEvent::KeysNote {
-                    note: 60,
-                    velocity: 100,
-                    on: true
-                },
-                UiEvent::MidiLog {
-                    text: "Keystation 49 MK3: NoteOn { ch: 0, note: 60, vel: 100 }".into()
-                },
-            ]
+            Some(UiEvent::KeysNote {
+                note: 60,
+                velocity: 100,
+                on: true
+            })
         );
-        let off = r.on_midi(
-            "Keystation 49 MK3",
-            "keys",
-            MidiMsg::NoteOff { ch: 0, note: 60 },
-        );
+        let off = r.on_midi("keys", MidiMsg::NoteOff { ch: 0, note: 60 });
         assert_eq!(
-            off[0],
-            UiEvent::KeysNote {
+            off,
+            Some(UiEvent::KeysNote {
                 note: 60,
                 velocity: 0,
                 on: false
-            }
+            })
         );
     }
 
     #[test]
     fn wheel_events_carry_both_last_values() {
         let mut r = router();
-        let bend = r.on_midi("K", "keys", MidiMsg::PitchBend { ch: 0, value: 4096 });
+        let bend = r.on_midi("keys", MidiMsg::PitchBend { ch: 0, value: 4096 });
         assert_eq!(
-            bend[0],
-            UiEvent::KeysWheel {
+            bend,
+            Some(UiEvent::KeysWheel {
                 pitch: 0.5,
                 r#mod: 0.0
-            }
+            })
         );
         let modw = r.on_midi(
-            "K",
             "keys",
             MidiMsg::Cc {
                 ch: 0,
@@ -587,14 +583,13 @@ mod tests {
             },
         );
         assert_eq!(
-            modw[0],
-            UiEvent::KeysWheel {
+            modw,
+            Some(UiEvent::KeysWheel {
                 pitch: 0.5,
                 r#mod: 1.0
-            }
+            })
         );
         let low = r.on_midi(
-            "K",
             "keys",
             MidiMsg::PitchBend {
                 ch: 0,
@@ -602,19 +597,33 @@ mod tests {
             },
         );
         assert_eq!(
-            low[0],
-            UiEvent::KeysWheel {
+            low,
+            Some(UiEvent::KeysWheel {
                 pitch: -1.0,
                 r#mod: 1.0
-            }
+            })
         );
     }
 
     #[test]
-    fn other_ccs_and_other_roles_only_log() {
+    fn resetting_the_wheels_reports_only_when_they_moved() {
+        let mut r = router();
+        assert_eq!(r.reset_keys_wheels(), None);
+        r.on_midi("keys", MidiMsg::PitchBend { ch: 0, value: 4096 });
+        assert_eq!(
+            r.reset_keys_wheels(),
+            Some(UiEvent::KeysWheel {
+                pitch: 0.0,
+                r#mod: 0.0
+            })
+        );
+        assert_eq!(r.reset_keys_wheels(), None);
+    }
+
+    #[test]
+    fn other_ccs_and_other_roles_say_nothing() {
         let mut r = router();
         let cc = r.on_midi(
-            "K",
             "keys",
             MidiMsg::Cc {
                 ch: 0,
@@ -622,9 +631,8 @@ mod tests {
                 value: 5,
             },
         );
-        assert!(matches!(cc.as_slice(), [UiEvent::MidiLog { .. }]));
+        assert_eq!(cc, None);
         let other = r.on_midi(
-            "loopMIDI Port",
             "other",
             MidiMsg::NoteOn {
                 ch: 1,
@@ -632,19 +640,13 @@ mod tests {
                 vel: 90,
             },
         );
-        assert_eq!(
-            other,
-            vec![UiEvent::MidiLog {
-                text: "loopMIDI Port: NoteOn { ch: 1, note: 36, vel: 90 }".into()
-            }]
-        );
+        assert_eq!(other, None);
     }
 
     #[test]
     fn midi_input_never_triggers_pads_or_audio() {
         let (mut r, mut rx) = router_with_pad(0.0, 0.0);
         r.on_midi(
-            "K",
             "keys",
             MidiMsg::NoteOn {
                 ch: 0,
