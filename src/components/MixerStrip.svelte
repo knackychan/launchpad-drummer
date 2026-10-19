@@ -14,7 +14,12 @@
   let {
     renaming = $bindable<number | null>(null),
     groups, masterDb, dims, onupdategroup, onupdatemaster, onstopall,
+    inputs = [], onchannelmenu,
   }: {
+    /** Per channel: pads routed to it, and the keys' sound colour and label when they play through it. */
+    inputs?: { pads: number; keysColor: string | null; keysLabel: string }[];
+    /** A click or right-click on a channel's scribble strip; `index` −1 closes the menu. */
+    onchannelmenu?: (index: number, x: number, y: number) => void;
     renaming?: number | null;
     groups: Group[];
     masterDb: number;
@@ -96,9 +101,12 @@
           <button
             type="button"
             class="scrib screen active"
-            title="Channel {i + 1}: double-click to rename"
-            ondblclick={() => { renaming = i; }}
-          ><span class="nm">{groupLegend(i, group.name)}</span></button>
+            title="{inputs[i] ? `Pads: ${inputs[i].pads}${inputs[i].keysColor ? ` · Keys: ${inputs[i].keysLabel}` : ''}` : `Channel ${i + 1}`} — click for its inputs, double-click to rename"
+            aria-haspopup="menu"
+            onclick={(e) => { const r = e.currentTarget.getBoundingClientRect(); onchannelmenu?.(i, r.left, r.bottom + 2); }}
+            oncontextmenu={(e) => { e.preventDefault(); onchannelmenu?.(i, e.clientX, e.clientY); }}
+            ondblclick={() => { onchannelmenu?.(-1, 0, 0); renaming = i; }}
+          >{#if inputs[i]?.keysColor}<i class="kdot" style:background={inputs[i].keysColor}></i>{/if}<span class="nm">{groupLegend(i, group.name)}</span></button>
         {/if}
         <Knob ariaLabel="{group.name} pan" value={group.pan} min={-1} max={1} def={0} step={0.02} fine={0.01} size={d.kn} fmt={fmtPan} learnId="group.{i}.pan" onchange={(v) => set(i, 'pan', v)} />
         <Knob ariaLabel="{group.name} pitch" value={group.pitchSemitones} min={-12} max={12} def={0} step={1} fine={0.1} size={d.kn} fmt={fmtSemis} learnId="group.{i}.pitch" onchange={(v) => set(i, 'pitchSemitones', v)} />
@@ -137,6 +145,7 @@
     font: 400 calc(var(--fs) - .5px)/1 var(--f-lcd); color: var(--lcd); overflow: hidden; white-space: nowrap; cursor: pointer;
   }
   .scrib .nm { overflow: hidden; text-overflow: ellipsis; }
+  .kdot { width: 6px; height: 6px; border-radius: 50%; flex: none; box-shadow: 0 0 0 1px rgba(0,0,0,.6); }
   .scrib input { width: 100%; background: transparent; border: 0; color: #fff; font: inherit; padding: 0; text-align: center; }
   .master-scrib { cursor: default; }
   .mx-col .key { width: calc(var(--cw) - 6px); height: var(--kb); padding: 0; font-size: var(--fs); min-width: 0; }

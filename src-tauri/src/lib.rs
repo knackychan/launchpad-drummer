@@ -155,7 +155,9 @@ pub fn run() {
             commands::keys_note,
             commands::keys_pitch,
             commands::keys_mod,
-            commands::set_keys
+            commands::set_keys,
+            commands::trigger_pad_in,
+            commands::release_pad_in
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Launchpad Drummer");

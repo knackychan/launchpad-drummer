@@ -12,6 +12,7 @@
   import SetupDisplay from './components/SetupDisplay.svelte';
   import SetupMidi from './components/SetupMidi.svelte';
   import SetupLearn from './components/SetupLearn.svelte';
+  import SetupKeys from './components/SetupKeys.svelte';
   import HordeGame from './components/HordeGame.svelte';
   import ConsoleBackdrop from './components/ConsoleBackdrop.svelte';
   import NoticeLcd from './components/NoticeLcd.svelte';
@@ -27,13 +28,14 @@
   import { padForKey } from './lib/keymap.ts';
   import { pushEsc, runEsc } from './lib/esc.ts';
   import { bindingLabel, boundIds } from './lib/learn.ts';
+  import { SOUND_COLORS, SOUND_LABELS, type KeysSettings } from './lib/keys.ts';
   import { LEARN, type LearnCtx } from './lib/learnable.ts';
   import { createLedFrame, ledToCss } from './lib/led.ts';
   import type { PadInput, Rgb } from './lib/led.ts';
   import { CRT_FACTORS, readDisplay, saveDisplay } from './lib/display.ts';
   import type { CrtLevel } from './lib/display.ts';
-  import { createEmptySet, createPreviewSet, GROUP_COLORS, padAriaLabel, padLabel } from './lib/model.ts';
-  import type { AppConfig, AudioStatus, Binding, Pattern, SeqPosition, DropReport, Group, LightModes, MidiDevice, MissingPad, OpenResult, Pad, SamplePeaks, SetModel, Startup } from './lib/model.ts';
+  import { createEmptySet, createPreviewSet, GROUP_COLORS, groupLegend, padAriaLabel, padLabel } from './lib/model.ts';
+  import type { AppConfig, AudioStatus, Binding, KeysStatus, Pattern, SeqPosition, DropReport, Group, LightModes, MidiDevice, MissingPad, OpenResult, Pad, SamplePeaks, SetModel, Startup } from './lib/model.ts';
   import { PREVIEW_MIDI, pushLog, roleStatus } from './lib/midi.ts';
   import { solvePlayLayout } from './lib/layout.ts';
   import { feedLive, hitAmount, hitGroup, runActivity } from './lib/activity.ts';
@@ -43,7 +45,7 @@
   import type { TelemetryFrame } from './lib/telemetry.ts';
 
   const tauri = isTauri;
-  const editCommands = new Set(['update_pad', 'clear_pad', 'move_pad', 'drop_files', 'locate_sample', 'update_group', 'rename_bank', 'update_bank_lights', 'update_bank_humanize', 'unbind', 'seq_update', 'seq_add_lane']);
+  const editCommands = new Set(['update_pad', 'clear_pad', 'move_pad', 'drop_files', 'locate_sample', 'update_group', 'rename_bank', 'update_bank_lights', 'update_bank_humanize', 'unbind', 'seq_update', 'seq_add_lane', 'set_keys']);
   async function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     const result = await call<T>(cmd, args);
     if (editCommands.has(cmd)) refreshHistory();
@@ -135,6 +137,73 @@
   function selectLanePad(bank: number, x: number, y: number) {
     if (bank !== activeBank) chooseBank(bank);
     selected = (y + 1) * 10 + x + 1;
+  }
+
+  // Keys plate (Task 16): sound, volume and output are set data; octave and fold are UI state.
+  const KEYS_FOLD_KEY = 'lpd.keys.folded', KEYS_OCTAVE_KEY = 'lpd.keys.octave';
+  let keysFolded = $state(false);
+  let keysOctave = $state(0);
+  let keysStatus = $state<KeysStatus>({ engine: 'builtin', name: 'BUILT-IN', error: null });
+  let soundfontPath = $state<string | null>(null);
+  let keysDown = $state<Set<number>>(new Set());
+  let keysLast = $state<{ note: number; velocity: number } | null>(null);
+  let keysWheel = $state({ pitch: 0, mod: 0 });
+  let keysCall = 0;
+  function setKeysFolded(folded: boolean) {
+    keysFolded = folded;
+    try { window.localStorage.setItem(KEYS_FOLD_KEY, String(folded)); } catch { /* the plate still folds without storage */ }
+  }
+  function setKeysOctave(octave: number) {
+    keysOctave = Math.min(2, Math.max(-1, octave));
+    try { window.localStorage.setItem(KEYS_OCTAVE_KEY, String(keysOctave)); } catch { /* octave is a per-user convenience */ }
+  }
+  function updateKeys(settings: KeysSettings) {
+    currentSet.keys = settings;
+    const id = ++keysCall;
+    void invoke<SetModel>('set_keys', { settings })
+      .then(set => { if (set && id === keysCall) currentSet = set; })
+      .catch(e => { showToast(errorText(e)); void resyncSet(); });
+  }
+  function keysNote(note: number, velocity: number, on: boolean) {
+    // The engine answers with `keys-note` (it lights the key in every mirror); the preview has no engine.
+    if (!tauri) { const next = new Set(keysDown); if (on) next.add(note); else next.delete(note); keysDown = next; }
+    void invoke('keys_note', { note, velocity, on }).catch(e => showToast(errorText(e)));
+  }
+  function keysPad(bank: number, x: number, y: number, on: boolean) {
+    if (on && bank === activeBank) selected = (y + 1) * 10 + x + 1;
+    void invoke(on ? 'trigger_pad_in' : 'release_pad_in', { bank, x, y }).catch(e => showToast(errorText(e)));
+  }
+  const keysPresent = $derived(midiDevices.some(d => d.role === 'keys' && d.status === 'connected'));
+  const keysDeviceName = $derived((midiDevices.find(d => d.role === 'keys' && d.status === 'connected') ?? midiDevices.find(d => d.role === 'keys'))?.port.toUpperCase() ?? 'KEYSTATION 49');
+  async function loadSoundfont() {
+    try {
+      const path = await invoke<string | null>('pick_file', { title: 'Choose a SoundFont', extensions: ['sf2'] });
+      if (path) await applySoundfont(path);
+    } catch (e) { showToast(errorText(e)); }
+  }
+  async function applySoundfont(path: string | null) {
+    try {
+      const status = await invoke<KeysStatus>('set_soundfont', { path });
+      if (status) keysStatus = status;
+      soundfontPath = path;
+    } catch (e) { showToast(errorText(e)); }
+  }
+  // Mixer channel inputs (UI spec 6): which pads and whether the keys play through a channel.
+  const channelInputs = $derived(currentSet.mixer.groups.map((_, i) => ({
+    pads: currentSet.banks.reduce((n, b) => n + b.pads.filter(p => p.sample && p.mixGroup === i).length, 0),
+    keysColor: currentSet.keys.output === i ? ledToCss(SOUND_COLORS[currentSet.keys.sound]) : null,
+    keysLabel: SOUND_LABELS[currentSet.keys.sound],
+  })));
+  function channelMenu(i: number, x: number, y: number) {
+    if (i < 0) { learnMenu = null; return; }
+    const keys = currentSet.keys, here = keys.output === i;
+    const where = keys.output !== null && !here ? `Keys: on ${groupLegend(keys.output, currentSet.mixer.groups[keys.output].name)}` : `Keys: ${SOUND_LABELS[keys.sound]}`;
+    learnMenu = { x, y, items: [
+      { label: `Pads: ${channelInputs[i].pads} in group ${i + 1} (pad editor › MIX GROUP)`, info: true },
+      { label: where, checked: here, action: () => updateKeys({ ...keys, output: here ? null : i }) },
+      { label: '', sep: true },
+      { label: 'Rename…', shortcut: 'F2', action: () => { mixerRenaming = i; } },
+    ] };
   }
 
   // MIDI learn (plan 1C Task 12): the control being learned, and the one shared menu of learnable controls.
@@ -281,7 +350,7 @@
   }
 
   const layout = $derived(solvePlayLayout({
-    width: bayW, height: bayH, drawerOpen: drawer !== null, drawerPinned, teleFolded, seqFolded, lanes: Math.max(1, currentSet.pattern.lanes.length),
+    width: bayW, height: bayH, drawerOpen: drawer !== null, drawerPinned, teleFolded, seqFolded, keysFolded, lanes: Math.max(1, currentSet.pattern.lanes.length),
   }));
 
   const bank = $derived(currentSet.banks[activeBank]);
@@ -339,7 +408,7 @@
   const notices = $derived(activeNotices({ learnArmed: learnArmed?.kind ?? null, audioLost: audioStatus?.state === 'lost' || audioStatus?.state === 'error',
     backup, saveFailed: saveStatus.state === 'failed' ? saveStatus.reason : null,
     launchpad: tauri ? deviceState : 'connected', lcxl: tauri ? lcxlState : 'connected', missing: missing.length,
-    asioFallback: audioStatus?.asioFallback ?? false, dropoutRecent: dropoutIsRecent, confirmations, keysAbsent: false, dismissed }));
+    asioFallback: audioStatus?.asioFallback ?? false, dropoutRecent: dropoutIsRecent, confirmations, keysAbsent: tauri && !keysPresent && !keysFolded, dismissed }));
   const lampClass = (state: string) => ({ connected: 'ok', running: 'ok', busy: 'warn', bootloader: 'error', stopped: 'error', lost: 'error', error: 'error' } as Record<string, string>)[state] ?? '';
   const audioLamp = $derived(audioStatus?.state === 'running' && dropoutIsRecent ? 'warn' : lampClass(audioStatus?.state ?? 'stopped'));
 
@@ -393,7 +462,10 @@
       if (startup.kind === 'loaded') { setPath = startup.path; setName = startup.name; backup = startup.fromBackup ? { savedAt: startup.backupSavedAt } : null; }
       await refreshMissing();
       history = await invoke<typeof history>('history_state');
-      libraryDir = (await invoke<AppConfig>('get_config')).libraryDir;
+      const config = await invoke<AppConfig>('get_config');
+      libraryDir = config.libraryDir; soundfontPath = config.soundfont;
+      const keys = await invoke<KeysStatus>('keys_status');
+      if (keys) keysStatus = keys;
       // The preview answers with a demo status; the desktop app with the live one.
       const fetched = await invoke<AudioStatus>('get_audio_status');
       if (!audioEventSeen) audioStatus = fetched;
@@ -416,6 +488,7 @@
   onMount(() => {
     try { crt = readDisplay(window.localStorage); } catch { crt = 'low'; }
     try { seqFolded = window.localStorage.getItem(SEQ_FOLD_KEY) === 'true'; } catch { seqFolded = false; }
+    try { keysFolded = window.localStorage.getItem(KEYS_FOLD_KEY) === 'true'; keysOctave = Math.min(2, Math.max(-1, Number(window.localStorage.getItem(KEYS_OCTAVE_KEY)) || 0)); } catch { keysFolded = false; keysOctave = 0; }
     if (window.innerWidth >= 1780) drawer = 'editor';
     const stopActivity = runActivity();
     const secondTimer = window.setInterval(() => { secondTick++; }, 1000);
@@ -460,6 +533,13 @@
       });
       subscribe<{ binding: Binding }>('learn-bound', (event) => void onLearnBound(event.binding));
       subscribe<{ reason: string }>('learn-ignored', (event) => showToast(event.reason));
+      subscribe<{ note: number; velocity: number; on: boolean }>('keys-note', (event) => {
+        const next = new Set(keysDown);
+        if (event.on) { next.add(event.note); keysLast = { note: event.note, velocity: event.velocity }; } else next.delete(event.note);
+        keysDown = next;
+      });
+      subscribe<{ pitch: number; mod: number }>('keys-wheel', (event) => { keysWheel = event; });
+      subscribe<KeysStatus>('keys-status', (event) => { keysStatus = event; });
       subscribe<SeqPosition>('seq-position', (event) => { seqPos = event; seqAt = performance.now(); seqRec = event.rec; });
       subscribe<{ bank: number; x: number; y: number }>('pad-hit', (event) => padHit(event.bank, event.x, event.y));
       subscribe<SetModel>('set-changed', (event) => { currentSet = event; });
@@ -699,6 +779,7 @@
       else if (key === '1') setMode('play');
       else if (key === ',') setMode('setup');
       else if (key === '2') { /* TRAIN remains a blank cap. */ }
+      else if (key === 'k' && mode === 'play') setKeysFolded(!keysFolded);
       else if ((key === 'e' || key === 'b') && mode === 'play') {
         const panel = key === 'e' ? 'editor' : 'browser'; drawer = drawer === panel ? null : panel;
       }
@@ -802,9 +883,17 @@
                     dims={layout.mix}
                     onupdategroup={updateGroup}
                     onupdatemaster={updateMaster}
+                    inputs={channelInputs}
+                    onchannelmenu={channelMenu}
                   />
                 </div>
-                <KeysPlate short={layout.kh < 68} />
+                <KeysPlate
+                  short={layout.kh < 68} folded={keysFolded} set={currentSet} octave={keysOctave} deviceName={keysDeviceName} devicePresent={tauri ? keysPresent : true}
+                  remoteDown={keysDown} bind:last={keysLast} wheel={keysWheel}
+                  onsettings={updateKeys} onnote={keysNote} onpad={keysPad}
+                  onpitch={(value) => void invoke('keys_pitch', { value })} onmod={(value) => void invoke('keys_mod', { value })}
+                  onoctave={setKeysOctave} onfold={setKeysFolded}
+                />
                 <SequencerPlate
                   {pattern} banks={currentSet.banks} selected={selXY} {activeBank} position={seqPos} playing={seqPlaying} rec={seqRec} folded={seqFolded}
                   onplay={toggleSeqPlay} onrec={toggleSeqRec} onupdate={updatePattern} onaddlane={() => void addLane()}
@@ -885,6 +974,7 @@
           <div class="setup">
             <SetupAudio status={audioStatus} dropoutRecent={dropoutIsRecent} onstatus={status => { audioStatus = status; }} onerror={showToast} />
             <SetupMidi devices={midiDevices} events={midiLog} onrole={(port, role) => void setMidiRole(port, role)} />
+            <SetupKeys status={keysStatus} soundfont={soundfontPath} onload={() => void loadSoundfont()} onclear={() => void applySoundfont(null)} />
             <SetupLearn set={currentSet} onunbind={(index) => void unbindAt(index)} />
             <SetupDisplay level={crt} onchange={setCrt} />
           </div>

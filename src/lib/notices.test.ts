@@ -22,3 +22,7 @@ test('notice text handles missing counts and backup times', () => {
   assert.equal(activeNotices({ ...idle, backup: { savedAt: null } })[0].text, 'set.json unreadable — loaded backup (saved earlier)');
   assert.deepEqual(activeNotices(idle), []);
 });
+test('the Keystation notice is the last row and only informs', () => {
+  const [keys] = activeNotices({ ...idle, keysAbsent: true });
+  assert.deepEqual([keys.id, keys.prio, keys.level, keys.text], ['keys-off', 14, 'info', 'Keystation 49 not connected — on-screen keys still play']);
+});

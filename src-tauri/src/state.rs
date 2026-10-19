@@ -324,6 +324,23 @@ impl AppState {
         self.record_hit(x, y);
     }
 
+    /// A pad of any bank at full velocity (a key of the keys plate bound to it). Recorded by the
+    /// sequencer like every non-clock hit.
+    pub fn trigger_pad_in(&self, bank: usize, x: u8, y: u8) {
+        let active = {
+            let mut r = lock(&self.router);
+            r.trigger_pad_in(bank, x, y, 1.0);
+            r.bank()
+        };
+        if bank == active {
+            self.record_hit(x, y);
+        }
+    }
+
+    pub fn release_pad_in(&self, bank: usize, x: u8, y: u8) {
+        lock(&self.router).release_pad_in(bank, x, y);
+    }
+
     pub fn release_pad(&self, x: u8, y: u8) {
         lock(&self.router).release_pad(x, y);
     }

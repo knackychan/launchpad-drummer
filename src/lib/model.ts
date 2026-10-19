@@ -1,3 +1,4 @@
+import type { KeysSettings } from './keys.ts';
 export type PadMode = 'oneShot' | 'hold';
 
 export interface Pad {
@@ -63,6 +64,7 @@ export interface SetModel {
   mixer: Mixer;
   learn: Binding[];
   pattern: Pattern;
+  keys: KeysSettings;
 }
 
 export interface AudioLatency {
@@ -215,6 +217,7 @@ export function createEmptySet(): SetModel {
     },
     learn: [],
     pattern: { lanes: [], length: 16, bpm: 100, swing: 50 },
+    keys: { sound: 'ePiano', volumeDb: -6, output: null },
   };
 }
 

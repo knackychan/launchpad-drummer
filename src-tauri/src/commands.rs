@@ -537,6 +537,16 @@ pub(crate) fn seq_audition_step(bank: usize, x: u8, y: u8, state: State<'_, AppS
 }
 
 #[tauri::command]
+pub(crate) fn trigger_pad_in(bank: usize, x: u8, y: u8, state: State<'_, AppState>) {
+    state.trigger_pad_in(bank, x, y);
+}
+
+#[tauri::command]
+pub(crate) fn release_pad_in(bank: usize, x: u8, y: u8, state: State<'_, AppState>) {
+    state.release_pad_in(bank, x, y);
+}
+
+#[tauri::command]
 pub(crate) fn history_state(state: State<'_, AppState>) -> HistoryState {
     state.history_state()
 }
