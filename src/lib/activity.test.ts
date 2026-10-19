@@ -72,12 +72,27 @@ test('a level feed raises channel energy to the louder value and marks the feed 
   energy.fill(0);
   assert.equal(feedLive(performance.now() + 10_000), false);
   energy[1] = 0.5;
-  setLevels([0.2, 0.1, 0.9, 0, 0, 0, 0, 0.3]);
-  assert.deepEqual([...energy].map((v) => Number(v.toFixed(2))), [0.2, 0.5, 0.9, 0, 0, 0, 0, 0.3]);
   const now = performance.now();
+  setLevels([0.2, 0.1, 0.9, 0, 0, 0, 0, 0.3], now);
+  assert.deepEqual([...energy].map((v) => Number(v.toFixed(2))), [0.2, 0.5, 0.9, 0, 0, 0, 0, 0.3]);
   assert.equal(feedLive(now), true);
   assert.equal(feedLive(now + 999), true);
   assert.equal(feedLive(now + 1001), false, 'no frame for a second: hit-based activity takes over again');
+  energy.fill(0);
+  queue.clear();
+});
+
+test('a silent feed does not wake the decay loop', () => {
+  energy.fill(0); masterDb[0] = MASTER_FLOOR_DB; masterDb[1] = MASTER_FLOOR_DB;
+  queue.clear();
+  const stop = runActivity();
+  runFrames(16);
+  setLevels([0, 0, 0, 0, 0, 0, 0, 0]);
+  setMaster([-100, -100]);
+  assert.equal(queue.size, 0);
+  setLevels([0, 0.3, 0, 0, 0, 0, 0, 0]);
+  assert.equal(queue.size, 1, 'a louder value does');
+  stop();
   energy.fill(0);
   queue.clear();
 });

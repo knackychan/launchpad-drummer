@@ -83,7 +83,7 @@ impl Telemetry {
                 }
             }
         }
-        let frame = on.then(|| self.frame(state.get_audio_status().sample_rate));
+        let frame = on.then(|| self.frame(state.sample_rate()));
         self.master_peak = [0.0; 2];
         self.group_peak = [0.0; GROUPS];
 

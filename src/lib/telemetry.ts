@@ -101,7 +101,16 @@ export function msPerDiv(sampleRate: number): string {
   return sampleRate > 0 ? `${(((1024 / sampleRate) * 1000) / 8).toFixed(1)} ms/div` : '— ms/div';
 }
 
-export const linearToDb = (x: number) => (x > 0 ? 20 * Math.log10(x) : -100);
+/** When the app's UI started (this module loads with it); the telemetry clock counts from here. */
+export const APP_START = performance.now();
+
+/** `T+mm:ss.t` for a time in ms; works in whole tenths so it never shows `:60.0`. */
+export function fmtClock(ms: number): string {
+  const tenths = Math.max(0, Math.floor(ms / 100));
+  const mm = String(Math.floor(tenths / 600)).padStart(2, '0');
+  const ss = String(Math.floor(tenths / 10) % 60).padStart(2, '0');
+  return `T+${mm}:${ss}.${tenths % 10}`;
+}
 
 // ---- shared live state -------------------------------------------------------------------
 

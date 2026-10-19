@@ -102,19 +102,22 @@ export function hitGroup(group: number, amount: number): void {
 /** Per-channel peaks (linear) from a telemetry frame: `energy[i] = max(energy[i], groups[i])`. */
 export function setLevels(groups: number[], now = performance.now()): void {
   feedAt = now;
+  let rose = false;
   for (let i = 0; i < 8; i++) {
     const v = groups[i];
-    if (v > energy[i]) energy[i] = v;
+    if (v > energy[i]) { energy[i] = v; rose = true; }
   }
-  wake();
+  // A silent feed must not wake the decay loop (it would redraw canvases at the feed rate).
+  if (rose) wake();
 }
 
 /** Master peaks (dBFS) from a telemetry frame; a quieter reading than the falling meter is ignored. */
 export function setMaster(db: readonly [number, number]): void {
+  let rose = false;
   for (let c = 0; c < 2; c++) {
-    if (db[c] > MASTER_REST_DB && db[c] > masterDb[c]) masterDb[c] = db[c];
+    if (db[c] > MASTER_REST_DB && db[c] > masterDb[c]) { masterDb[c] = db[c]; rose = true; }
   }
-  wake();
+  if (rose) wake();
 }
 
 /** Enables the decay loop (it still sleeps while nothing is active); it also drives `[data-chip]`

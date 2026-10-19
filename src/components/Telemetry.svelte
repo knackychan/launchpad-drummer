@@ -8,7 +8,7 @@
   import { GROUP_COLORS } from '../lib/model.ts';
   import { ledToCss } from '../lib/led.ts';
   import {
-    feed, fmtPeakHz, fmtPk, holdValue, meterColor, msPerDiv, onFeed, SPEC_FLOOR_DB, VU_MAX_DB, VU_MIN_DB, vuPos,
+    APP_START, feed, fmtClock, fmtPeakHz, fmtPk, holdValue, meterColor, msPerDiv, onFeed, SPEC_FLOOR_DB, VU_MAX_DB, VU_MIN_DB, vuPos,
   } from '../lib/telemetry.ts';
 
   let { mini, sampleRate = 0, onfold }: { mini: boolean; sampleRate?: number; onfold: (folded: boolean) => void } = $props();
@@ -19,7 +19,8 @@
   const reads = $state({ scope: '— ms/div', spec: '—', orbit: 'IDLE · NO SEQ', vu: 'PK −∞' });
   const PIX = 2, NB = 28, STEPS = 16;
   const groupCol = (i: number) => ledToCss(GROUP_COLORS[i]);
-  const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const motionQuery = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null;
+  const reduced = () => motionQuery?.matches ?? false;
 
   const F3 = (() => {
     const m: Record<string, number[]> = {};
@@ -242,18 +243,20 @@
   }
 
   onMount(() => {
-    const t0 = performance.now();
     const tick = () => {
       if (mini || document.hidden) return;
-      const now = performance.now(), sec = (now - t0) / 1000;
-      clock = `T+${String(Math.floor(sec / 60)).padStart(2, '0')}:${(sec % 60).toFixed(1).padStart(4, '0')}`;
+      const now = performance.now();
+      clock = fmtClock(now - APP_START);
       // A held peak keeps falling after the meters have come to rest.
       if (feed.holds.some((h) => holdValue(h, now) > -99)) schedule('vu');
     };
-    const timer = setInterval(tick, reduced() ? 1000 : 100);
+    let timer = 0;
+    const restartTimer = () => { clearInterval(timer); timer = window.setInterval(tick, reduced() ? 1000 : 100); };
+    restartTimer();
+    motionQuery?.addEventListener('change', restartTimer);
     const stopActivity = onActivity(activityTick);
     const stopFeed = onFeed(feedTick);
-    return () => { clearInterval(timer); stopActivity(); stopFeed(); cancelAnimationFrame(flushRaf); };
+    return () => { clearInterval(timer); motionQuery?.removeEventListener('change', restartTimer); stopActivity(); stopFeed(); cancelAnimationFrame(flushRaf); };
   });
 </script>
 

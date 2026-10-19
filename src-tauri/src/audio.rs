@@ -60,12 +60,12 @@ impl AudioStats {
     /// Safe on the audio thread: two atomic stores, no allocation.
     pub fn record_dropout(&self, now: Instant) {
         let ms = now.saturating_duration_since(self.started).as_millis() as u64;
-        self.last_dropout_ms.store(ms, Ordering::Relaxed);
-        self.dropouts.fetch_add(1, Ordering::Relaxed);
+        self.last_dropout_ms.store(ms, Ordering::Release);
+        self.dropouts.fetch_add(1, Ordering::Release);
     }
 
     pub fn dropouts(&self) -> u32 {
-        self.dropouts.load(Ordering::Relaxed)
+        self.dropouts.load(Ordering::Acquire)
     }
 
     /// `None` until a dropout has happened (and again after a reset).
@@ -73,13 +73,13 @@ impl AudioStats {
         if self.dropouts() == 0 {
             return None;
         }
-        let at = self.last_dropout_ms.load(Ordering::Relaxed);
+        let at = self.last_dropout_ms.load(Ordering::Acquire);
         let since_start = now.saturating_duration_since(self.started).as_millis() as u64;
         Some(since_start.saturating_sub(at))
     }
 
     pub fn reset(&self) {
-        self.dropouts.store(0, Ordering::Relaxed);
+        self.dropouts.store(0, Ordering::Release);
     }
 }
 
@@ -209,17 +209,19 @@ where
     let channels = config.channels as usize;
     let mut scratch = host::scratch();
     let mut staging = vec![0.0f32; 4096 * channels];
-    let mut last_callback: Option<Instant> = None;
+    // Time and frame count of the previous callback: a gap is judged against the buffer it followed.
+    let mut last_callback: Option<(Instant, usize)> = None;
     let stream = device.build_output_stream(
         config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
             let now = Instant::now();
-            if let Some(prev) = last_callback {
-                if is_dropout(now.duration_since(prev), data.len() / channels.max(1), rate) {
+            let frames = data.len() / channels.max(1);
+            if let Some((prev, prev_frames)) = last_callback {
+                if is_dropout(now.duration_since(prev), prev_frames, rate) {
                     stats.record_dropout(now);
                 }
             }
-            last_callback = Some(now);
+            last_callback = Some((now, frames));
             for chunk in data.chunks_mut(staging.len()) {
                 let buf = &mut staging[..chunk.len()];
                 host::process(&mut engine, &mut rx, &mut scratch, buf, channels);

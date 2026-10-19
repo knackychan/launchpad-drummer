@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  capStep, createSpectrum, fmtPeakHz, fmtPk, holdUpdate, holdValue, meterColor, msPerDiv, silenceStep,
+  capStep, createSpectrum, fmtClock, fmtPeakHz, fmtPk, holdUpdate, holdValue, meterColor, msPerDiv, silenceStep,
   specLevel, stepBands, vuPos,
 } from './telemetry.ts';
 
@@ -80,6 +80,14 @@ test('readouts', () => {
   assert.equal(msPerDiv(48000), '2.7 ms/div');
   assert.equal(msPerDiv(44100), '2.9 ms/div');
   assert.equal(msPerDiv(0), '— ms/div');
+});
+
+test('the clock counts tenths and never shows :60.0', () => {
+  assert.equal(fmtClock(0), 'T+00:00.0');
+  assert.equal(fmtClock(61_234), 'T+01:01.2');
+  assert.equal(fmtClock(59_999), 'T+00:59.9');
+  assert.equal(fmtClock(60_000), 'T+01:00.0');
+  assert.equal(fmtClock(-5), 'T+00:00.0');
 });
 
 test('silence means master below -90 dBFS for 500 ms', () => {

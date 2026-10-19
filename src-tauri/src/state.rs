@@ -382,6 +382,11 @@ impl AppState {
         self.with_dropouts(status)
     }
 
+    /// The current output rate, without cloning the whole status.
+    pub fn sample_rate(&self) -> u32 {
+        lock(&self.audio_status).sample_rate
+    }
+
     /// Fill the dropout fields from the live counter (the stored status never carries them).
     fn with_dropouts(&self, mut status: AudioStatus) -> AudioStatus {
         let stats = lock(&self.audio_stats).clone();
