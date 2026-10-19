@@ -23,6 +23,7 @@
   let buttons: HTMLButtonElement[] = [];
   let grid: HTMLDivElement;
   const held = new Set<number>();
+  let enterNote: number | null = null;
   export function rects() { return buttons.filter(Boolean).map(button => { const note = Number(button.dataset.note); return { x: note % 10 - 1, y: Math.floor(note / 10) - 1, rect: button.getBoundingClientRect() }; }); }
   export function consume(note: number) { release(note); }
 
@@ -47,16 +48,21 @@
   function gridKeydown(event: KeyboardEvent) {
     if (event.target !== grid || !selectedXY) return;
     if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) openMenu(event, selectedXY.x, selectedXY.y);
-    else if (event.key === 'Enter') { event.preventDefault(); if (!event.repeat) press(selected!); }
+    else if (event.key === 'Enter') {
+      event.preventDefault();
+      if (!event.repeat && enterNote === null) { enterNote = selected; press(selected!); }
+    }
   }
   function gridKeyup(event: KeyboardEvent) {
-    if (event.target === grid && event.key === 'Enter' && selected !== null) { event.preventDefault(); release(selected); }
+    if (event.target !== grid || event.key !== 'Enter') return;
+    event.preventDefault();
+    if (enterNote !== null) { release(enterNote); enterNote = null; }
   }
+  // The keyboard opens the menu on keydown; a right-click in the gap between pads does nothing.
   function gridContextMenu(event: MouseEvent) {
-    // A contextmenu that did not come from a pad is the keyboard's: open it at the selected pad.
-    if (event.target === grid && selectedXY) openMenu(event, selectedXY.x, selectedXY.y);
+    if (event.target === grid) event.preventDefault();
   }
-  function releaseAll() { for (const note of held) release(note); }
+  function releaseAll() { for (const note of held) release(note); enterNote = null; }
   onMount(() => {
     window.addEventListener('blur', releaseAll);
     return () => { window.removeEventListener('blur', releaseAll); releaseAll(); };

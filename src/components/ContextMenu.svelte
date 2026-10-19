@@ -27,7 +27,9 @@
   }
 </script>
 
-<svelte:window onpointerdown={(e) => { if (!menu?.contains(e.target as Node)) onclose(); }} />
+<!-- Shift+F10 / ContextMenu raise a native contextmenu on keyup, after focus moved into this menu: swallow it. -->
+<svelte:window onpointerdown={(e) => { if (!menu?.contains(e.target as Node)) onclose(); }}
+  oncontextmenu={(e) => { if (menu?.contains(document.activeElement) || menu?.contains(e.target as Node)) e.preventDefault(); }} />
 <div bind:this={menu} class="menu screen" role="menu" tabindex="-1" style:left="{left}px" style:top="{top}px" onkeydown={keydown}>
   {#each items as item}
     {#if item.sep}<div class="sep" role="separator"></div>

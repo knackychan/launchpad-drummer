@@ -35,7 +35,7 @@
   import type { SaveStatus } from './lib/status.ts';
 
   const tauri = isTauri;
-  const editCommands = new Set(['update_pad', 'assign_sample', 'clear_pad', 'move_pad', 'drop_files', 'locate_sample', 'update_group', 'rename_bank', 'update_bank_lights', 'update_bank_humanize']);
+  const editCommands = new Set(['update_pad', 'clear_pad', 'move_pad', 'drop_files', 'locate_sample', 'update_group', 'rename_bank', 'update_bank_lights', 'update_bank_humanize']);
   async function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     const result = await call<T>(cmd, args);
     if (editCommands.has(cmd)) refreshHistory();
@@ -420,13 +420,14 @@
       .catch(e => showToast(errorText(e)));
   }
   async function locateSample(x: number, y: number) {
+    const bank = activeBank; // the file dialog is not modal: the bank may change while it is open
     try {
       const path = await invoke<string | null>('pick_file', { title: 'Locate sample', extensions: ['wav', 'aif', 'aiff', 'flac', 'mp3', 'ogg'] });
       if (!path) return;
-      const set = await invoke<SetModel>('locate_sample', { bank: activeBank, x, y, path });
+      const set = await invoke<SetModel>('locate_sample', { bank, x, y, path });
       if (set) currentSet = set;
       await refreshMissing(); peaksNonce++;
-    } catch (e) { showToast(errorText(e)); }
+    } catch (e) { showToast(`Locate failed — ${errorText(e)}`); }
   }
   function openPadMenu(x: number, y: number, at: { x: number; y: number }) {
     selected = (y + 1) * 10 + x + 1;
