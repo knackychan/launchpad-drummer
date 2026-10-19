@@ -1,67 +1,110 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { createHorde, hitCell, ledFrame, noteCell, tickHorde, type HordeState } from '../lib/horde.ts';
+  import { armBomb, createHorde, disarmBomb, drainEvents, freezeEnemies, hitCell, ledFrame, noteCell, padPress, resetHorde,
+    tickHorde, togglePause, type HordeState, type Layout, type PlayMode } from '../lib/horde.ts';
+  import { CODE_TO_CELL, H, W, cellAt, makeLayout } from '../lib/hordeLayout.ts';
+  import { DEFAULT_SETTINGS, applyEvents, createFx, updateFx, type HordeSettings } from '../lib/hordeFx.ts';
+  import { createRenderer } from '../lib/hordeRender.ts';
+  import { createHordeAudio } from '../lib/hordeAudio.ts';
   import type { Rgb } from '../lib/led.ts';
 
   let { onframe }: { onframe: (frame: Rgb[]) => void } = $props();
   let canvas: HTMLCanvasElement;
-  let gameState: HordeState = $state(createHorde());
-  let summary = $state({ mode: 'title', playMode: 'free', wave: 0, hp: 100, score: 0, combo: 0, bombs: 1, charge: 0, armed: false });
-  const W = 640, H = 360;
-  const colors = { grunt: '#5fd38a', runner: '#f5c644', brute: '#f08a2b', splitter: '#a77be6', survivor: '#ffffff', boss: '#e63b2e' };
+  let stageWidth = $state(640), stageHeight = $state(360);
 
+  // The rules object is mutated every frame; the screen only sees `summary`, refreshed when something it shows changes.
+  const game: HordeState = createHorde();
+  let fx = createFx();
+  let layout = makeLayout('pad');
+  const audio = createHordeAudio();
+  let ui = $state({ layout: 'pad' as Layout, playMode: 'free' as PlayMode, speed: '1', aids: DEFAULT_SETTINGS.aids, quality: DEFAULT_SETTINGS.quality,
+    motion: DEFAULT_SETTINGS.motion, crush: String(DEFAULT_SETTINGS.crush), crt: DEFAULT_SETTINGS.crt, sound: DEFAULT_SETTINGS.sound });
+  let summary = $state({ mode: 'title', wave: 0, hp: 100, score: 0, combo: 0, bombs: 1, charge: 0, armed: false, paused: false });
+  const settings = (): HordeSettings => ({ aids: ui.aids, quality: ui.quality, motion: ui.motion,
+    crush: Number(ui.crush) as HordeSettings['crush'], crt: ui.crt, sound: ui.sound });
+  const fit = $derived(Math.max(.25, Math.min((stageWidth - 4) / W, (stageHeight - 4) / H)));
+
+  // Launchpad pads in, as before: the app calls this for every hardware or on-screen pad.
   export function padInput(note: number, pressed: boolean) {
     if (!pressed) return;
+    audio.init();
     const { column, row } = noteCell(note);
-    hitCell(gameState, column, row);
+    padPress(game, column, row);
   }
 
-  function draw() {
-    const context = canvas?.getContext('2d');
-    if (!context) return;
-    const g = context;
-    g.imageSmoothingEnabled = false;
-    g.fillStyle = '#050b16'; g.fillRect(0, 0, W, H);
-    g.fillStyle = '#0a2032'; g.fillRect(0, 0, W, 82);
-    for (let x = 0; x < W; x += 32) { g.fillStyle = x % 64 ? '#0e2b3b' : '#15384a'; g.fillRect(x, 56 + Math.sin(gameState.time * 2 + x) * 5, 24, 2); }
-    g.fillStyle = '#b89d68'; g.fillRect(126, 79, 388, 254);
-    g.fillStyle = '#d9c38f'; g.fillRect(126, 80, 388, 10);
-    for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) {
-      g.fillStyle = (r + c) % 2 ? '#806f50' : '#927d59';
-      g.fillRect(130 + c * 48, 96 + (7 - r) * 28, 44, 24);
+  function restart(patch: Partial<Pick<HordeState, 'layout' | 'playMode'>>) {
+    resetHorde(game, patch);
+    fx = createFx();
+    layout = makeLayout(game.layout);
+    drainEvents(game);
+  }
+  const changeLayout = () => restart({ layout: ui.layout });
+  const changeMode = () => restart({ playMode: ui.playMode });
+  $effect(() => { game.speed = Number(ui.speed) || 1; });
+  $effect(() => { audio.setMode(ui.sound); });
+
+  function canvasPoint(event: PointerEvent) {
+    const bounds = canvas.getBoundingClientRect();
+    return { x: (event.clientX - bounds.left) * W / bounds.width, y: (event.clientY - bounds.top) * H / bounds.height };
+  }
+  function pointerDown(event: PointerEvent) {
+    audio.init();
+    if (game.mode !== 'play') { hitCell(game, 1, 1); return; }
+    const { x, y } = canvasPoint(event);
+    const cell = cellAt(layout, x, y);
+    if (cell) {
+      if ((event.button === 2 || event.shiftKey) && !game.armed) armBomb(game);
+      hitCell(game, cell.column, cell.row);
+      return;
     }
-    g.fillStyle = '#454448'; g.fillRect(119, 323, 402, 19); g.fillStyle = '#ffb21a'; g.fillRect(125, 326, 390 * gameState.hp / 100, 4);
-    for (const enemy of gameState.enemies) {
-      const x = 132 + (enemy.column - 1) * 48, y = 98 + (7 - enemy.row) * 28;
-      g.fillStyle = '#201a26'; g.fillRect(x + 4, enemy.type === 'boss' ? y - 24 : y + 6, enemy.type === 'boss' ? 82 : 34, enemy.type === 'boss' ? 51 : 17);
-      g.fillStyle = colors[enemy.type]; g.fillRect(x + 8, enemy.type === 'boss' ? y - 27 : y + 1, enemy.type === 'boss' ? 74 : 26, enemy.type === 'boss' ? 46 : 18);
-      g.fillStyle = '#101018'; g.fillRect(x + 13, y + 6, 4, 4); g.fillRect(x + 25, y + 6, 4, 4);
-      if (enemy.type === 'boss') {
-        const weak = enemy.weak ?? 0;
-        g.fillStyle = '#fff6dc'; g.fillRect(x + 13 + (weak % 2) * 48, y + 6 - Math.floor(weak / 2) * 28, 10, 10);
+    if (layout.side) {
+      for (const row of [8, 7]) {
+        const rect = layout.side(row);
+        if (x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h) { hitCell(game, 9, row); return; }
       }
-      if (enemy.hp > 1) { g.fillStyle = '#fff6dc'; g.font = 'bold 10px monospace'; g.fillText(String(enemy.hp), x + 18, y + 29); }
+    } else {
+      if (Math.hypot(x - 520, y - 318) < 18) armBomb(game);
+      if (Math.hypot(x - 590, y - 318) < 18) freezeEnemies(game);
     }
-    g.fillStyle = '#fff6dc'; g.font = 'bold 20px monospace'; g.fillText(`WAVE ${gameState.wave}     ${String(gameState.score).padStart(6, '0')}`, 20, 35);
-    g.font = 'bold 13px monospace'; g.fillStyle = '#ffae2b'; g.fillText(`COMBO ×${gameState.combo}   BASE ${gameState.hp}%`, 20, 58);
-    if (gameState.mode !== 'play') {
-      g.fillStyle = 'rgba(0,0,0,.74)'; g.fillRect(0, 0, W, H);
-      g.fillStyle = gameState.mode === 'over' ? '#e63b2e' : '#f5c644'; g.textAlign = 'center';
-      g.font = 'bold 36px monospace'; g.fillText(gameState.mode === 'over' ? 'BEACH LOST' : 'HOLD THE BEACH', W / 2, 140);
-      g.font = '14px monospace'; g.fillStyle = '#f3e3b8'; g.fillText('HIT THE LIT PADS · MISSES BREAK COMBO', W / 2, 180);
-      g.fillText('PRESS ANY PAD TO START', W / 2, 220); g.textAlign = 'left';
+  }
+
+  function keydown(event: KeyboardEvent) {
+    const target = event.target as HTMLElement | null;
+    if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey || target?.closest('input, textarea, select')) return;
+    if (event.code === 'Space' || event.code.startsWith('Arrow') || event.code === 'Slash' || event.code === 'Quote') event.preventDefault();
+    if (event.repeat) return;
+    audio.init();
+    if (event.code === 'KeyP' && game.layout === 'pad') { togglePause(game); return; }
+    if (event.code === 'Backquote') { togglePause(game); return; }
+    if (event.code === 'Space' || event.code === 'Enter') {
+      if (game.mode === 'play') freezeEnemies(game); else hitCell(game, 1, 1);
+      return;
     }
+    if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') { if (game.mode === 'play' && !game.armed) armBomb(game); return; }
+    const key = CODE_TO_CELL[event.code];
+    if (!key) return;
+    if (game.layout === 'keys') { event.preventDefault(); hitCell(game, key.column, key.row); }
+    else if (game.mode !== 'play') hitCell(game, 1, 1);
+  }
+  function keyup(event: KeyboardEvent) {
+    if ((event.code === 'ShiftLeft' || event.code === 'ShiftRight') && game.armed && game.layout === 'keys') disarmBomb(game);
   }
 
   onMount(() => {
+    const renderer = createRenderer(canvas);
     let running = true, last = performance.now(), lastLed = 0;
     const loop = (now: number) => {
       if (!running) return;
       const dt = Math.min(.05, (now - last) / 1000); last = now;
-      tickHorde(gameState, dt); draw();
-      summary = { mode: gameState.mode, playMode: gameState.playMode, wave: gameState.wave, hp: gameState.hp,
-        score: gameState.score, combo: gameState.combo, bombs: gameState.bombs, charge: gameState.charge, armed: gameState.armed };
-      if (now - lastLed > 33) { onframe(ledFrame(gameState)); lastLed = now; }
+      const cfg = settings();
+      tickHorde(game, dt);
+      applyEvents(fx, layout, drainEvents(game), audio, cfg);
+      updateFx(fx, game, dt);
+      renderer.draw(game, fx, layout, cfg);
+      const next = { mode: game.mode, wave: game.wave, hp: game.hp, score: game.score, combo: game.combo, bombs: game.bombs,
+        charge: Math.floor(game.charge), armed: game.armed, paused: game.paused };
+      if (Object.keys(next).some(key => next[key as keyof typeof next] !== summary[key as keyof typeof summary])) summary = next;
+      if (now - lastLed > 33) { onframe(ledFrame(game, game.time, cfg.aids)); lastLed = now; }
       requestAnimationFrame(loop);
     };
     requestAnimationFrame(loop);
@@ -69,29 +112,57 @@
   });
 </script>
 
+<svelte:window onkeydown={keydown} onkeyup={keyup} />
+
 <div class="horde-screen">
   <div class="game-head lcd"><span>HORDE · HOLD THE BEACH</span><span>WAVE {summary.wave} · BASE {summary.hp}% · SCORE {summary.score}</span></div>
-  <canvas bind:this={canvas} width={W} height={H} aria-label="Horde game: hit pads beneath the approaching enemies" onpointerdown={(event) => {
-    const bounds = event.currentTarget.getBoundingClientRect();
-    const x = (event.clientX - bounds.left) * W / bounds.width, y = (event.clientY - bounds.top) * H / bounds.height;
-    if (x >= 130 && x < 514 && y >= 96 && y < 320) padInput(Math.floor((x - 130) / 48) + 11 + (7 - Math.floor((y - 96) / 28)) * 10, true);
-    else if (gameState.mode !== 'play') padInput(11, true);
-  }}></canvas>
-  <div class="game-foot silk">{summary.mode === 'play' ? `COMBO ×${summary.combo} · ON SCREEN OR LAUNCHPAD` : 'PRESS ANY PAD TO DEPLOY'}</div>
+  <div class="settings lcd" aria-label="Horde settings">
+    <label>ARENA <select bind:value={ui.layout} onchange={changeLayout}><option value="pad">Launchpad 8×8</option><option value="keys">Keyboard 10×4</option></select></label>
+    <label>MODE <select bind:value={ui.playMode} onchange={changeMode}><option value="free">Free</option><option value="beat">Beat</option></select></label>
+    <label>SPEED <select bind:value={ui.speed}><option value="0.8">Easy</option><option value="1">Normal</option><option value="1.25">Hard</option></select></label>
+    <label>AIDS <select bind:value={ui.aids}><option value="full">Full</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
+    <label>QUALITY <select bind:value={ui.quality}><option value="high">High</option><option value="low">Low</option></select></label>
+    <label>MOTION <select bind:value={ui.motion}><option value="full">Full</option><option value="reduce">Reduce</option></select></label>
+    <label>CRUSH <select bind:value={ui.crush}><option value="0">Off</option><option value="3">3 bit</option><option value="4">4 bit</option><option value="5">5 bit</option></select></label>
+    <label>CRT <select bind:value={ui.crt}><option value="on">On</option><option value="curved">Curved</option><option value="off">Off</option></select></label>
+    <label>SOUND <select bind:value={ui.sound}><option value="sfx">SFX</option><option value="synth">Synth</option><option value="off">Off</option></select></label>
+  </div>
+  <div class="stage" bind:clientWidth={stageWidth} bind:clientHeight={stageHeight}>
+    <div class="wrap" class:curved={ui.crt === 'curved'} class:nocrt={ui.crt === 'off'} style:width="{W * fit}px" style:height="{H * fit}px">
+      <canvas bind:this={canvas} width={W} height={H} aria-label="Horde game: hit the pads beneath the approaching enemies"
+        onpointerdown={pointerDown} oncontextmenu={event => event.preventDefault()}></canvas>
+      <div class="crt scan"></div><div class="crt vig"></div>
+    </div>
+  </div>
   <div class="game-controls lcd" aria-label="Horde controls">
-    <button class:active={summary.playMode === 'free'} onclick={() => gameState.playMode = 'free'} disabled={summary.mode === 'play'}>FREE</button>
-    <button class:active={summary.playMode === 'beat'} onclick={() => gameState.playMode = 'beat'} disabled={summary.mode === 'play'}>BEAT</button>
-    <button onclick={() => padInput(89, true)} disabled={summary.mode !== 'play'} aria-label="Arm bomb">BOMB {summary.bombs}{summary.armed ? ' ARMED' : ''}</button>
-    <button onclick={() => padInput(79, true)} disabled={summary.mode !== 'play' || summary.charge < 100} aria-label="Freeze enemies">FREEZE {summary.charge}%</button>
+    <button onclick={() => togglePause(game)} disabled={summary.mode !== 'play'} aria-pressed={summary.paused}>{summary.paused ? 'RESUME' : 'PAUSE'}</button>
+    <button onclick={() => armBomb(game)} disabled={summary.mode !== 'play'} aria-label="Arm bomb" class:active={summary.armed}>BOMB {summary.bombs}{summary.armed ? ' ARMED' : ''}</button>
+    <button onclick={() => freezeEnemies(game)} disabled={summary.mode !== 'play' || summary.charge < 100} aria-label="Freeze enemies">FREEZE {summary.charge}%</button>
+    <button onclick={() => restart({})} disabled={summary.mode === 'title'}>TITLE</button>
+    <span class="hint silk">{game.layout === 'pad' ? 'CLICK / PAD = SHOOT · SIDE ▶ TOP = BOMB · NEXT = FREEZE · P PAUSE' : 'KEYS = SHOOT · SHIFT+KEY = BOMB · SPACE = FREEZE · ` PAUSE'}</span>
   </div>
 </div>
 
 <style>
-  .horde-screen { height: 100%; display: grid; grid-template-rows: 28px minmax(0,1fr) 24px 24px; min-height: 0; gap: 6px; }
-  .game-head, .game-foot { display:flex; justify-content:space-between; align-items:center; padding:0 8px; }
-  canvas { width:100%; height:100%; min-height:0; object-fit:contain; background:#000; image-rendering:pixelated; border:1px solid var(--line); border-radius:3px; box-shadow:inset 0 0 20px #0b1930; }
-  .game-controls { display: flex; justify-content: space-between; gap: 6px; margin-top: 4px; }
-  .game-controls button { color: inherit; background: var(--glass); border: 1px solid var(--line); font: inherit; cursor: pointer; }
-  .game-controls button.active, .game-controls button:focus-visible { color: var(--accent); border-color: var(--accent); }
+  .horde-screen { height: 100%; display: grid; grid-template-rows: 24px auto minmax(0,1fr) auto; min-height: 0; gap: 6px; }
+  .game-head { display:flex; justify-content:space-between; align-items:center; padding:0 8px; }
+  .settings { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 0 4px; font-size: 11px; }
+  .settings label { display: flex; align-items: center; gap: 4px; white-space: nowrap; color: var(--lcd-dim); }
+  .settings select { color: var(--lcd); background: var(--glass); border: 1px solid var(--line); font: inherit; font-size: 11px; padding: 1px 2px; }
+  .settings select:focus-visible { border-color: var(--focus); outline: none; }
+  .stage { min-height: 0; display: grid; place-items: center; overflow: hidden; background: #000; border: 1px solid var(--line); border-radius: 3px; box-shadow: inset 0 0 20px #0b1930; }
+  .wrap { position: relative; }
+  canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; image-rendering: crisp-edges; background: #000; cursor: crosshair; }
+  .crt { position: absolute; inset: 0; pointer-events: none; border-radius: 6px; }
+  .crt.scan { background: repeating-linear-gradient(to bottom, rgba(0,0,0,0) 0 2px, rgba(0,0,0,.12) 2px 3px); mix-blend-mode: multiply; }
+  .crt.vig { box-shadow: inset 0 0 85px rgba(0,0,0,.46), inset 0 0 16px rgba(0,0,0,.52); }
+  .wrap.curved canvas { border-radius: 18px; box-shadow: 0 0 0 3px #181c26, 0 12px 36px rgba(0,0,0,.75); }
+  .wrap.curved .crt { border-radius: 18px; }
+  .wrap.curved .crt.vig { box-shadow: inset 0 0 110px rgba(0,0,0,.62), inset 0 0 28px rgba(0,0,0,.75), inset 0 2px 6px rgba(255,255,255,.08); }
+  .wrap.nocrt .crt { display: none; }
+  .game-controls { display: flex; align-items: center; gap: 6px; }
+  .game-controls button { color: inherit; background: var(--glass); border: 1px solid var(--line); font: inherit; cursor: pointer; padding: 2px 10px; }
+  .game-controls button.active, .game-controls button:focus-visible { color: var(--silk); border-color: var(--silk); }
   .game-controls button:disabled { opacity: .5; cursor: default; }
+  .hint { margin-left: auto; opacity: .75; }
 </style>
