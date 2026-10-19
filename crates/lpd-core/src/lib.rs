@@ -3,3 +3,4 @@
 pub mod audio;
 pub mod devices;
 pub mod kit;
+pub mod seq;

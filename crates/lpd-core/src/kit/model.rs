@@ -13,6 +13,9 @@ pub struct Set {
     /// MIDI learn bindings (Task 12); old files have none.
     #[serde(default)]
     pub learn: Vec<super::learn::Binding>,
+    /// The step sequencer's pattern (Task 13); old files get the default.
+    #[serde(default)]
+    pub pattern: crate::seq::Pattern,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -146,6 +149,7 @@ impl Set {
                 master_db: 0.0,
             },
             learn: Vec::new(),
+            pattern: crate::seq::Pattern::default(),
         }
     }
 

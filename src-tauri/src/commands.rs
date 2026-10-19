@@ -463,6 +463,40 @@ pub(crate) fn unbind(index: usize, state: State<'_, AppState>) -> Set {
 }
 
 #[tauri::command]
+pub(crate) fn seq_play(play: bool, state: State<'_, AppState>) {
+    state.seq_play(play);
+}
+
+#[tauri::command]
+pub(crate) fn seq_rec(armed: bool, state: State<'_, AppState>) {
+    state.seq_rec(armed);
+}
+
+#[tauri::command]
+pub(crate) fn seq_update(
+    pattern: lpd_core::seq::Pattern,
+    key: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Set, String> {
+    state.seq_update(pattern, key.as_deref())
+}
+
+#[tauri::command]
+pub(crate) fn seq_add_lane(
+    bank: usize,
+    x: u8,
+    y: u8,
+    state: State<'_, AppState>,
+) -> Result<Set, String> {
+    state.seq_add_lane(bank, x, y)
+}
+
+#[tauri::command]
+pub(crate) fn seq_audition_step(bank: usize, x: u8, y: u8, state: State<'_, AppState>) {
+    state.seq_audition_step(bank, x, y);
+}
+
+#[tauri::command]
 pub(crate) fn history_state(state: State<'_, AppState>) -> HistoryState {
     state.history_state()
 }

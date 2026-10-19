@@ -230,22 +230,30 @@ pub fn apply_mixer_param(mixer: &mut Mixer, id: &str, value: ParamValue) -> bool
     }
 }
 
-/// Apply a set-level parameter (`bank.*`). The keys and sequencer parameters are applied by
-/// their own tasks. True when the value changed.
+/// Apply a set-level parameter (`bank.*`, `seq.bpm`, `seq.swing`). The keys parameters are
+/// applied by their own task. True when the value changed.
 pub fn apply_set_param(set: &mut Set, id: &str, value: ParamValue) -> bool {
-    let Some(ParamId::Bank(i, what)) = parse_id(id) else {
-        return false;
-    };
-    let Some(bank) = set.banks.get_mut(i) else {
-        return false;
-    };
-    match (what, value) {
-        (BankParam::Humanize, ParamValue::Continuous(v)) => {
-            replace(&mut bank.humanize_db, v.clamp(0.0, 6.0))
+    match (parse_id(id), value) {
+        (Some(ParamId::SeqBpm), ParamValue::Continuous(v)) => {
+            replace(&mut set.pattern.bpm, v.clamp(60.0, 200.0))
         }
-        (BankParam::Flash, ParamValue::Toggle) => flip(&mut bank.lights.flash),
-        (BankParam::PlayState, ParamValue::Toggle) => flip(&mut bank.lights.play_state),
-        (BankParam::Ripple, ParamValue::Toggle) => flip(&mut bank.lights.ripple),
+        (Some(ParamId::SeqSwing), ParamValue::Continuous(v)) => {
+            replace(&mut set.pattern.swing, v.clamp(50.0, 75.0))
+        }
+        (Some(ParamId::Bank(i, what)), value) => {
+            let Some(bank) = set.banks.get_mut(i) else {
+                return false;
+            };
+            match (what, value) {
+                (BankParam::Humanize, ParamValue::Continuous(v)) => {
+                    replace(&mut bank.humanize_db, v.clamp(0.0, 6.0))
+                }
+                (BankParam::Flash, ParamValue::Toggle) => flip(&mut bank.lights.flash),
+                (BankParam::PlayState, ParamValue::Toggle) => flip(&mut bank.lights.play_state),
+                (BankParam::Ripple, ParamValue::Toggle) => flip(&mut bank.lights.ripple),
+                _ => false,
+            }
+        }
         _ => false,
     }
 }

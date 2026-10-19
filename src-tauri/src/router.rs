@@ -2,16 +2,18 @@
 
 use crate::devices::MidiMsg;
 use crate::lights::PaintSnapshot;
+use crate::sequencer::{Fired, SeqState};
 use lpd_core::audio::{db_to_gain, fader_gain, Command, Event, Sample};
 use lpd_core::devices::launchpad::LpEvent;
 use lpd_core::devices::lcxl::{self, LcxlEvent};
 use lpd_core::kit::learn::{self, Binding, LearnKind, ParamValue, Target};
 use lpd_core::kit::{self, Set};
+use lpd_core::seq::VEL_ACCENT;
 use rtrb::{Consumer, Producer};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const TOP_MIXER: u8 = 7;
 
@@ -127,6 +129,8 @@ pub struct Router {
     learn_ignored_sent: bool,
     /// Last CC value per (device, cc), for the toggle's rising edge.
     last_cc: Vec<(String, u8, u8)>,
+    /// The sequencer clock state, shared with the clock thread (a leaf below the router lock).
+    seq: Arc<Mutex<SeqState>>,
 }
 
 impl Router {
@@ -153,7 +157,13 @@ impl Router {
             learn_armed: None,
             learn_ignored_sent: false,
             last_cc: Vec::new(),
+            seq: Arc::default(),
         }
+    }
+
+    /// The sequencer state, for `AppState` and the clock thread.
+    pub fn seq_handle(&self) -> Arc<Mutex<SeqState>> {
+        self.seq.clone()
     }
 
     /// Fix the humanize random sequence (tests).
@@ -381,8 +391,13 @@ impl Router {
         }
     }
 
+    /// Fade out everything and stop the sequencer clock (REC stays armed).
     pub fn stop_all(&mut self) {
         let _ = self.audio_tx.push(Command::StopAll);
+        self.seq
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .stop();
     }
 
     /// Current bank, full velocity.
@@ -390,17 +405,29 @@ impl Router {
         self.trigger_pad_in(self.bank, x, y, 1.0);
     }
 
-    /// The one trigger path: pad gain × `velocity_gain` × bank humanize (±humanize_db/2).
+    /// The trigger path for every pad hit that is not the sequencer's own (screen, Launchpad,
+    /// computer keys, learned notes): pad gain × `velocity_gain` × bank humanize, and the hit is
+    /// reported to the sequencer's record hook.
     pub fn trigger_pad_in(&mut self, bank: usize, x: u8, y: u8, velocity_gain: f32) {
+        if self.trigger_pad_quiet(bank, x, y, velocity_gain) {
+            let seq = self.seq.clone();
+            let mut s = seq.lock().unwrap_or_else(PoisonError::into_inner);
+            s.record(&mut self.set.pattern, bank, x, y, Instant::now());
+        }
+    }
+
+    /// Trigger without recording: the clock's own hits and step auditions. Returns whether a
+    /// voice was sent.
+    pub fn trigger_pad_quiet(&mut self, bank: usize, x: u8, y: u8, velocity_gain: f32) -> bool {
         let Some(b) = self.set.banks.get(bank) else {
-            return;
+            return false;
         };
         let humanize_db = b.humanize_db;
         let Some(pad) = b.pad(x, y) else {
-            return;
+            return false;
         };
         let Some(sample) = self.samples.get(&pad.sample) else {
-            return;
+            return false;
         };
         let mut params = kit::play_params(pad, sample);
         let sample = sample.clone();
@@ -418,6 +445,36 @@ impl Router {
         if sent.is_ok() {
             self.held.insert(id);
         }
+        sent.is_ok()
+    }
+
+    /// Fire the sequencer steps `steps` (indices inside the pattern length): every unmuted lane
+    /// with a non-zero value whose `(lane, step)` is not in `skip` triggers its pad, quietly.
+    /// Lanes whose pad has no sample do nothing.
+    pub fn seq_fire(&mut self, steps: &[usize], skip: &HashSet<(usize, usize)>) -> Vec<Fired> {
+        let mut fired = Vec::new();
+        for &step in steps {
+            for lane in 0..self.set.pattern.lanes.len() {
+                let l = &self.set.pattern.lanes[lane];
+                let value = l.steps.get(step).copied().unwrap_or(0);
+                if l.mute || value == 0 || skip.contains(&(lane, step)) {
+                    continue;
+                }
+                let (bank, x, y) = (usize::from(l.bank), l.x, l.y);
+                let vel = if value >= 2 {
+                    VEL_ACCENT
+                } else {
+                    lpd_core::seq::VEL_ON
+                };
+                if self.trigger_pad_quiet(bank, x, y, f32::from(vel) / 127.0) {
+                    let hold = self.set.banks[bank]
+                        .pad(x, y)
+                        .is_some_and(|p| p.mode == kit::PadMode::Hold);
+                    fired.push(Fired { bank, x, y, hold });
+                }
+            }
+        }
+        fired
     }
 
     /// Release (x, y) of the current bank; if that is not held (bank switched while
@@ -557,8 +614,8 @@ impl Router {
     }
 
     /// A CC bound to parameter `id`. Group and master values apply here (no history); `bank.*`
-    /// goes back in the outcome; the keys and sequencer parameters are applied by their own
-    /// tasks (13 and 15) and do nothing yet.
+    /// goes back in the outcome, as do the sequencer's tempo and swing; `seq.play` starts or stops the
+    /// clock; the keys parameters are applied by their own task (15) and do nothing yet.
     fn apply_learned_cc(&mut self, port: &str, cc: u8, value: u8, id: &str, out: &mut MidiOutcome) {
         let Some(param) = learn::param_value(id, value) else {
             return;
@@ -582,7 +639,15 @@ impl Router {
                 self.send_group(group);
                 out.mixer_changed = true;
             }
-        } else if id.starts_with("bank.") {
+        } else if id == "seq.play" {
+            let params = crate::sequencer::Params::from(&self.set.pattern);
+            let mut s = self.seq.lock().unwrap_or_else(PoisonError::into_inner);
+            if s.playing {
+                s.stop();
+            } else {
+                s.start(Instant::now(), params);
+            }
+        } else if id.starts_with("bank.") || matches!(id, "seq.bpm" | "seq.swing") {
             out.set_param = Some((id.to_string(), param));
         }
     }
@@ -1133,6 +1198,121 @@ mod tests {
         );
         let param: LearnTarget = serde_json::from_str(r#"{"param":"group.2.volume"}"#).unwrap();
         assert_eq!(param, LearnTarget::Param("group.2.volume".into()));
+    }
+
+    fn playing_rec_router() -> (Router, Consumer<Command>) {
+        let (r, rx) = router_with_pad(0.0, 0.0);
+        {
+            let seq = r.seq_handle();
+            let mut s = seq.lock().unwrap();
+            s.start(
+                Instant::now(),
+                crate::sequencer::Params::from(&r.set().pattern),
+            );
+            s.rec = true;
+        }
+        (r, rx)
+    }
+
+    #[test]
+    fn a_pad_hit_while_recording_lands_in_the_pattern() {
+        let (mut r, _rx) = playing_rec_router();
+        r.trigger_pad(0, 0);
+        let lanes = &r.set().pattern.lanes;
+        assert_eq!(lanes.len(), 1);
+        assert_eq!((lanes[0].bank, lanes[0].x, lanes[0].y), (0, 0, 0));
+        assert_eq!(lanes[0].steps.iter().filter(|&&v| v == 1).count(), 1);
+    }
+
+    #[test]
+    fn quiet_triggers_and_empty_pads_are_not_recorded() {
+        let (mut r, _rx) = playing_rec_router();
+        assert!(r.trigger_pad_quiet(0, 0, 0, 1.0));
+        r.trigger_pad_in(0, 5, 5, 1.0); // no pad there
+        assert!(r.set().pattern.lanes.is_empty());
+    }
+
+    #[test]
+    fn a_pad_hit_without_rec_is_not_recorded() {
+        let (mut r, _rx) = router_with_pad(0.0, 0.0);
+        r.trigger_pad(0, 0);
+        assert!(r.set().pattern.lanes.is_empty());
+    }
+
+    #[test]
+    fn the_clock_fires_lanes_with_their_velocity_and_skips() {
+        let (mut r, mut rx) = router_with_pad(0.0, 0.0);
+        let p = &mut r.set_mut().pattern;
+        lpd_core::seq::add_lane(p, 0, 0, 0).unwrap();
+        lpd_core::seq::add_lane(p, 1, 0, 0).unwrap();
+        p.lanes[0].steps[2] = 1;
+        p.lanes[1].steps[2] = 2;
+        let fired = r.seq_fire(&[2], &HashSet::new());
+        assert_eq!(fired.len(), 2);
+        let gains = trigger_gains(&mut rx);
+        assert!((gains[0] - 90.0 / 127.0).abs() < 1e-6, "{gains:?}");
+        assert_eq!(gains[1], 1.0, "an accent is full velocity");
+        // A skipped (lane, step) and a muted lane stay quiet; a step without a value too.
+        r.set_mut().pattern.lanes[1].mute = true;
+        let skip = HashSet::from([(0usize, 2usize)]);
+        assert!(r.seq_fire(&[2], &skip).is_empty());
+        assert!(r.seq_fire(&[3], &HashSet::new()).is_empty());
+        assert!(trigger_gains(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn a_lane_without_a_sample_stays_silent_and_a_hold_pad_is_flagged() {
+        let (mut r, mut rx) = router_with_pad(0.0, 0.0);
+        let p = &mut r.set_mut().pattern;
+        lpd_core::seq::add_lane(p, 0, 7, 7).unwrap(); // no pad there
+        lpd_core::seq::add_lane(p, 0, 0, 0).unwrap();
+        p.lanes[0].steps[0] = 1;
+        p.lanes[1].steps[0] = 1;
+        r.set_mut().banks[0].pads[0].mode = kit::PadMode::Hold;
+        let fired = r.seq_fire(&[0], &HashSet::new());
+        assert_eq!(fired.len(), 1);
+        assert!(fired[0].hold);
+        assert_eq!(trigger_gains(&mut rx).len(), 1);
+    }
+
+    #[test]
+    fn stop_all_stops_the_clock_but_keeps_rec_armed() {
+        let (mut r, _rx) = playing_rec_router();
+        r.stop_all();
+        let seq = r.seq_handle();
+        let s = seq.lock().unwrap();
+        assert!(!s.playing);
+        assert!(s.rec);
+    }
+
+    #[test]
+    fn a_learned_seq_play_toggles_the_clock_and_tempo_goes_to_the_history_path() {
+        let mut r = router();
+        r.set_mut().learn.push(bound(
+            "K",
+            LearnKind::Cc,
+            50,
+            Target::Param("seq.play".into()),
+        ));
+        r.set_mut().learn.push(bound(
+            "K",
+            LearnKind::Cc,
+            51,
+            Target::Param("seq.bpm".into()),
+        ));
+        r.on_midi("K", "other", cc_msg(50, 127));
+        assert!(r.seq_handle().lock().unwrap().playing);
+        r.on_midi("K", "other", cc_msg(50, 0));
+        r.on_midi("K", "other", cc_msg(50, 127));
+        assert!(
+            !r.seq_handle().lock().unwrap().playing,
+            "the second rising edge stops it"
+        );
+        let out = r.on_midi("K", "other", cc_msg(51, 127));
+        assert_eq!(
+            out.set_param,
+            Some(("seq.bpm".to_string(), ParamValue::Continuous(200.0)))
+        );
     }
 
     #[test]

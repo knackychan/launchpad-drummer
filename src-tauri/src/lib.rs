@@ -8,6 +8,7 @@ pub mod lights;
 pub mod logfile;
 pub mod router;
 pub mod saver;
+pub mod sequencer;
 pub mod startup;
 pub mod state;
 pub mod store;
@@ -76,6 +77,7 @@ pub fn run() {
                 launchpad::start(app.handle().clone(), app_state.clone());
                 devices::start(app.handle().clone(), app_state.clone());
                 lcxl::start(app.handle().clone(), app_state.clone());
+                sequencer::start(app.handle().clone(), app_state.clone());
                 let handle = app.handle().clone();
                 let telemetry_handle = handle.clone();
                 let telemetry_state = app_state.clone();
@@ -139,7 +141,12 @@ pub fn run() {
             commands::history_state,
             commands::arm_learn,
             commands::cancel_learn,
-            commands::unbind
+            commands::unbind,
+            commands::seq_play,
+            commands::seq_rec,
+            commands::seq_update,
+            commands::seq_add_lane,
+            commands::seq_audition_step
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Launchpad Drummer");

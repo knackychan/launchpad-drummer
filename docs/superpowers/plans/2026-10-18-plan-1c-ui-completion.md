@@ -882,7 +882,7 @@ Task 12 verification (2026-10-19): `kit_learn.rs` (18 tests) and `learn.test.ts`
 
 ## Phase E — Sequencer and keys
 
-### Task 13: Sequencer engine (model, timing, clock, record)
+### Task 13: Sequencer engine (model, timing, clock, record) — DONE
 
 **Purpose.** UI spec 4.7 and 7.3: the pattern lives in set.json, the router runs the clock, the UI gets the position at ~30 Hz, recording follows the nearest-step rule.
 
@@ -938,7 +938,9 @@ pub fn clear_steps(p: &mut Pattern);                          // all steps 0, la
 
 **Do not:** run the clock in the UI; fire hidden steps (index ≥ length); remove steps while recording; record auditions or sequencer-fired hits.
 
-**Done when:** [ ] tests first → PASS; [ ] full verification; commit `feat: step sequencer clock, pattern model and record`.
+**Done when:** [x] tests first → PASS; [x] full verification; commit `feat: step sequencer clock, pattern model and record`.
+
+Task 13 verification (2026-10-19): `crates/lpd-core/tests/seq.rs` (13 tests, the plan's values) was written first; the clock, router and state tests were written with the code. fmt clean; `cargo test --workspace` all passed (109 lib tests); `npm test` 67 passed; `npm run check` 0 errors, 0 warnings. Implementation notes: the clock state (`SeqState`, in `sequencer.rs`) is created by the router and shared with `AppState.seq`; it is a leaf lock below the router (the record hook takes it while the router is held; the clock thread never holds it while taking the router). `SeqState::tick` is a pure function of `Instant`s: it returns the due steps, folds the loop reference, and on a tempo, swing or length change moves the reference so the current step and its progress are kept. `Router::trigger_pad_in` records (non-clock hits: screen, Launchpad, computer keys, learned notes, later the keys-bound pads); `trigger_pad_quiet` (clock, step audition) does not; a hit on a pad without a sample is not recorded. `Router::stop_all` stops the clock (so the screen ■, Esc, Launchpad Mixer CC 111 and a learned `stopAll` all do). The learned parameters `seq.play`, `seq.bpm` and `seq.swing` now work (`seq.play` toggles the clock; tempo and swing are `learn:{id}` edits). Recording marks the set dirty through the clock thread, which makes the LCXL bridge thread emit `set-changed` (≤ 1 per 33 ms). Added `lpd_core::seq::validate` (length in `LENGTHS`, tempo and swing clamped, 32 steps of 0..2, valid unique lanes) used by `seq_update`. Moving a pad onto an empty pad that carries a lane keeps only the moved pad's lane (one lane per pad); the plan did not say. Known limit: `seq_update` sends the whole pattern, so an edit made while REC is writing steps can overwrite steps recorded since the UI's last `set-changed`. Not verified: the clock's timing on a real machine (jitter ≤ 1 ms is a D3 target, not measured), recording against real hardware.
 
 ### Task 14: Sequencer UI, fold strips, telemetry beat lamps and orbit
 

@@ -275,6 +275,29 @@ fn bank_params_apply_to_the_set() {
     ));
 }
 
+#[test]
+fn sequencer_params_apply_to_the_pattern() {
+    let mut set = Set::new();
+    assert!(apply_set_param(
+        &mut set,
+        "seq.bpm",
+        ParamValue::Continuous(140.0)
+    ));
+    assert_eq!(set.pattern.bpm, 140.0);
+    assert!(apply_set_param(
+        &mut set,
+        "seq.swing",
+        ParamValue::Continuous(60.0)
+    ));
+    assert_eq!(set.pattern.swing, 60.0);
+    assert!(!apply_set_param(
+        &mut set,
+        "seq.bpm",
+        ParamValue::Continuous(140.0)
+    ));
+    assert!(!apply_set_param(&mut set, "seq.play", ParamValue::Toggle));
+}
+
 fn set_with_pads() -> Set {
     let mut set = Set::new();
     set.banks[0].set_pad(Pad::new(0, 0, "samples/a.wav", [63, 0, 0]));

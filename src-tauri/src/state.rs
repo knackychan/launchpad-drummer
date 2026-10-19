@@ -15,6 +15,7 @@ use crate::lights::LightPainter;
 use crate::logfile;
 use crate::router::{LearnTarget, Router, UiEvent};
 use crate::saver::{SaveState, SaveStatus, Saver};
+use crate::sequencer::{Fired, Params, SeqState};
 use crate::startup::{self, Startup};
 use crate::store::{prepare_sample, KitManager, LoadedKit};
 use lpd_core::audio::{Command, Event, Sample, Taps};
@@ -23,7 +24,7 @@ use lpd_core::devices::lcxl::LcxlEvent;
 use lpd_core::kit::learn;
 use lpd_core::kit::{self, History, Pad, Set};
 use rtrb::{Consumer, Producer};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -174,6 +175,8 @@ pub struct AppState {
     mixer_dirty: Arc<AtomicBool>,
     /// A learned control changed the set (bank parameters) since `set-changed` was last emitted.
     set_dirty: Arc<AtomicBool>,
+    /// The sequencer clock state (shared with the router's record hook and the clock thread).
+    seq: Arc<Mutex<SeqState>>,
     saver: Arc<Mutex<Saver>>,
     save_gate: Arc<Mutex<()>>,
     writer: Writer,
@@ -198,6 +201,7 @@ impl AppState {
         writer: Writer,
     ) -> Self {
         let router = Router::new(set, Default::default(), audio_tx, audio_rx);
+        let seq = router.seq_handle();
         let kit_manager = KitManager {
             dir: None,
             samples: Default::default(),
@@ -218,6 +222,7 @@ impl AppState {
             wheel: Arc::default(),
             mixer_dirty: Arc::new(AtomicBool::new(false)),
             set_dirty: Arc::new(AtomicBool::new(false)),
+            seq,
             saver: Arc::new(Mutex::new(Saver::new())),
             save_gate: Arc::new(Mutex::new(())),
             writer,
@@ -262,7 +267,7 @@ impl AppState {
     }
 
     /// The set changed: schedule an autosave.
-    fn touch(&self) {
+    pub(crate) fn touch(&self) {
         lock(&self.saver).touch(Instant::now());
     }
 
@@ -313,6 +318,124 @@ impl AppState {
 
     pub fn stop_all(&self) {
         lock(&self.router).stop_all();
+    }
+
+    // ---- step sequencer (the clock thread lives in `sequencer.rs`) ------------------------
+
+    pub fn seq_handle(&self) -> Arc<Mutex<SeqState>> {
+        self.seq.clone()
+    }
+
+    /// Tempo, swing and length as the clock needs them.
+    pub fn pattern_params(&self) -> Params {
+        Params::from(&lock(&self.router).set().pattern)
+    }
+
+    /// Fire due sequencer steps (the router lock is taken here, the sequencer state is not held).
+    pub fn seq_fire(&self, steps: &[usize], skip: &HashSet<(usize, usize)>) -> Vec<Fired> {
+        let (fired, active) = {
+            let mut r = lock(&self.router);
+            let fired = r.seq_fire(steps, skip);
+            (fired, r.bank())
+        };
+        for f in fired.iter().filter(|f| f.bank == active) {
+            self.record_hit(f.x, f.y);
+        }
+        fired
+    }
+
+    pub fn seq_release(&self, bank: usize, x: u8, y: u8) {
+        lock(&self.router).release_pad_in(bank, x, y);
+    }
+
+    /// The set changed behind the UI's back (recording): autosave, and tell the screen.
+    pub fn mark_set_dirty(&self) {
+        self.set_dirty.store(true, Ordering::SeqCst);
+        self.touch();
+    }
+
+    /// The undo step of a recording take: the set as it is before REC writes into it. (`edit`
+    /// records only when the set changed, and nothing has changed yet.)
+    pub fn begin_take(&self) {
+        let r = lock(&self.router);
+        let before = r.set().clone();
+        lock(&self.history).record(&before, None, Instant::now());
+    }
+
+    pub fn seq_play(&self, play: bool) {
+        if play {
+            let params = self.pattern_params();
+            crate::sequencer::lock(&self.seq).start(Instant::now(), params);
+        } else {
+            crate::sequencer::lock(&self.seq).stop();
+        }
+    }
+
+    /// Arming starts playback if it is stopped and opens the take's undo step; disarming leaves
+    /// playback running.
+    pub fn seq_rec(&self, armed: bool) {
+        if !armed {
+            crate::sequencer::lock(&self.seq).rec = false;
+            return;
+        }
+        if crate::sequencer::lock(&self.seq).rec {
+            return;
+        }
+        self.begin_take();
+        let params = self.pattern_params();
+        let mut s = crate::sequencer::lock(&self.seq);
+        s.rec = true;
+        if !s.playing {
+            s.start(Instant::now(), params);
+        }
+    }
+
+    /// Replace the pattern (validated). `key` folds a drag (`seq:bpm`, `seq:swing`, `seq:paint`)
+    /// into one undo step.
+    pub fn seq_update(
+        &self,
+        pattern: lpd_core::seq::Pattern,
+        key: Option<&str>,
+    ) -> Result<Set, String> {
+        let mut pattern = pattern;
+        lpd_core::seq::validate(&mut pattern)?;
+        Ok(self.edit(key, |set| {
+            set.pattern = pattern;
+            set.clone()
+        }))
+    }
+
+    pub fn seq_add_lane(&self, bank: usize, x: u8, y: u8) -> Result<Set, String> {
+        if bank >= kit::BANKS || x > 7 || y > 7 {
+            return Err("Pad does not exist".into());
+        }
+        let filled = lock(&self.router).set().banks[bank]
+            .pad(x, y)
+            .is_some_and(|p| !p.sample.is_empty());
+        if !filled {
+            return Err("Pad is empty".into());
+        }
+        let mut added = Ok(());
+        let set = self.edit(None, |set| {
+            added = lpd_core::seq::add_lane(&mut set.pattern, bank as u8, x, y);
+            set.clone()
+        });
+        added.map(|_| set).map_err(str::to_string)
+    }
+
+    /// Sound a step's pad while the clock is stopped (not recorded, no history).
+    pub fn seq_audition_step(&self, bank: usize, x: u8, y: u8) {
+        if crate::sequencer::lock(&self.seq).playing {
+            return;
+        }
+        let (sent, active) = {
+            let mut r = lock(&self.router);
+            let vel = f32::from(lpd_core::seq::VEL_ON) / 127.0;
+            (r.trigger_pad_quiet(bank, x, y, vel), r.bank())
+        };
+        if sent && bank == active {
+            self.record_hit(x, y);
+        }
     }
 
     /// Flash/ripple bookkeeping; the router lock is already released.
@@ -1553,6 +1676,102 @@ mod tests {
             "one step undoes the sweep"
         );
         assert_eq!(undone.learn.len(), 1, "the binding is still there");
+    }
+
+    #[test]
+    fn arming_rec_starts_the_clock_and_opens_one_undo_step() {
+        let (state, _rx) = app();
+        assert!(!state.history_state().can_undo);
+        state.seq_rec(true);
+        {
+            let s = state.seq_handle();
+            let s = s.lock().unwrap();
+            assert!(s.playing && s.rec);
+        }
+        assert!(state.history_state().can_undo, "the take's step");
+        state.seq_rec(true); // arming again opens no second step
+        state.seq_rec(false);
+        assert!(!state.seq_handle().lock().unwrap().rec);
+        assert!(
+            state.seq_handle().lock().unwrap().playing,
+            "disarming leaves playback running"
+        );
+    }
+
+    #[test]
+    fn play_and_stop_toggle_the_clock() {
+        let (state, _rx) = app();
+        state.seq_play(true);
+        assert!(state.seq_handle().lock().unwrap().playing);
+        state.stop_all();
+        assert!(!state.seq_handle().lock().unwrap().playing);
+        state.seq_play(true);
+        state.seq_play(false);
+        assert!(!state.seq_handle().lock().unwrap().playing);
+    }
+
+    #[test]
+    fn add_lane_needs_a_filled_pad_and_a_new_lane() {
+        let (state, _rx) = app();
+        assert_eq!(state.seq_add_lane(0, 3, 3).unwrap_err(), "Pad is empty");
+        state.edit(None, |set| {
+            set.banks[0].set_pad(lpd_core::kit::Pad::new(3, 3, "samples/a.wav", [63, 0, 0]));
+        });
+        let set = state.seq_add_lane(0, 3, 3).unwrap();
+        assert_eq!(set.pattern.lanes.len(), 1);
+        assert_eq!(
+            state.seq_add_lane(0, 3, 3).unwrap_err(),
+            "Lane already there"
+        );
+        assert_eq!(
+            state.seq_add_lane(9, 0, 0).unwrap_err(),
+            "Pad does not exist"
+        );
+    }
+
+    #[test]
+    fn seq_update_validates_clamps_and_coalesces_by_key() {
+        let (state, _rx) = app();
+        let mut p = state.get_current_set().pattern;
+        p.length = 12;
+        assert!(state.seq_update(p.clone(), None).is_err());
+        p.length = 16;
+        p.bpm = 500.0;
+        p.swing = 10.0;
+        let set = state.seq_update(p.clone(), None).unwrap();
+        assert_eq!((set.pattern.bpm, set.pattern.swing), (200.0, 50.0));
+        let mut bad = state.get_current_set().pattern;
+        bad.lanes.push(lpd_core::seq::Lane {
+            bank: 0,
+            x: 0,
+            y: 0,
+            mute: false,
+            steps: vec![0; 5],
+        });
+        assert!(state.seq_update(bad, None).is_err());
+        let mut high = state.get_current_set().pattern;
+        lpd_core::seq::add_lane(&mut high, 0, 0, 0).unwrap();
+        high.lanes[0].steps[0] = 3;
+        assert!(state.seq_update(high, None).is_err());
+        // Two tempo drags within a second are one undo step.
+        let before = state.get_current_set().pattern;
+        for bpm in [110.0, 120.0, 130.0] {
+            let mut q = before.clone();
+            q.bpm = bpm;
+            state.seq_update(q, Some("seq:bpm")).unwrap();
+        }
+        assert_eq!(state.get_current_set().pattern.bpm, 130.0);
+        let undone = state.undo().unwrap();
+        assert_eq!(undone.pattern.bpm, 200.0, "one step undoes the whole drag");
+    }
+
+    #[test]
+    fn auditioning_a_step_is_silent_while_the_clock_runs() {
+        let (state, mut rx) = app();
+        state.seq_play(true);
+        while rx.pop().is_ok() {}
+        state.seq_audition_step(0, 0, 0);
+        assert!(rx.pop().is_err());
     }
 
     #[test]

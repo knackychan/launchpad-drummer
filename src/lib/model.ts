@@ -51,11 +51,18 @@ export interface Binding {
   target: LearnTargetModel;
 }
 
+/** Step sequencer (Rust `seq`): lanes of 32 steps, each 0 off, 1 on, 2 accent. */
+export interface Lane { bank: number; x: number; y: number; mute: boolean; steps: number[] }
+export interface Pattern { lanes: Lane[]; length: 4 | 8 | 16 | 32; bpm: number; swing: number }
+/** The `seq-position` event. */
+export interface SeqPosition { playing: boolean; rec: boolean; step: number; length: number; bpm: number; msIntoStep: number }
+
 export interface SetModel {
   version: number;
   banks: Bank[];
   mixer: Mixer;
   learn: Binding[];
+  pattern: Pattern;
 }
 
 export interface AudioLatency {
@@ -207,6 +214,7 @@ export function createEmptySet(): SetModel {
       masterDb: 0,
     },
     learn: [],
+    pattern: { lanes: [], length: 16, bpm: 100, swing: 50 },
   };
 }
 

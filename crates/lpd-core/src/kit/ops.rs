@@ -98,8 +98,12 @@ pub fn move_pad(
             // The target had no sample but may carry a binding: the moved pad's wins.
             retarget_pad(&mut set.learn, t, None);
             retarget_pad(&mut set.learn, f, Some(t));
+            crate::seq::retarget_lanes(&mut set.pattern, f, t);
         }
-        PadMove::Swap => swap_pad_bindings(&mut set.learn, f, t),
+        PadMove::Swap => {
+            swap_pad_bindings(&mut set.learn, f, t);
+            crate::seq::swap_lanes(&mut set.pattern, f, t);
+        }
         PadMove::Copy => {}
     }
     Some(result)
