@@ -48,16 +48,39 @@ export interface SetModel {
   mixer: Mixer;
 }
 
+export interface AudioLatency {
+  midiToBufferMs: number;
+  outputMs: number;
+  totalMs: number;
+}
+
 export interface AudioStatus {
-  /** Output callbacks that arrived late since the stream started (or the last reset). */
-  dropouts?: number;
-  /** Milliseconds since the last dropout when the status was read; null when none. */
-  lastDropoutAgoMs?: number | null;
-  state: string;
+  state: 'running' | 'stopped' | 'lost' | 'error';
+  backend: 'WASAPI' | 'ASIO';
   deviceName: string;
   sampleRate: number;
+  /** null = the driver picks (AUTO). */
   bufferSize: number | null;
   channels: number;
+  /** Output callbacks that arrived late since the stream started (or the last reset). */
+  dropouts: number;
+  /** Milliseconds since the last dropout when the status was read; null when none. */
+  lastDropoutAgoMs: number | null;
+  /** ASIO was asked for but could not be opened; WASAPI runs instead. */
+  asioFallback: boolean;
+  latency: AudioLatency;
+}
+
+export interface AudioDevice {
+  name: string;
+  isDefault: boolean;
+  bufferSizes: number[];
+}
+
+export interface AsioInfo {
+  available: boolean;
+  /** "Built without ASIO support" | "No ASIO driver found" */
+  reason: string | null;
 }
 
 /** Editor waveform data from the `sample_peaks` command. */

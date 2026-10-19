@@ -159,7 +159,7 @@ button { cursor: pointer; }
 .game-plate:has(.prototype) { padding: 0; overflow: hidden; }
 
 /* ===== Setup ===== */
-.setup { max-width: 860px; margin: 24px auto; }
+.setup { max-width: 860px; margin: 24px auto; display: flex; flex-direction: column; gap: 24px; }
 .setup-scroll { position: absolute; inset: 0; overflow: auto; padding: 8px; }
 .rack-unit { padding: 24px; }
 .rack-unit h1 { font-size: 18px; letter-spacing: .12em; margin: 0 0 24px; color: var(--lcd); }

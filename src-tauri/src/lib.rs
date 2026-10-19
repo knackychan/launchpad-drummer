@@ -13,12 +13,12 @@ pub mod telemetry;
 
 use lpd_core::kit::Set;
 use state::AppState;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
-/// Autosave and audio health, off every real-time path. Emits `save-status` and `audio-status`.
-fn housekeeping(app: AppHandle, state: AppState, health: Arc<audio::StreamHealth>) {
+/// Autosave, off every real-time path. Emits `save-status`. (A lost audio stream is noticed by the
+/// telemetry thread.)
+fn housekeeping(app: AppHandle, state: AppState) {
     loop {
         std::thread::sleep(Duration::from_millis(100));
         state.autosave_tick(Instant::now());
@@ -26,63 +26,22 @@ fn housekeeping(app: AppHandle, state: AppState, health: Arc<audio::StreamHealth
         if let Some(status) = state.take_save_change() {
             let _ = app.emit("save-status", status);
         }
-        if let Some(status) = audio::poll_stream_health(&health, &state) {
-            logfile::log("audio stream error: output stopped");
-            let _ = app.emit("audio-status", status);
-        }
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let default_set = Set::new();
-    let mut audio_warning = None;
-    let (stream, commands, events, status, health, taps, stats) = match audio::start(false, None) {
-        Ok(sys) => (
-            Some(sys.stream),
-            sys.commands,
-            sys.events,
-            sys.status,
-            sys.health,
-            Some(sys.taps),
-            Some(sys.stats),
-        ),
-        Err(e) => {
-            // The log file opens in `setup`; the warning is written there.
-            audio_warning = Some(format!("Audio device init warning: {e}"));
-            let (tx, _) = rtrb::RingBuffer::new(1024);
-            let (_, rx) = rtrb::RingBuffer::new(1024);
-            (
-                None,
-                tx,
-                rx,
-                audio::AudioStatus {
-                    state: "error".into(),
-                    device_name: "none".into(),
-                    sample_rate: 48_000,
-                    buffer_size: None,
-                    channels: 2,
-                    dropouts: 0,
-                    last_dropout_ago_ms: None,
-                },
-                Arc::new(audio::StreamHealth::default()),
-                None,
-                None,
-            )
-        }
-    };
-    let app_state = AppState::new(default_set, commands, events);
-    app_state.set_audio_status(status);
-    app_state.set_taps(taps);
-    if let Some(stats) = stats {
-        app_state.set_audio_stats(stats);
-    }
-    let _audio_stream = stream;
+    // Placeholder queues: the audio owner thread installs the real ones once the stream is up.
+    let (commands, _) = rtrb::RingBuffer::new(1024);
+    let (_, events) = rtrb::RingBuffer::new(1024);
+    let app_state = AppState::new(Set::new(), commands, events);
+    let audio_controller = audio::AudioController::spawn(app_state.clone());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(app_state.clone())
+        .manage(audio_controller.clone())
         .setup({
             let app_state = app_state.clone();
             move |app| {
@@ -90,21 +49,23 @@ pub fn run() {
                     logfile::init(dir);
                 }
                 logfile::log("Launchpad Drummer started");
-                match audio_warning {
-                    Some(warning) => logfile::log(warning),
-                    None => logfile::log(format!("Audio: {:?}", app_state.get_audio_status())),
-                }
                 match app.path().app_config_dir() {
                     Ok(dir) => {
                         app_state.restore(dir.join("config.json"));
                     }
                     Err(e) => logfile::log(format!("No app config folder: {e}")),
                 }
+                // The saved audio prefs decide the device, so the stream starts after the config
+                // is read. A failure is logged by the controller and shows as "error" in SETUP.
+                match audio_controller.start(app_state.get_config().audio) {
+                    Ok(status) => logfile::log(format!("Audio: {status:?}")),
+                    Err(e) => logfile::log(format!("Audio device init warning: {e}")),
+                }
                 launchpad::start(app.handle().clone(), app_state.clone());
                 let handle = app.handle().clone();
                 let telemetry_handle = handle.clone();
                 let telemetry_state = app_state.clone();
-                std::thread::spawn(move || housekeeping(handle, app_state, health));
+                std::thread::spawn(move || housekeeping(handle, app_state));
                 std::thread::spawn(move || telemetry::run(telemetry_handle, telemetry_state));
                 Ok(())
             }
@@ -112,6 +73,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             launchpad::send_led_frame,
             commands::get_audio_status,
+            commands::audio_devices,
+            commands::asio_available,
+            commands::set_audio,
+            commands::audio_reconnect,
             commands::set_telemetry,
             commands::reset_dropouts,
             commands::trigger_pad,

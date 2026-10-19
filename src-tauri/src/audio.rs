@@ -1,28 +1,110 @@
-//! CPAL output stream driving lpd-core Engine.
+//! CPAL output stream driving lpd-core Engine, and the thread that owns it.
 
+use crate::config::AudioPrefs;
+use crate::logfile;
+use crate::state::AppState;
 use anyhow::{bail, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use lpd_core::audio::{host, Command, Engine, Event, Taps};
 use rtrb::{Consumer, Producer, RingBuffer};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+/// Time from the MIDI event to the first sample of the buffer (one buffer), the output
+/// pipeline's own delay as the driver reports it, and their sum. Milliseconds, one decimal.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Latency {
+    pub midi_to_buffer_ms: f32,
+    pub output_ms: f32,
+    pub total_ms: f32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
 pub struct AudioStatus {
+    /// "running" | "stopped" | "lost" | "error"
     pub state: String,
+    /// "WASAPI" | "ASIO"
+    pub backend: String,
     pub device_name: String,
     pub sample_rate: u32,
     pub buffer_size: Option<u32>,
     pub channels: u16,
     /// Callback gaps longer than 1.8 buffers since the stream started or the counter was reset.
     /// Filled from `AudioStats` when the status is read.
-    #[serde(default)]
     pub dropouts: u32,
-    #[serde(default)]
     pub last_dropout_ago_ms: Option<u64>,
+    /// ASIO was asked for but could not be opened; WASAPI runs instead.
+    pub asio_fallback: bool,
+    /// Filled from `AudioStats` when the status is read.
+    pub latency: Latency,
+}
+
+impl Default for AudioStatus {
+    fn default() -> Self {
+        AudioStatus {
+            state: "stopped".into(),
+            backend: "WASAPI".into(),
+            device_name: "none".into(),
+            sample_rate: 48_000,
+            buffer_size: None,
+            channels: 2,
+            dropouts: 0,
+            last_dropout_ago_ms: None,
+            asio_fallback: false,
+            latency: Latency::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioDevice {
+    pub name: String,
+    pub is_default: bool,
+    pub buffer_sizes: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AsioInfo {
+    pub available: bool,
+    /// "Built without ASIO support" | "No ASIO driver found"
+    pub reason: Option<String>,
+}
+
+/// Powers of two in 32..=2048 that lie within `[min, max]`.
+pub fn buffer_choices(min: u32, max: u32) -> Vec<u32> {
+    (5..=11)
+        .map(|p| 1u32 << p)
+        .filter(|n| (min..=max).contains(n))
+        .collect()
+}
+
+/// `frames / rate` in milliseconds, rounded to one decimal.
+pub fn latency_ms(frames: u32, rate: u32) -> f32 {
+    if rate == 0 {
+        return 0.0;
+    }
+    round1(frames as f64 / rate as f64 * 1000.0)
+}
+
+fn round1(ms: f64) -> f32 {
+    ((ms * 10.0).round() / 10.0) as f32
+}
+
+/// The latency readout: one buffer, plus the driver-reported output delay.
+pub fn latency(buffer_frames: u32, rate: u32, output_us: u64) -> Latency {
+    let midi_to_buffer_ms = latency_ms(buffer_frames, rate);
+    let output_ms = round1(output_us as f64 / 1000.0);
+    Latency {
+        midi_to_buffer_ms,
+        output_ms,
+        total_ms: round1(midi_to_buffer_ms as f64 + output_ms as f64),
+    }
 }
 
 /// A callback that arrives later than 1.8 buffer durations after the previous one means the
@@ -34,12 +116,19 @@ pub fn is_dropout(interval: Duration, frames: usize, rate: u32) -> bool {
     interval.as_secs_f64() > 1.8 * frames as f64 / rate as f64
 }
 
-/// Dropout counter shared between the audio callback (writer, atomics only) and the app.
+/// Counters shared between the audio callbacks (writers, atomics only) and the app. One per
+/// stream: a late callback or error from a replaced stream only touches its own instance.
 pub struct AudioStats {
     started: Instant,
     dropouts: AtomicU32,
     /// Milliseconds since `started` at the last dropout.
     last_dropout_ms: AtomicU64,
+    /// Frames of the latest output callback (the buffer size when the driver picks it).
+    frames: AtomicU32,
+    /// Driver-reported delay between the callback and playback of its buffer, microseconds.
+    output_us: AtomicU64,
+    /// The stream's error callback fired (device unplugged, driver reset).
+    lost: AtomicBool,
 }
 
 impl Default for AudioStats {
@@ -54,6 +143,9 @@ impl AudioStats {
             started: Instant::now(),
             dropouts: AtomicU32::new(0),
             last_dropout_ms: AtomicU64::new(0),
+            frames: AtomicU32::new(0),
+            output_us: AtomicU64::new(0),
+            lost: AtomicBool::new(false),
         }
     }
 
@@ -81,41 +173,39 @@ impl AudioStats {
     pub fn reset(&self) {
         self.dropouts.store(0, Ordering::Release);
     }
-}
 
-/// Failure flag of one output stream. The stream's error callback only sets it (no allocation,
-/// logging or I/O); the audio owner polls it. A replaced stream gets a new flag, so a late error
-/// from the old stream cannot affect the new one.
-#[derive(Default)]
-pub struct StreamHealth(AtomicBool);
+    /// Atomic stores only; called from the output callback.
+    pub fn set_callback_info(&self, frames: usize, output: Option<Duration>) {
+        self.frames.store(frames as u32, Ordering::Relaxed);
+        if let Some(d) = output {
+            self.output_us
+                .store(d.as_micros() as u64, Ordering::Relaxed);
+        }
+    }
 
-impl StreamHealth {
-    pub fn report_failure(&self) {
-        self.0.store(true, Ordering::Release);
+    pub fn frames(&self) -> u32 {
+        self.frames.load(Ordering::Relaxed)
+    }
+
+    pub fn output_us(&self) -> u64 {
+        self.output_us.load(Ordering::Relaxed)
+    }
+
+    /// Called from the stream's error callback: only sets the flag (no allocation, logging or
+    /// I/O there); the telemetry thread picks it up and logs.
+    pub fn report_lost(&self) {
+        self.lost.store(true, Ordering::Release);
     }
 
     /// True once per failure burst.
-    pub fn take_failure(&self) -> bool {
-        self.0.swap(false, Ordering::AcqRel)
+    pub fn take_lost(&self) -> bool {
+        self.lost.swap(false, Ordering::AcqRel)
     }
 }
 
-/// Move a reported stream failure into the application status. Returns the new status when the
-/// UI should be told (the first failure only).
-pub fn poll_stream_health(
-    health: &StreamHealth,
-    state: &crate::state::AppState,
-) -> Option<AudioStatus> {
-    if health.take_failure() {
-        state.audio_stream_failed()
-    } else {
-        None
-    }
-}
-
+/// Everything `start` made. `stream` is `None` only for fakes in tests.
 pub struct AudioSystem {
-    pub stream: cpal::Stream,
-    pub health: Arc<StreamHealth>,
+    pub stream: Option<cpal::Stream>,
     pub commands: Producer<Command>,
     pub events: Consumer<Event>,
     pub status: AudioStatus,
@@ -123,32 +213,66 @@ pub struct AudioSystem {
     pub stats: Arc<AudioStats>,
 }
 
-pub fn start(asio: bool, buffer_frames: Option<u32>) -> Result<AudioSystem> {
-    let audio_host = if asio {
-        asio_host()?
+fn is_asio(backend: &str) -> bool {
+    backend.eq_ignore_ascii_case("asio")
+}
+
+fn host_for(backend: &str) -> Result<cpal::Host> {
+    if is_asio(backend) {
+        asio_host()
     } else {
-        cpal::default_host()
+        Ok(cpal::default_host())
+    }
+}
+
+/// Open the output stream the prefs ask for. ASIO that cannot be opened falls back to WASAPI
+/// (`asio_fallback`); a device that is not there falls back to the host's default device.
+pub fn start(prefs: &AudioPrefs) -> Result<AudioSystem> {
+    let mut asio_fallback = false;
+    let (audio_host, asio) = if is_asio(&prefs.backend) {
+        match asio_host() {
+            Ok(h) => (h, true),
+            Err(e) => {
+                logfile::log(format!("ASIO unavailable, using WASAPI: {e:#}"));
+                asio_fallback = true;
+                (cpal::default_host(), false)
+            }
+        }
+    } else {
+        (cpal::default_host(), false)
     };
-    let device = audio_host
-        .default_output_device()
+    let wanted = prefs.device.as_deref().filter(|_| !asio_fallback);
+    let device = wanted
+        .and_then(|name| {
+            audio_host
+                .output_devices()
+                .ok()?
+                .find(|d| d.name().is_ok_and(|n| n == name))
+        })
+        .or_else(|| {
+            if let Some(name) = wanted {
+                logfile::log(format!(
+                    "Audio device {name:?} not found, using the default"
+                ));
+            }
+            audio_host.default_output_device()
+        })
         .context("no audio output device")?;
     let device_name = device.name().unwrap_or_else(|_| "unknown".into());
     let supported = device.default_output_config()?;
     let format = supported.sample_format();
     let channels = supported.channels();
     let mut config: cpal::StreamConfig = supported.into();
-    if let Some(frames) = buffer_frames {
+    if let Some(frames) = prefs.buffer_frames {
         config.buffer_size = cpal::BufferSize::Fixed(frames);
     }
     let sample_rate = config.sample_rate.0;
     let (engine, events, taps) = Engine::with_taps(sample_rate);
     let (commands, rx) = RingBuffer::new(1024);
-    let health = Arc::new(StreamHealth::default());
     let stats = Arc::new(AudioStats::new());
     let cb = Callback {
         engine,
         rx,
-        health: health.clone(),
         stats: stats.clone(),
         rate: sample_rate,
     };
@@ -164,29 +288,73 @@ pub fn start(asio: bool, buffer_frames: Option<u32>) -> Result<AudioSystem> {
         cpal::BufferSize::Default => None,
     };
     Ok(AudioSystem {
-        stream,
-        health,
+        stream: Some(stream),
         commands,
         events,
         status: AudioStatus {
             state: "running".into(),
+            backend: if asio { "ASIO" } else { "WASAPI" }.into(),
             device_name,
             sample_rate,
             buffer_size,
             channels,
-            dropouts: 0,
-            last_dropout_ago_ms: None,
+            asio_fallback,
+            ..Default::default()
         },
         taps,
         stats,
     })
 }
 
+/// Output devices of a backend with the buffer sizes each supports.
+pub fn list_devices(backend: &str) -> Result<Vec<AudioDevice>> {
+    let audio_host = host_for(backend)?;
+    let default = audio_host
+        .default_output_device()
+        .and_then(|d| d.name().ok());
+    let mut out = Vec::new();
+    for device in audio_host.output_devices()? {
+        let Ok(name) = device.name() else { continue };
+        let buffer_sizes = match device.default_output_config() {
+            Ok(c) => match c.buffer_size() {
+                cpal::SupportedBufferSize::Range { min, max } => buffer_choices(*min, *max),
+                cpal::SupportedBufferSize::Unknown => vec![],
+            },
+            Err(_) => vec![],
+        };
+        out.push(AudioDevice {
+            is_default: default.as_deref() == Some(name.as_str()),
+            name,
+            buffer_sizes,
+        });
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "asio")]
+pub fn asio_info() -> AsioInfo {
+    let found = asio_host()
+        .ok()
+        .and_then(|h| h.output_devices().ok().map(|mut d| d.next().is_some()))
+        .unwrap_or(false);
+    AsioInfo {
+        available: found,
+        reason: (!found).then(|| "No ASIO driver found".into()),
+    }
+}
+
+#[cfg(not(feature = "asio"))]
+pub fn asio_info() -> AsioInfo {
+    AsioInfo {
+        available: false,
+        reason: Some("Built without ASIO support".into()),
+    }
+}
+
 /// Everything the output callback owns.
 struct Callback {
     engine: Engine,
     rx: Consumer<Command>,
-    health: Arc<StreamHealth>,
     stats: Arc<AudioStats>,
     rate: u32,
 }
@@ -202,7 +370,6 @@ where
     let Callback {
         mut engine,
         mut rx,
-        health,
         stats,
         rate,
     } = cb;
@@ -211,9 +378,10 @@ where
     let mut staging = vec![0.0f32; 4096 * channels];
     // Time and frame count of the previous callback: a gap is judged against the buffer it followed.
     let mut last_callback: Option<(Instant, usize)> = None;
+    let on_error = stats.clone();
     let stream = device.build_output_stream(
         config,
-        move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+        move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
             let now = Instant::now();
             let frames = data.len() / channels.max(1);
             if let Some((prev, prev_frames)) = last_callback {
@@ -222,6 +390,8 @@ where
                 }
             }
             last_callback = Some((now, frames));
+            let ts = info.timestamp();
+            stats.set_callback_info(frames, ts.playback.duration_since(&ts.callback));
             for chunk in data.chunks_mut(staging.len()) {
                 let buf = &mut staging[..chunk.len()];
                 host::process(&mut engine, &mut rx, &mut scratch, buf, channels);
@@ -230,10 +400,110 @@ where
                 }
             }
         },
-        move |_| health.report_failure(),
+        move |_| on_error.report_lost(),
         None,
     )?;
     Ok(stream)
+}
+
+// ---- the thread that owns the stream ----------------------------------------------------------
+
+pub enum AudioRequest {
+    /// Replace the running stream (if any) with one for these prefs.
+    Start(AudioPrefs, mpsc::Sender<Result<AudioStatus, String>>),
+    /// Drop the stream; the status becomes "stopped".
+    Stop,
+}
+
+/// Builds a stream for the prefs. Runs on the owner thread only (a `cpal::Stream` is not `Send`).
+pub type Starter = Box<dyn FnMut(&AudioPrefs) -> Result<AudioSystem> + Send>;
+
+/// How long a command waits for the owner thread.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Handle to the audio owner thread. The thread owns the `cpal::Stream`; every restart goes
+/// through it, never through the router or UI threads.
+#[derive(Clone)]
+pub struct AudioController {
+    tx: mpsc::Sender<AudioRequest>,
+}
+
+impl AudioController {
+    /// Spawn the owner thread with the real cpal starter.
+    pub fn spawn(state: AppState) -> Self {
+        Self::spawn_with(state, Box::new(start))
+    }
+
+    pub fn spawn_with(state: AppState, mut starter: Starter) -> Self {
+        let (tx, rx) = mpsc::channel::<AudioRequest>();
+        std::thread::Builder::new()
+            .name("audio-owner".into())
+            .spawn(move || {
+                let mut stream: Option<cpal::Stream> = None;
+                for request in rx {
+                    // The old stream goes first: ASIO devices cannot be opened twice.
+                    drop(stream.take());
+                    match request {
+                        AudioRequest::Start(prefs, reply) => {
+                            let result = match starter(&prefs) {
+                                Ok(sys) => {
+                                    stream = sys.stream;
+                                    Ok(state.install_audio(
+                                        sys.commands,
+                                        sys.events,
+                                        sys.taps,
+                                        sys.stats,
+                                        sys.status,
+                                    ))
+                                }
+                                Err(e) => {
+                                    let message = format!("{e:#}");
+                                    logfile::log(format!("Audio start failed: {message}"));
+                                    state.audio_failed(&prefs);
+                                    Err(message)
+                                }
+                            };
+                            let _ = reply.send(result);
+                        }
+                        AudioRequest::Stop => state.audio_stopped(),
+                    }
+                }
+                drop(stream);
+            })
+            .expect("spawn the audio owner thread");
+        AudioController { tx }
+    }
+
+    /// Restart the stream with `prefs`. Blocks up to 5 s: call from a worker, not the UI.
+    pub fn start(&self, prefs: AudioPrefs) -> Result<AudioStatus, String> {
+        let (reply, wait) = mpsc::channel();
+        self.tx
+            .send(AudioRequest::Start(prefs, reply))
+            .map_err(|_| "The audio thread is not running".to_string())?;
+        wait.recv_timeout(REPLY_TIMEOUT)
+            .map_err(|_| "The audio device did not answer in time".to_string())?
+    }
+
+    pub fn stop(&self) {
+        let _ = self.tx.send(AudioRequest::Stop);
+    }
+
+    /// `set_audio`: remember the prefs, then restart with them.
+    pub fn apply(&self, state: &AppState, prefs: AudioPrefs) -> Result<AudioStatus, String> {
+        state.set_audio_prefs(prefs.clone())?;
+        self.start(prefs)
+    }
+
+    /// `audio_reconnect`: restart with the saved prefs, only when the stream is lost, stopped or
+    /// failed to start; a running stream is left alone.
+    pub fn reconnect(&self, state: &AppState) -> Result<AudioStatus, String> {
+        let status = state.get_audio_status();
+        if matches!(status.state.as_str(), "lost" | "stopped" | "error") {
+            self.start(state.get_config().audio)
+        } else {
+            Ok(status)
+        }
+    }
 }
 
 #[cfg(feature = "asio")]
@@ -258,5 +528,66 @@ mod tests {
         assert!(!is_dropout(Duration::from_millis(6), 256, 48_000));
         assert!(!is_dropout(Duration::from_millis(9), 256, 48_000));
         assert!(!is_dropout(Duration::from_millis(100), 256, 0));
+    }
+
+    #[test]
+    fn buffer_choices_are_powers_of_two_within_the_range() {
+        assert_eq!(buffer_choices(64, 1024), vec![64, 128, 256, 512, 1024]);
+        assert_eq!(
+            buffer_choices(1, 4096),
+            vec![32, 64, 128, 256, 512, 1024, 2048]
+        );
+        assert_eq!(buffer_choices(100, 120), Vec::<u32>::new());
+        assert_eq!(buffer_choices(32, 32), vec![32]);
+    }
+
+    #[test]
+    fn latency_is_frames_over_rate_in_ms_with_one_decimal() {
+        assert_eq!(latency_ms(256, 48_000), 5.3);
+        assert_eq!(latency_ms(128, 48_000), 2.7);
+        assert_eq!(latency_ms(256, 0), 0.0);
+        let l = latency(256, 48_000, 10_000);
+        assert_eq!(
+            l,
+            Latency {
+                midi_to_buffer_ms: 5.3,
+                output_ms: 10.0,
+                total_ms: 15.3
+            }
+        );
+    }
+
+    #[test]
+    fn status_serializes_with_the_documented_names() {
+        let json = serde_json::to_value(AudioStatus::default()).unwrap();
+        for key in [
+            "state",
+            "backend",
+            "deviceName",
+            "sampleRate",
+            "bufferSize",
+            "channels",
+            "dropouts",
+            "lastDropoutAgoMs",
+            "asioFallback",
+        ] {
+            assert!(json.get(key).is_some(), "missing {key}");
+        }
+        assert!(json["latency"].get("midiToBufferMs").is_some());
+        assert!(json["latency"].get("outputMs").is_some());
+        assert!(json["latency"].get("totalMs").is_some());
+    }
+
+    #[test]
+    fn a_stream_error_flag_is_taken_once_and_belongs_to_one_stream() {
+        let old = AudioStats::new();
+        let new = AudioStats::new();
+        for _ in 0..50 {
+            old.report_lost();
+        }
+        assert!(old.take_lost());
+        assert!(!old.take_lost());
+        old.report_lost();
+        assert!(!new.take_lost());
     }
 }

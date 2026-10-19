@@ -8,8 +8,8 @@
 //! else); the one exception to "no lock across disk I/O" is `config`, held while its own small
 //! file is written.
 
-use crate::audio::{AudioStats, AudioStatus};
-use crate::config::{self, AppConfig};
+use crate::audio::{self, AudioStats, AudioStatus};
+use crate::config::{self, AppConfig, AudioPrefs};
 use crate::lights::LightPainter;
 use crate::logfile;
 use crate::router::Router;
@@ -151,8 +151,7 @@ pub struct AppState {
     pub painter: Arc<Mutex<LightPainter>>,
     pub kit_manager: Arc<Mutex<KitManager>>,
     pub audio_status: Arc<Mutex<AudioStatus>>,
-    /// Engine output taps read by the telemetry thread (a leaf lock). Task 9 swaps them on a
-    /// stream restart.
+    /// Engine output taps read by the telemetry thread (a leaf lock); swapped on a stream restart.
     pub taps: Arc<Mutex<Option<Taps>>>,
     /// The UI wants the `telemetry` feed (Play mode, window visible).
     telemetry_on: Arc<AtomicBool>,
@@ -196,15 +195,7 @@ impl AppState {
             router: Arc::new(Mutex::new(router)),
             painter: Arc::new(Mutex::new(LightPainter::new())),
             kit_manager: Arc::new(Mutex::new(kit_manager)),
-            audio_status: Arc::new(Mutex::new(AudioStatus {
-                state: "stopped".into(),
-                device_name: "none".into(),
-                sample_rate: 48_000,
-                buffer_size: None,
-                channels: 2,
-                dropouts: 0,
-                last_dropout_ago_ms: None,
-            })),
+            audio_status: Arc::new(Mutex::new(AudioStatus::default())),
             taps: Arc::default(),
             telemetry_on: Arc::new(AtomicBool::new(false)),
             audio_stats: Arc::new(Mutex::new(Arc::new(AudioStats::new()))),
@@ -379,7 +370,7 @@ impl AppState {
 
     pub fn get_audio_status(&self) -> AudioStatus {
         let status = lock(&self.audio_status).clone();
-        self.with_dropouts(status)
+        self.with_live(status)
     }
 
     /// The current output rate, without cloning the whole status.
@@ -387,27 +378,81 @@ impl AppState {
         lock(&self.audio_status).sample_rate
     }
 
-    /// Fill the dropout fields from the live counter (the stored status never carries them).
-    fn with_dropouts(&self, mut status: AudioStatus) -> AudioStatus {
+    /// Fill the dropout and latency fields from the live counters (the stored status never
+    /// carries them).
+    fn with_live(&self, mut status: AudioStatus) -> AudioStatus {
         let stats = lock(&self.audio_stats).clone();
         status.dropouts = stats.dropouts();
         status.last_dropout_ago_ms = stats.last_dropout_ago_ms(Instant::now());
+        let buffer = status.buffer_size.unwrap_or_else(|| stats.frames());
+        status.latency = audio::latency(buffer, status.sample_rate, stats.output_us());
         status
     }
 
-    /// The output stream reported an error. Returns the new status the first time only, so a
-    /// burst of errors reaches the UI once.
-    pub fn audio_stream_failed(&self) -> Option<AudioStatus> {
-        let failed = {
+    /// The output stream's error callback fired. Returns the new status the first time only
+    /// (a burst of errors reaches the UI once), and only for a stream that was running.
+    pub fn poll_stream_lost(&self) -> Option<AudioStatus> {
+        let stats = lock(&self.audio_stats).clone();
+        if !stats.take_lost() {
+            return None;
+        }
+        let lost = {
             let mut status = lock(&self.audio_status);
             if status.state == "running" {
-                status.state = "error".into();
+                status.state = "lost".into();
                 Some(status.clone())
             } else {
                 None
             }
         };
-        failed.map(|s| self.with_dropouts(s))
+        lost.map(|s| self.with_live(s))
+    }
+
+    /// A new output stream is running (called by the audio owner thread): the router gets its
+    /// queues and the mixer, the telemetry thread its taps, and the status its counters.
+    pub fn install_audio(
+        &self,
+        commands: Producer<Command>,
+        events: Consumer<Event>,
+        taps: Taps,
+        stats: Arc<AudioStats>,
+        status: AudioStatus,
+    ) -> AudioStatus {
+        lock(&self.router).replace_audio(commands, events);
+        self.set_taps(Some(taps));
+        self.set_audio_stats(stats);
+        self.set_audio_status(status);
+        self.get_audio_status()
+    }
+
+    /// The stream could not be (re)started: no taps, fresh counters, status "error".
+    pub fn audio_failed(&self, prefs: &AudioPrefs) {
+        self.set_taps(None);
+        self.set_audio_stats(Arc::new(AudioStats::new()));
+        let mut status = lock(&self.audio_status);
+        status.state = "error".into();
+        status.backend = if prefs.backend.eq_ignore_ascii_case("asio") {
+            "ASIO"
+        } else {
+            "WASAPI"
+        }
+        .into();
+        status.asio_fallback = false;
+        if let Some(device) = &prefs.device {
+            status.device_name = device.clone();
+        }
+        status.buffer_size = prefs.buffer_frames;
+    }
+
+    /// The stream was dropped on request.
+    pub fn audio_stopped(&self) {
+        self.set_taps(None);
+        lock(&self.audio_status).state = "stopped".into();
+    }
+
+    /// Remember the audio prefs (`set_audio`); the stream restarts separately.
+    pub fn set_audio_prefs(&self, prefs: AudioPrefs) -> Result<(), String> {
+        self.update_config(|c| c.audio = prefs)
     }
 
     pub fn set_taps(&self, taps: Option<Taps>) {

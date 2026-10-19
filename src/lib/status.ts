@@ -18,11 +18,14 @@ export function saveBadge(save: SaveStatus): Notice | null {
   }
 }
 
+/** Status-strip audio LCD: `WASAPI · 256 · 15.3 ms` (backend, buffer or AUTO, total latency). */
 export function audioLabel(audio: AudioStatus | null): string {
-  if (audio?.state === 'running') {
-    return `${audio.deviceName} · ${audio.bufferSize ?? 'auto'} · ${(audio.sampleRate / 1000).toFixed(1)} kHz`;
+  switch (audio?.state) {
+    case 'running': return `${audio.backend} · ${audio.bufferSize ?? 'AUTO'} · ${audio.latency.totalMs.toFixed(1)} ms`;
+    case 'lost': return 'AUDIO LOST';
+    case 'error': return 'AUDIO ERROR';
+    default: return 'AUDIO STOPPED';
   }
-  return audio?.state === 'error' ? 'AUDIO ERROR' : 'AUDIO STOPPED';
 }
 
 /** A dropout counts as recent for this long; the AUDIO lamp turns amber and the notice shows. */

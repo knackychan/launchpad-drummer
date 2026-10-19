@@ -8,6 +8,7 @@
   import KeysPlate from './components/KeysPlate.svelte';
   import SequencerPlate from './components/SequencerPlate.svelte';
   import CrtLayers from './components/CrtLayers.svelte';
+  import SetupAudio from './components/SetupAudio.svelte';
   import SetupDisplay from './components/SetupDisplay.svelte';
   import HordeGame from './components/HordeGame.svelte';
   import ConsoleBackdrop from './components/ConsoleBackdrop.svelte';
@@ -225,8 +226,8 @@
   const notices = $derived(activeNotices({ learnArmed: null, audioLost: audioStatus?.state === 'lost' || audioStatus?.state === 'error',
     backup, saveFailed: saveStatus.state === 'failed' ? saveStatus.reason : null,
     launchpad: tauri ? deviceState : 'connected', lcxl: tauri ? 'disconnected' : 'connected', missing: missing.length,
-    asioFallback: false, dropoutRecent: dropoutIsRecent, confirmations, keysAbsent: false, dismissed }));
-  const lampClass = (state: string) => ({ connected: 'ok', running: 'ok', busy: 'warn', bootloader: 'error', stopped: 'error', error: 'error' } as Record<string, string>)[state] ?? '';
+    asioFallback: audioStatus?.asioFallback ?? false, dropoutRecent: dropoutIsRecent, confirmations, keysAbsent: false, dismissed }));
+  const lampClass = (state: string) => ({ connected: 'ok', running: 'ok', busy: 'warn', bootloader: 'error', stopped: 'error', lost: 'error', error: 'error' } as Record<string, string>)[state] ?? '';
   const audioLamp = $derived(audioStatus?.state === 'running' && dropoutIsRecent ? 'warn' : lampClass(audioStatus?.state ?? 'stopped'));
 
   // The engine feed (scope, spectrum, levels) runs only while it can be seen: Play mode, window visible.
@@ -280,16 +281,16 @@
       await refreshMissing();
       history = await invoke<typeof history>('history_state');
       libraryDir = (await invoke<AppConfig>('get_config')).libraryDir;
+      // The preview answers with a demo status; the desktop app with the live one.
+      audioStatus = await invoke<AudioStatus>('get_audio_status');
       if (!tauri) return;
-      const [set, b, status, save] = await Promise.all([
+      const [set, b, save] = await Promise.all([
         invoke<SetModel>('get_current_set'),
         invoke<number>('get_current_bank'),
-        invoke<AudioStatus>('get_audio_status'),
         invoke<SaveStatus>('get_save_status'),
       ]);
       currentSet = set;
       activeBank = b;
-      audioStatus = status;
       saveStatus = save;
     } catch (err) {
       console.warn('Failed to load initial state:', err);
@@ -738,7 +739,10 @@
         </div>
       {:else}
         <div class="setup-scroll">
-          <SetupDisplay level={crt} status={deviceState} events={midiLog} reconnect={() => void invoke('refresh_leds').catch(() => {})} onchange={setCrt} />
+          <div class="setup">
+            <SetupAudio status={audioStatus} dropoutRecent={dropoutIsRecent} onstatus={status => { audioStatus = status; }} onerror={showToast} />
+            <SetupDisplay level={crt} status={deviceState} events={midiLog} reconnect={() => void invoke('refresh_leds').catch(() => {})} onchange={setCrt} />
+          </div>
         </div>
       {/if}
     </main>
@@ -753,7 +757,7 @@
       <button class="device-status" onclick={() => setMode('setup')} aria-label="AUDIO: {audioStatus?.state ?? 'stopped'}. Open Setup">
         <span class="lamp {audioLamp}"></span><span class="silk">AUDIO</span>
       </button>
-      <span class="lcd lcd-dim" class:audio-error={audioStatus?.state === 'error'}>{audioLabel(audioStatus)}</span>
+      <span class="lcd lcd-dim" class:audio-error={audioStatus?.state === 'error' || audioStatus?.state === 'lost'}>{audioLabel(audioStatus)}</span>
       <span class="lcd lcd-dim">DROPS {audioStatus?.dropouts ?? 0}</span>
       <span class="lcd lcd-dim status-path" title={setPath}>{middleTruncate(setPath, 48)}</span>
       {#key saveStatus}<span class="lamp" class:ok={saveStatus.state === 'saved'} class:blink={saveStatus.state === 'saved'} class:error={saveStatus.state === 'failed'} role="img" aria-label={saveStatus.state === 'failed' ? 'Save failed' : saveStatus.state === 'saved' ? 'Saved' : 'Saving…'}></span>{/key}

@@ -1,5 +1,5 @@
-use crate::audio::AudioStatus;
-use crate::config::AppConfig;
+use crate::audio::{self, AsioInfo, AudioController, AudioDevice, AudioStatus};
+use crate::config::{AppConfig, AudioPrefs};
 use crate::saver::SaveStatus;
 use crate::startup::Startup;
 use crate::state::{
@@ -25,6 +25,45 @@ async fn worker<T: Send + 'static>(
 #[tauri::command]
 pub(crate) fn get_audio_status(state: State<'_, AppState>) -> AudioStatus {
     state.get_audio_status()
+}
+
+/// Output devices of a backend ("wasapi" | "asio") with their buffer sizes. Enumeration can be
+/// slow, so it runs off the command thread.
+#[tauri::command]
+pub(crate) async fn audio_devices(backend: String) -> Result<Vec<AudioDevice>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        audio::list_devices(&backend).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn asio_available() -> Result<AsioInfo, String> {
+    tauri::async_runtime::spawn_blocking(audio::asio_info)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Save the audio prefs and restart the stream with them.
+#[tauri::command]
+pub(crate) async fn set_audio(
+    prefs: AudioPrefs,
+    state: State<'_, AppState>,
+    audio: State<'_, AudioController>,
+) -> Result<AudioStatus, String> {
+    let audio = audio.inner().clone();
+    worker(&state, move |s| audio.apply(&s, prefs)).await
+}
+
+/// Restart the stream with the saved prefs when it is lost, stopped or failed to start.
+#[tauri::command]
+pub(crate) async fn audio_reconnect(
+    state: State<'_, AppState>,
+    audio: State<'_, AudioController>,
+) -> Result<AudioStatus, String> {
+    let audio = audio.inner().clone();
+    worker(&state, move |s| audio.reconnect(&s)).await
 }
 
 /// The UI wants (or no longer wants) the `telemetry` feed.

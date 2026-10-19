@@ -10,6 +10,7 @@ fn audio_status_serializes_correctly() {
         channels: 2,
         dropouts: 3,
         last_dropout_ago_ms: Some(1500),
+        ..Default::default()
     };
     let json = serde_json::to_string(&status).unwrap();
     assert!(json.contains("\"state\":\"running\""));

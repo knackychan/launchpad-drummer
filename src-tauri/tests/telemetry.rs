@@ -162,3 +162,22 @@ fn last_dropout_age_counts_up_from_the_event() {
     let ago = stats.last_dropout_ago_ms(at + Duration::from_millis(2500));
     assert_eq!(ago, Some(2500));
 }
+
+#[test]
+fn a_lost_stream_is_reported_by_one_tick_with_state_lost() {
+    let r = rig(16);
+    r.state
+        .set_audio_status(launchpad_drummer_lib::audio::AudioStatus {
+            state: "running".into(),
+            ..Default::default()
+        });
+    let stats = Arc::new(AudioStats::new());
+    r.state.set_audio_stats(stats.clone());
+    let mut t = Telemetry::new();
+    assert!(t.tick(&r.state).lost.is_none());
+
+    stats.report_lost();
+    let lost = t.tick(&r.state).lost.expect("the flag is picked up");
+    assert_eq!(lost.state, "lost");
+    assert!(t.tick(&r.state).lost.is_none(), "reported once");
+}

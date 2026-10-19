@@ -205,6 +205,18 @@ impl Router {
         Ok(())
     }
 
+    /// A new output stream is running: swap in its queues. The old engine is gone with its voices,
+    /// so voice counts and holds are cleared, and the new engine gets the mixer. Nothing else is
+    /// sent. The audio owner thread calls this after the old stream was dropped.
+    pub fn replace_audio(&mut self, tx: Producer<Command>, rx: Consumer<Event>) {
+        self.audio_tx = tx;
+        self.audio_rx = rx;
+        self.voice_counts.clear();
+        self.held.clear();
+        self.send_mixer();
+        // keys: Task 15 (re-send the keys settings to the new engine here)
+    }
+
     /// Release every held pad (input ownership is changing).
     pub fn release_all_held(&mut self) {
         let ids: Vec<u16> = self.held.iter().copied().collect();
@@ -474,6 +486,37 @@ mod tests {
             cmd_rx.pop().is_err(),
             "no release for a pad that never sounded"
         );
+    }
+
+    #[test]
+    fn replace_audio_swaps_queues_and_resends_the_mixer() {
+        let (mut router, mut old_rx) = router_with_pad(0.0, 0.0);
+        router.trigger_pad(0, 0);
+        router.poll_audio_events();
+        router.voice_counts.insert(Router::pad_id(0, 0, 0), 2);
+        assert!(!router.held.is_empty());
+        while old_rx.pop().is_ok() {}
+
+        let (new_tx, mut new_rx) = RingBuffer::new(1024);
+        let (_evt_tx, new_events) = RingBuffer::new(16);
+        router.replace_audio(new_tx, new_events);
+
+        // Fresh stream: no voices, nothing held, mixer sent first.
+        assert!(!router.is_pad_sounding(0, 0, 0));
+        assert!(router.held.is_empty());
+        let first: Vec<Command> = (0..9).filter_map(|_| new_rx.pop().ok()).collect();
+        assert_eq!(first.len(), 9);
+        assert!(first[..8]
+            .iter()
+            .enumerate()
+            .all(|(i, c)| matches!(c, Command::SetGroup { group, .. } if *group as usize == i)));
+        assert!(matches!(first[8], Command::SetMasterGain(_)));
+        assert!(new_rx.pop().is_err(), "nothing else is queued");
+
+        // A trigger now lands in the new queue only.
+        router.trigger_pad(0, 0);
+        assert!(matches!(new_rx.pop(), Ok(Command::Trigger { .. })));
+        assert!(old_rx.pop().is_err());
     }
 
     #[test]

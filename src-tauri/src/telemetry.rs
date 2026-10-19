@@ -1,6 +1,8 @@
 //! The telemetry thread: drains the engine taps every 16 ms, runs the FFT and emits `telemetry`
 //! while the UI wants it. Nothing here runs on the audio thread.
 
+use crate::audio::AudioStatus;
+use crate::logfile;
 use crate::state::AppState;
 use lpd_core::audio::fft::{bands, to_dbfs, trigger_index, Fft, FFT_SIZE};
 use lpd_core::audio::GROUPS;
@@ -29,6 +31,8 @@ pub struct Tick {
     pub frame: Option<TelemetryFrame>,
     /// The dropout count differs from the previous tick: `audio-status` should be emitted.
     pub dropouts_changed: bool,
+    /// The output stream failed since the previous tick: the status, now with `state: "lost"`.
+    pub lost: Option<AudioStatus>,
 }
 
 pub struct Telemetry {
@@ -93,6 +97,7 @@ impl Telemetry {
         Tick {
             frame,
             dropouts_changed,
+            lost: state.poll_stream_lost(),
         }
     }
 
@@ -126,7 +131,10 @@ pub fn run(app: AppHandle, state: AppState) {
         if let Some(frame) = tick.frame {
             let _ = app.emit("telemetry", frame);
         }
-        if tick.dropouts_changed {
+        if let Some(status) = tick.lost {
+            logfile::log("audio stream lost: the output device stopped answering");
+            let _ = app.emit("audio-status", status);
+        } else if tick.dropouts_changed {
             let _ = app.emit("audio-status", state.get_audio_status());
         }
     }

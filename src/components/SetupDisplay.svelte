@@ -1,38 +1,36 @@
 <script lang="ts">
   import Plate from './Plate.svelte';
+  import RackUnit from './RackUnit.svelte';
   import type { CrtLevel } from '../lib/display.ts';
   let { level, onchange, status, events, reconnect }: { level: CrtLevel; onchange: (level: CrtLevel) => void; status: string; events: { time: string; text: string }[]; reconnect: () => void } = $props();
   const levels: CrtLevel[] = ['off', 'low', 'medium'];
 </script>
 
-<div class="setup">
-  <Plate label="DISPLAY" class="rack-unit">
-    <h1>DISPLAY</h1>
-    <fieldset>
-      <legend class="silk">CRT EFFECTS</legend>
-      <div class="switch">
-        {#each levels as value}
-          <label class:active={level === value}>
-            <input type="radio" name="crt" {value} checked={level === value} onchange={() => onchange(value)} />
-            {value.toUpperCase()}
-          </label>
-        {/each}
-      </div>
-    </fieldset>
-    <p class="lcd lcd-dim">Glow, curved pixel mask, grain, vignette and an occasional scan line.</p>
-    <p class="lcd lcd-dim">Reduced motion keeps the mask and grain still.</p>
-  </Plate>
-  <Plate label="MIDI DEVICES · AUTO RECONNECT" class="rack-unit midi-setup">
-    <h1>MIDI DEVICES</h1>
-    <div class="midi-state"><span class="lamp" class:connected={status === 'connected'} class:warn={status === 'busy'}></span><span class="lcd">LAUNCHPAD MK2 · {status.toUpperCase()}</span><button class="key" onclick={reconnect}>RETRY FRAME</button></div>
-    <p class="lcd lcd-dim">The bridge scans every 2 seconds and restores the latest LED frame after reconnection.</p>
-    <h2 class="silk">MIDI EVENT LOG</h2>
-    <ol class="midi-log" aria-live="polite">
-      {#if events.length === 0}<li class="lcd lcd-dim">Waiting for Launchpad status and pad events.</li>{/if}
-      {#each events as event}<li><time class="lcd lcd-dim">{event.time}</time><span class="lcd">{event.text}</span></li>{/each}
-    </ol>
-  </Plate>
-</div>
+<Plate label="MIDI DEVICES · AUTO RECONNECT" class="rack-unit midi-setup">
+  <h1>MIDI DEVICES</h1>
+  <div class="midi-state"><span class="lamp" class:connected={status === 'connected'} class:warn={status === 'busy'}></span><span class="lcd">LAUNCHPAD MK2 · {status.toUpperCase()}</span><button class="key" onclick={reconnect}>RETRY FRAME</button></div>
+  <p class="lcd lcd-dim">The bridge scans every 2 seconds and restores the latest LED frame after reconnection.</p>
+  <h2 class="silk">MIDI EVENT LOG</h2>
+  <ol class="midi-log" aria-live="polite">
+    {#if events.length === 0}<li class="lcd lcd-dim">Waiting for Launchpad status and pad events.</li>{/if}
+    {#each events as event}<li><time class="lcd lcd-dim">{event.time}</time><span class="lcd">{event.text}</span></li>{/each}
+  </ol>
+</Plate>
+<RackUnit title="DISPLAY">
+  <fieldset>
+    <legend class="silk">CRT EFFECTS</legend>
+    <div class="switch">
+      {#each levels as value}
+        <label class:active={level === value}>
+          <input type="radio" name="crt" {value} checked={level === value} onchange={() => onchange(value)} />
+          {value.toUpperCase()}
+        </label>
+      {/each}
+    </div>
+  </fieldset>
+  <p class="lcd lcd-dim">Glow, curved pixel mask, grain, vignette and an occasional scan line.</p>
+  <p class="lcd lcd-dim">Reduced motion keeps the mask and grain still.</p>
+</RackUnit>
 
 <style>
   .midi-state { display:flex; align-items:center; gap:10px; }

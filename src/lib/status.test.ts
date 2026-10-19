@@ -4,7 +4,10 @@ import type { AudioStatus } from './model.ts';
 import { audioLabel, currentNotice, dropoutRecent, IDLE_SAVE, padEditKey, saveBadge } from './status.ts';
 import type { NoticeInputs } from './status.ts';
 
-const running: AudioStatus = { state: 'running', deviceName: 'Speakers', sampleRate: 48000, bufferSize: 128, channels: 2 };
+const running: AudioStatus = {
+  state: 'running', backend: 'WASAPI', deviceName: 'Speakers', sampleRate: 48000, bufferSize: 256, channels: 2,
+  dropouts: 0, lastDropoutAgoMs: null, asioFallback: false, latency: { midiToBufferMs: 5.3, outputMs: 10, totalMs: 15.3 },
+};
 const base: NoticeInputs = { tauri: true, deviceState: 'connected', save: IDLE_SAVE, audio: running, toast: null };
 
 test('a failed save is a visible error with its reason, and outranks device status', () => {
@@ -22,7 +25,7 @@ test('dirty and saved states have badges; idle has none', () => {
 
 test('priority: action error, then save failure, then audio error, then Launchpad', () => {
   const failed = { state: 'failed', reason: 'r' } as const;
-  const dead = { ...running, state: 'error' };
+  const dead = { ...running, state: 'error' } as const;
   assert.match(currentNotice({ ...base, toast: 'Set exists', save: failed, audio: dead }).text, /Set exists/);
   assert.match(currentNotice({ ...base, save: failed, audio: dead }).text, /Not saved/);
   assert.match(currentNotice({ ...base, audio: dead }).text, /Audio output stopped/);
@@ -31,8 +34,14 @@ test('priority: action error, then save failure, then audio error, then Launchpa
   assert.match(currentNotice({ ...base, tauri: false, deviceState: 'disconnected' }).text, /Browser preview/);
 });
 
-test('audio label reports running, stopped and error', () => {
-  assert.equal(audioLabel(running), 'Speakers · 128 · 48.0 kHz');
+test('audio label reports backend, buffer and total latency, or the stopped and lost states', () => {
+  assert.equal(audioLabel(running), 'WASAPI · 256 · 15.3 ms');
+  assert.equal(audioLabel({ ...running, bufferSize: null }), 'WASAPI · AUTO · 15.3 ms');
+  assert.equal(audioLabel({ ...running, backend: 'ASIO', bufferSize: 64, latency: { midiToBufferMs: 1.3, outputMs: 4, totalMs: 5.3 } }), 'ASIO · 64 · 5.3 ms');
+  assert.equal(audioLabel({ ...running, latency: { midiToBufferMs: 5.3, outputMs: 0, totalMs: 5.3 } }), 'WASAPI · 256 · 5.3 ms');
+  assert.equal(audioLabel({ ...running, latency: { midiToBufferMs: 5.3, outputMs: 4.7, totalMs: 10 } }), 'WASAPI · 256 · 10.0 ms');
+  assert.equal(audioLabel({ ...running, state: 'lost' }), 'AUDIO LOST');
+  assert.equal(audioLabel({ ...running, state: 'stopped' }), 'AUDIO STOPPED');
   assert.equal(audioLabel({ ...running, state: 'error' }), 'AUDIO ERROR');
   assert.equal(audioLabel(null), 'AUDIO STOPPED');
 });
