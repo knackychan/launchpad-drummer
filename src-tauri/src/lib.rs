@@ -3,6 +3,7 @@ pub mod commands;
 pub mod config;
 pub mod devices;
 mod launchpad;
+pub mod lcxl;
 pub mod lights;
 pub mod logfile;
 pub mod router;
@@ -74,6 +75,7 @@ pub fn run() {
                 audio_controller.start_detached(app_state.get_config().audio);
                 launchpad::start(app.handle().clone(), app_state.clone());
                 devices::start(app.handle().clone(), app_state.clone());
+                lcxl::start(app.handle().clone(), app_state.clone());
                 let handle = app.handle().clone();
                 let telemetry_handle = handle.clone();
                 let telemetry_state = app_state.clone();

@@ -4,6 +4,7 @@ use crate::devices::MidiMsg;
 use crate::lights::PaintSnapshot;
 use lpd_core::audio::{db_to_gain, fader_gain, Command, Event, Sample};
 use lpd_core::devices::launchpad::LpEvent;
+use lpd_core::devices::lcxl::{self, LcxlEvent};
 use lpd_core::kit::{self, Set};
 use rtrb::{Consumer, Producer};
 use std::collections::{HashMap, HashSet};
@@ -431,6 +432,39 @@ impl Router {
         }
     }
 
+    /// A Launch Control XL control: faders, knobs and the two button rows drive mixer channel
+    /// `ch` directly (the value jumps to the hardware, no pickup). Mixer values are not undoable.
+    /// Returns whether the mixer changed (a release, or the same value again, changes nothing).
+    pub fn on_lcxl(&mut self, ev: LcxlEvent) -> bool {
+        let ch = match ev {
+            LcxlEvent::Fader { ch, .. }
+            | LcxlEvent::Knob { ch, .. }
+            | LcxlEvent::Button { ch, .. } => ch as usize,
+        };
+        let Some(old) = self.set.mixer.groups.get(ch) else {
+            return false;
+        };
+        let mut g = old.clone();
+        match ev {
+            LcxlEvent::Fader { value, .. } => g.volume_db = lcxl::fader_db(value),
+            LcxlEvent::Knob { row: 0, value, .. } => g.pan = lcxl::knob_pan(value),
+            LcxlEvent::Knob { row: 1, value, .. } => g.pitch_semitones = lcxl::knob_pitch(value),
+            LcxlEvent::Knob { value, .. } => g.lowpass_hz = lcxl::knob_lowpass(value),
+            LcxlEvent::Button {
+                row: 0, on: true, ..
+            } => g.mute = !g.mute,
+            LcxlEvent::Button {
+                row: 1, on: true, ..
+            } => g.solo = !g.solo,
+            LcxlEvent::Button { .. } => return false,
+        }
+        if g == *old {
+            return false;
+        }
+        self.update_group(ch, g);
+        true
+    }
+
     pub fn on_lp_event(&mut self, ev: LpEvent) {
         match ev {
             LpEvent::PadDown { x, y } => self.trigger_pad(x, y),
@@ -531,6 +565,78 @@ mod tests {
 
     fn router() -> Router {
         router_with_pad(0.0, 0.0).0
+    }
+
+    fn set_group_commands(rx: &mut Consumer<Command>) -> Vec<(u8, lpd_core::audio::GroupParams)> {
+        let mut out = Vec::new();
+        while let Ok(cmd) = rx.pop() {
+            if let Command::SetGroup { group, params } = cmd {
+                out.push((group, params));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn lcxl_fader_sets_the_group_volume_and_pushes_one_set_group() {
+        let (mut r, mut rx) = router_with_pad(0.0, 0.0);
+        assert!(r.on_lcxl(LcxlEvent::Fader { ch: 2, value: 127 }));
+        assert_eq!(r.set().mixer.groups[2].volume_db, 6.0);
+        let sent = set_group_commands(&mut rx);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, 2);
+        // The same value again changes nothing and sends nothing.
+        assert!(!r.on_lcxl(LcxlEvent::Fader { ch: 2, value: 127 }));
+        assert!(set_group_commands(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn lcxl_knobs_set_pan_pitch_and_lowpass() {
+        let (mut r, _rx) = router_with_pad(0.0, 0.0);
+        assert!(r.on_lcxl(LcxlEvent::Knob {
+            row: 0,
+            ch: 1,
+            value: 127
+        }));
+        assert!(r.on_lcxl(LcxlEvent::Knob {
+            row: 1,
+            ch: 1,
+            value: 0
+        }));
+        assert!(r.on_lcxl(LcxlEvent::Knob {
+            row: 2,
+            ch: 1,
+            value: 0
+        }));
+        let g = &r.set().mixer.groups[1];
+        assert_eq!(g.pan, 1.0);
+        assert_eq!(g.pitch_semitones, -12.0);
+        assert_eq!(g.lowpass_hz, 200.0);
+    }
+
+    #[test]
+    fn lcxl_buttons_toggle_mute_and_solo_and_ignore_releases() {
+        let (mut r, _rx) = router_with_pad(0.0, 0.0);
+        let press = |row| LcxlEvent::Button {
+            row,
+            ch: 3,
+            on: true,
+        };
+        let release = |row| LcxlEvent::Button {
+            row,
+            ch: 3,
+            on: false,
+        };
+        assert!(r.on_lcxl(press(0)));
+        assert!(r.set().mixer.groups[3].mute);
+        assert!(!r.on_lcxl(release(0)));
+        assert!(r.set().mixer.groups[3].mute);
+        assert!(r.on_lcxl(press(0)));
+        assert!(!r.set().mixer.groups[3].mute);
+        assert!(r.on_lcxl(press(1)));
+        assert!(r.set().mixer.groups[3].solo);
+        assert!(!r.on_lcxl(release(1)));
+        assert!(r.set().mixer.groups[3].solo);
     }
 
     #[test]

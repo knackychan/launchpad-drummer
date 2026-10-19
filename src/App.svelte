@@ -352,6 +352,9 @@
       });
       subscribe<MidiDevice[]>('midi-devices', (event) => { midiEventSeen = true; midiDevices = event; });
       subscribe<{ text: string }>('midi-log', (event) => logMidi(event.text));
+      subscribe<{ groups: SetModel['mixer']['groups']; masterDb: number }>('mixer-changed', (event) => {
+        currentSet = { ...currentSet, mixer: { ...currentSet.mixer, groups: event.groups, masterDb: event.masterDb } };
+      });
       subscribe<SaveStatus>('save-status', (event) => { saveStatus = event; });
       subscribe<AudioStatus>('audio-status', (event) => { audioEventSeen = true; audioStatus = event; });
       subscribe<TelemetryFrame>('telemetry', (event) => pushFrame(event));

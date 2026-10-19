@@ -19,6 +19,7 @@ use crate::startup::{self, Startup};
 use crate::store::{prepare_sample, KitManager, LoadedKit};
 use lpd_core::audio::{Command, Event, Sample, Taps};
 use lpd_core::devices::launchpad::LpEvent;
+use lpd_core::devices::lcxl::LcxlEvent;
 use lpd_core::kit::{self, History, Pad, Set};
 use rtrb::{Consumer, Producer};
 use std::collections::HashMap;
@@ -168,6 +169,8 @@ pub struct AppState {
     /// The newest `keys-wheel` event not emitted yet (a leaf lock): wheel messages arrive in
     /// floods, so the emitter thread sends only the latest value at ~60 Hz.
     wheel: Arc<Mutex<Option<UiEvent>>>,
+    /// The Launch Control XL moved the mixer since `mixer-changed` was last emitted.
+    mixer_dirty: Arc<AtomicBool>,
     saver: Arc<Mutex<Saver>>,
     save_gate: Arc<Mutex<()>>,
     writer: Writer,
@@ -210,6 +213,7 @@ impl AppState {
             config: Arc::default(),
             midi: Arc::default(),
             wheel: Arc::default(),
+            mixer_dirty: Arc::new(AtomicBool::new(false)),
             saver: Arc::new(Mutex::new(Saver::new())),
             save_gate: Arc::new(Mutex::new(())),
             writer,
@@ -389,6 +393,36 @@ impl AppState {
             return Ok(None);
         };
         Ok(registry.set(port, role, &status).then(|| registry.list()))
+    }
+
+    /// A Launch Control XL control. Mixer values are not undoable (UI spec 7.3), but the set is
+    /// dirty for autosave and the screen is told (throttled, see `take_mixer_change`).
+    pub fn on_lcxl(&self, ev: LcxlEvent) {
+        let changed = lock(&self.router).on_lcxl(ev);
+        if changed {
+            self.mixer_dirty.store(true, Ordering::SeqCst);
+            self.touch();
+        }
+    }
+
+    /// True once per hardware mixer change; the LCXL bridge emits `mixer-changed` for it.
+    pub fn take_mixer_change(&self) -> bool {
+        self.mixer_dirty.swap(false, Ordering::SeqCst)
+    }
+
+    pub fn mixer(&self) -> lpd_core::kit::Mixer {
+        lock(&self.router).set().mixer.clone()
+    }
+
+    /// Mute and solo of the eight channels, for the Launch Control XL LEDs.
+    pub fn mute_solo(&self) -> ([bool; 8], [bool; 8]) {
+        let r = lock(&self.router);
+        let (mut mute, mut solo) = ([false; 8], [false; 8]);
+        for (i, g) in r.set().mixer.groups.iter().take(8).enumerate() {
+            mute[i] = g.mute;
+            solo[i] = g.solo;
+        }
+        (mute, solo)
     }
 
     pub fn input_mode(&self) -> InputMode {
@@ -1249,6 +1283,43 @@ mod tests {
         state.update_group(99, g);
         assert_eq!(save_rev(&state), before, "not marked dirty");
         assert!(!state.history_state().can_undo);
+    }
+
+    #[test]
+    fn lcxl_move_marks_dirty_flags_the_screen_and_is_not_undoable() {
+        let (state, _rx) = app();
+        let before = save_rev(&state);
+        state.on_lcxl(LcxlEvent::Fader { ch: 1, value: 127 });
+        assert_eq!(state.get_current_set().mixer.groups[1].volume_db, 6.0);
+        assert_eq!(save_rev(&state), before + 1, "one touch");
+        assert!(
+            !state.history_state().can_undo,
+            "mixer values are not undoable"
+        );
+        assert!(state.take_mixer_change());
+        assert!(!state.take_mixer_change(), "reported once");
+        // A repeat of the same value changes nothing.
+        state.on_lcxl(LcxlEvent::Fader { ch: 1, value: 127 });
+        assert_eq!(save_rev(&state), before + 1);
+        assert!(!state.take_mixer_change());
+    }
+
+    #[test]
+    fn mute_solo_reflects_the_mixer() {
+        let (state, _rx) = app();
+        state.on_lcxl(LcxlEvent::Button {
+            row: 0,
+            ch: 4,
+            on: true,
+        });
+        state.on_lcxl(LcxlEvent::Button {
+            row: 1,
+            ch: 6,
+            on: true,
+        });
+        let (mute, solo) = state.mute_solo();
+        assert!(mute[4] && !mute[6]);
+        assert!(solo[6] && !solo[4]);
     }
 
     #[test]
