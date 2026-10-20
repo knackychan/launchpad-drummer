@@ -158,11 +158,13 @@ button { cursor: pointer; }
 .game-bar .key small { font: 400 10px var(--f-lcd); letter-spacing: 0; margin-left: 6px; opacity: .7; text-transform: none; }
 .game-plate { min-width: 0; min-height: 0; padding: 15px; }
 .prototype { width: 100%; height: 100%; min-height: 0; border: 0; background: #05060a; }
-.game-plate:has(.prototype) { padding: 0; overflow: hidden; }
+.game-plate:has(.prototype), .game-plate:has(.horde-screen) { padding: 0; overflow: hidden; }
+.game-plate::before { display: none; }
 
 /* ===== Setup ===== */
 .setup { max-width: 860px; margin: 24px auto; display: flex; flex-direction: column; gap: 24px; }
 .setup-scroll { position: absolute; inset: 0; overflow: auto; padding: 8px; }
+.lazy { display: flex; gap: 12px; align-items: center; justify-content: center; height: 100%; padding: 24px; font: 400 13px/1.5 var(--f-lcd); color: var(--lcd-dim); }
 .rack-unit { padding: 24px; }
 .rack-unit h1 { font-size: 18px; letter-spacing: .12em; margin: 0 0 24px; color: var(--lcd); }
 .rack-unit h1::before { content: ''; display: inline-block; width: 20px; height: 9px; border-radius: 8px 3px 3px 8px; background: var(--orange); margin-right: 10px; }

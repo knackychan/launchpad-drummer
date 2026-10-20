@@ -35,6 +35,7 @@ fn housekeeping(app: AppHandle, state: AppState) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    logfile::mark_process_start();
     // Placeholder queues: the audio owner thread installs the real ones once the stream is up.
     let (commands, _) = rtrb::RingBuffer::new(1024);
     let (_, events) = rtrb::RingBuffer::new(1024);
@@ -45,6 +46,7 @@ pub fn run() {
     let audio_controller = audio::AudioController::spawn(
         app_state.clone(),
         Box::new(move |status| {
+            logfile::milestone(&format!("audio {}", status.state));
             if let Some(app) = announce_to.get() {
                 let _ = app.emit("audio-status", status);
             }
@@ -63,21 +65,42 @@ pub fn run() {
                     logfile::init(dir);
                 }
                 logfile::log("Launchpad Drummer started");
-                match app.path().app_config_dir() {
-                    Ok(dir) => {
-                        app_state.restore(dir.join("config.json"));
-                    }
-                    Err(e) => logfile::log(format!("No app config folder: {e}")),
-                }
-                // The saved audio prefs decide the device, so the stream starts after the config
-                // is read. It starts in the background (opening a device can take seconds); the
-                // UI hears about it through `audio-status`, and a failure shows as "error" in SETUP.
+                logfile::milestone("setup entered");
+                // The UI hears about audio, keys and set loading through these hooks.
                 let _ = app_handle.set(app.handle().clone());
                 let keys_app = app.handle().clone();
                 app_state.set_keys_notifier(Arc::new(move |status| {
                     let _ = keys_app.emit("keys-status", status.clone());
                 }));
+                let load_app = app.handle().clone();
+                app_state.set_load_notifier(Arc::new(move |status| {
+                    let _ = load_app.emit("load-status", status.clone());
+                }));
+                // Preferences first (quick), then the restore's ticket, before anything slow starts.
+                match app.path().app_config_dir() {
+                    Ok(dir) => {
+                        app_state.init_config(dir.join("config.json"));
+                    }
+                    Err(e) => logfile::log(format!("No app config folder: {e}")),
+                }
+                logfile::milestone("configuration ready");
+                let restore_ticket = app_state.begin_restore();
+                // The saved audio prefs decide the device. The stream starts in the background
+                // (opening a device can take seconds) and independently of the set; the UI hears
+                // about it through `audio-status`, and a failure shows as "error" in SETUP.
                 audio_controller.start_detached(app_state.get_config().audio);
+                // Decoding the last set's samples can take long: never on the setup thread.
+                let restore_state = app_state.clone();
+                let spawned = std::thread::Builder::new()
+                    .name("restore".into())
+                    .spawn(move || {
+                        logfile::milestone("restore started");
+                        restore_state.restore_guarded(restore_ticket);
+                        logfile::milestone("restore finished");
+                    });
+                if let Err(e) = spawned {
+                    app_state.fail_load(restore_ticket, &format!("Couldn't start loading: {e}"));
+                }
                 launchpad::start(app.handle().clone(), app_state.clone());
                 devices::start(app.handle().clone(), app_state.clone());
                 lcxl::start(app.handle().clone(), app_state.clone());
@@ -92,6 +115,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             launchpad::send_led_frame,
+            launchpad::send_led_leds,
             commands::get_audio_status,
             commands::audio_devices,
             commands::asio_available,
@@ -105,6 +129,8 @@ pub fn run() {
             commands::get_current_bank,
             commands::get_current_set,
             commands::get_startup,
+            commands::get_load_status,
+            commands::retry_startup,
             commands::new_set,
             commands::open_default_set,
             commands::open_set,

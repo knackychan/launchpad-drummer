@@ -6,12 +6,31 @@
   let scan: HTMLDivElement;
   let reduced = $state(true);
 
+  // Every trigger (level change, ResizeObserver, window resize) asks the one scheduler; it draws at most
+  // once per frame and skips a draw whose size, pixel ratio and level are the ones already on the canvas.
+  let drawn = '';
+  let frame = 0;
+  let painted = false;
+  function requestDraw() {
+    if (frame || !mask) return;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      // The first mask waits one more frame, so the startup view paints before the dense canvas is built.
+      if (!painted) { painted = true; requestDraw(); return; }
+      drawMask();
+    });
+  }
   function drawMask() {
-    if (!mask || level === 'off') return;
+    if (!mask) return;
+    if (level === 'off') { drawn = ''; return; }
     const ratio = window.devicePixelRatio || 1;
     const rect = mask.getBoundingClientRect();
-    mask.width = Math.round(rect.width * ratio);
-    mask.height = Math.round(rect.height * ratio);
+    const width = Math.round(rect.width * ratio), height = Math.round(rect.height * ratio);
+    const key = `${width}x${height}@${ratio}:${level}`;
+    if (key === drawn) return;
+    drawn = key;
+    mask.width = width;
+    mask.height = height;
     const ctx = mask.getContext('2d');
     if (!ctx) return;
     const w = mask.width, h = mask.height;
@@ -74,16 +93,17 @@
     const query = matchMedia('(prefers-reduced-motion: reduce)');
     const motionChanged = () => { reduced = query.matches; };
     motionChanged(); query.addEventListener('change', motionChanged);
-    const resize = new ResizeObserver(drawMask);
+    const resize = new ResizeObserver(requestDraw);
     resize.observe(mask);
-    window.addEventListener('resize', drawMask);
+    window.addEventListener('resize', requestDraw);
     window.addEventListener('resize', sizeBend);
     return () => {
-      resize.disconnect(); window.removeEventListener('resize', drawMask); window.removeEventListener('resize', sizeBend);
+      cancelAnimationFrame(frame); frame = 0;
+      resize.disconnect(); window.removeEventListener('resize', requestDraw); window.removeEventListener('resize', sizeBend);
       query.removeEventListener('change', motionChanged);
     };
   });
-  $effect(() => { level; drawMask(); });
+  $effect(() => { level; requestDraw(); });
   $effect(() => {
     if (level === 'off' || reduced || !scan) return;
     let timer: number;

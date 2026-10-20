@@ -3,7 +3,7 @@ import { H, W, type ArenaLayout } from './hordeLayout.ts';
 import type { HordeAudio } from './hordeAudio.ts';
 
 export const P = { red: '#e63b2e', red2: '#a8261c', teal: '#38b6c5', teal2: '#1f7f8c', cream: '#f3e3b8', cream2: '#d9c38f', sand3: '#b89d68',
-  yellow: '#f5c644', yellow2: '#c4931c', pink: '#f4a0c0', pink2: '#c9668e', orange: '#f08a2b', orange2: '#b45a12', ink: '#141414', grey: '#6e6f78',
+  yellow: '#f5c644', yellow2: '#c4931c', amber: '#ffb21a', pink: '#f4a0c0', pink2: '#c9668e', orange: '#f08a2b', orange2: '#b45a12', ink: '#141414', grey: '#6e6f78',
   green: '#5fd38a', green2: '#2c8a52', purple: '#a77be6', purple2: '#6a43a8', white: '#ffffff', foam: '#e9f7f3', ice: '#a8e6ff', blue: '#5aa9ff' };
 
 // Screen colours per enemy: c1 is the body and the LED underglow, c2 the shade.

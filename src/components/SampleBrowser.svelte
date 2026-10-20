@@ -2,7 +2,7 @@
   import { onDestroy } from 'svelte';
   import { invoke, isTauri } from '../lib/api.ts';
   import { middleTruncate } from '../lib/format.ts';
-  import { flatten, keyNav, type TreeNode } from '../lib/tree.ts';
+  import { clampIndex, flatten, keyNav, revealScrollTop, ROW_H, visibleRange, type TreeNode } from '../lib/tree.ts';
   let { libraryDir = $bindable(), selected, onclose, onload, ondragfile, onerror }: {
     libraryDir: string | null; selected: { bank: number; x: number; y: number } | null;
     onclose: () => void; onload: (path: string) => void; ondragfile: (path: string, e: PointerEvent) => void;
@@ -12,6 +12,12 @@
   let timer = 0;
   const rows = $derived(flatten(nodes));
   let tree: HTMLDivElement;
+  // Only the rows near the viewport are in the DOM; ids and indexes stay logical, so a row keeps its id.
+  const PAD = 4; // the tree's top padding
+  let scrollTop = $state(0), viewH = $state(0);
+  const range = $derived(visibleRange(rows.length, scrollTop, viewH, ROW_H, undefined, PAD));
+  const shown = $derived(rows.slice(range.start, range.end));
+  $effect(() => { if (index !== clampIndex(index, rows.length)) index = clampIndex(index, rows.length); });
   async function children(path: string, depth: number): Promise<TreeNode[]> {
     const entries = await invoke<{ name: string; path: string; isDir: boolean }[]>('list_dir', { path });
     return (entries ?? []).map(e => ({ ...e, depth }));
@@ -47,7 +53,9 @@
     if (result.action === 'open' || result.action === 'close' || result.action === 'toggle') void toggle(node, result.action === 'open' ? true : result.action === 'close' ? false : !node.open);
     if (result.action === 'audition') void audition(node);
     if (result.action === 'load') onload(node.path);
-    tree.querySelector(`#sample-row-${index}`)?.scrollIntoView({ block: 'nearest' });
+    // Bring the row into the rendered range first: aria-activedescendant must name an element that exists.
+    const top = revealScrollTop(index, tree.scrollTop, tree.clientHeight, ROW_H, PAD);
+    if (top !== tree.scrollTop) { tree.scrollTop = top; scrollTop = top; }
   }
   onDestroy(() => { clearTimeout(timer); });
 </script>
@@ -57,8 +65,11 @@
     <span class="lcd" title={dir ?? ''}>{dir ? middleTruncate(dir, 34) : 'NO LIBRARY FOLDER'}</span>
     <button class="key small" onclick={() => void chooseFolder()}>FOLDER…</button></div>
   {#if !dir}<p class="lcd-dim">Choose a library folder to browse samples.</p>{/if}
-  <div bind:this={tree} class="tree" role="tree" aria-label="Sample library" aria-activedescendant={rows[index] ? `sample-row-${index}` : undefined} tabindex="0" onkeydown={keyboard}>
-    {#each rows as node, i (node.path)}
+  <div bind:this={tree} class="tree" role="tree" aria-label="Sample library" aria-activedescendant={rows[index] ? `sample-row-${index}` : undefined} tabindex="0" onkeydown={keyboard}
+    onscroll={() => { scrollTop = tree.scrollTop; }} bind:clientHeight={viewH}>
+    <div role="presentation" style:height="{range.start * ROW_H}px"></div>
+    {#each shown as node, k (node.path)}
+      {@const i = range.start + k}
       <div id="sample-row-{i}" class="ti" class:folder={node.isDir} class:file={!node.isDir} class:active={index === i} class:playing={playing === node.path}
         role="treeitem" tabindex="-1" aria-level={node.depth + 1} aria-expanded={node.isDir ? !!node.open : undefined} aria-selected={index === i}
         style:padding-left="{10 + node.depth * 14 + (node.isDir ? 0 : 14)}px"
@@ -68,6 +79,7 @@
         {:else}<span>{node.name.replace(/\.[^.]+$/, '')}</span><span class="ext">{node.name.match(/\.[^.]+$/)?.[0]}</span>{/if}
       </div>
     {/each}
+    <div role="presentation" style:height="{(rows.length - range.end) * ROW_H}px"></div>
   </div>
 </div>
 <style>

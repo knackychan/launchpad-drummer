@@ -60,3 +60,49 @@ fn load_samples_reports_failures_and_loads_the_rest() {
     assert_eq!(failed.len(), 1);
     assert_eq!(failed[0].0, "samples/missing.wav");
 }
+
+#[test]
+fn progress_counts_each_unique_path_once_in_first_reference_order() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("samples")).unwrap();
+    common::write_wav_stereo(&dir.path().join("samples/a.wav"), 48_000, 10, 0.1, 0.1);
+    common::write_wav_stereo(&dir.path().join("samples/b.wav"), 48_000, 10, 0.1, 0.1);
+    let mut set = Set::new();
+    set.banks[0].set_pad(Pad::new(0, 0, "samples/b.wav", [0, 0, 0]));
+    set.banks[0].set_pad(Pad::new(1, 0, "samples/a.wav", [0, 0, 0]));
+    set.banks[1].set_pad(Pad::new(0, 0, "samples/b.wav", [0, 0, 0]));
+    assert_eq!(unique_sample_paths(&set), ["samples/b.wav", "samples/a.wav"]);
+    let seen = std::cell::RefCell::new(Vec::new());
+    let (ok, failed) = load_samples_with_progress(dir.path(), &set, |c, t, f| {
+        seen.borrow_mut().push((c, t, f))
+    });
+    assert_eq!(ok.len(), 2);
+    assert!(failed.is_empty());
+    assert_eq!(*seen.borrow(), [(0, 2, 0), (1, 2, 0), (2, 2, 0)]);
+}
+
+#[test]
+fn progress_for_an_empty_set_reports_zero_of_zero_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = std::cell::RefCell::new(Vec::new());
+    let (ok, failed) = load_samples_with_progress(dir.path(), &Set::new(), |c, t, f| {
+        seen.borrow_mut().push((c, t, f))
+    });
+    assert!(ok.is_empty() && failed.is_empty());
+    assert_eq!(*seen.borrow(), [(0, 0, 0)]);
+}
+
+#[test]
+fn a_missing_file_completes_and_counts_as_failed_while_the_rest_loads() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("samples")).unwrap();
+    common::write_wav_stereo(&dir.path().join("samples/ok.wav"), 48_000, 10, 0.1, 0.1);
+    let mut set = Set::new();
+    set.banks[0].set_pad(Pad::new(0, 0, "samples/missing.wav", [0, 0, 0]));
+    set.banks[0].set_pad(Pad::new(1, 0, "samples/ok.wav", [0, 0, 0]));
+    let last = std::cell::Cell::new((0, 0, 0));
+    let (ok, failed) = load_samples_with_progress(dir.path(), &set, |c, t, f| last.set((c, t, f)));
+    assert_eq!(last.get(), (2, 2, 1));
+    assert_eq!(ok.len(), 1);
+    assert_eq!(failed.len(), 1);
+}

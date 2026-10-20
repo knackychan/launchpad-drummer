@@ -116,6 +116,22 @@ export type Startup =
   | { kind: 'notFound'; path: string }
   | { kind: 'unreadable'; path: string; name: string };
 
+/** Where a set operation (launch restore, New, Open, Default) is (`get_load_status`, `load-status`). */
+export type LoadPhase = 'settings' | 'readingSet' | 'preparingSamples' | 'loadingSamples' | 'installing' | 'ready' | 'needsSet' | 'failed';
+export interface LoadStatus {
+  /** The open-request ticket this status belongs to. */
+  requestId: number;
+  /** Increases with every update in the process; only a strictly newer one is accepted. */
+  revision: number;
+  phase: LoadPhase;
+  completed: number;
+  /** null: unknown (indeterminate). */
+  total: number | null;
+  /** Samples that failed to decode so far (not a fatal error). */
+  failed: number;
+  error: string | null;
+}
+
 /** A set that was just created or opened (`new_set` / `open_set`). */
 export interface OpenResult {
   set: SetModel;

@@ -3,7 +3,7 @@ use crate::config::{AppConfig, AudioPrefs};
 use crate::devices::MidiDevice;
 use crate::router::LearnTarget;
 use crate::saver::SaveStatus;
-use crate::startup::Startup;
+use crate::startup::{LoadStatus, Startup};
 use crate::state::{
     AppState, DropReport, HistoryState, InputMode, KeysStatus, MissingPad, OpenResult, SamplePeaks,
 };
@@ -108,6 +108,18 @@ pub(crate) fn get_current_set(state: State<'_, AppState>) -> Set {
 #[tauri::command]
 pub(crate) fn get_startup(state: State<'_, AppState>) -> Startup {
     state.get_startup()
+}
+
+#[tauri::command]
+pub(crate) fn get_load_status(state: State<'_, AppState>) -> LoadStatus {
+    state.get_load_status()
+}
+
+/// Reopen the configured last set after a launch that ended without one. Refused while a set is
+/// loading. Progress arrives as `load-status` events.
+#[tauri::command]
+pub(crate) async fn retry_startup(state: State<'_, AppState>) -> Result<Startup, String> {
+    worker(&state, |s| s.retry_startup()).await
 }
 
 #[tauri::command]
@@ -483,13 +495,14 @@ pub(crate) fn update_bank_humanize(bank: usize, humanize_db: f32, state: State<'
     state.update_bank_humanize(bank, humanize_db);
 }
 
+/// The scan reads every frame of a possibly long recording: off the command thread.
 #[tauri::command]
-pub(crate) fn sample_peaks(
+pub(crate) async fn sample_peaks(
     path: String,
     buckets: usize,
     state: State<'_, AppState>,
-) -> Option<SamplePeaks> {
-    state.sample_peaks(&path, buckets)
+) -> Result<Option<SamplePeaks>, String> {
+    worker(&state, move |s| Ok(s.sample_peaks(&path, buckets))).await
 }
 
 #[tauri::command]

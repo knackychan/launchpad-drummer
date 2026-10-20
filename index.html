@@ -5,8 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
     <title>Launchpad Drummer</title>
+    <!-- Shown as soon as the WebView can paint; main.ts removes it once the app has mounted. Inline on purpose:
+         it must be readable before any script, font or stylesheet has loaded. -->
+    <style>
+      html, body { margin: 0; background: #000; }
+      #boot { position: fixed; inset: 0; z-index: 2147483647; display: flex; flex-direction: column; align-items: center;
+        justify-content: center; gap: 14px; background: #000; color: #e8e2d4; text-align: center; padding: 24px;
+        font: 15px/1.5 "Segoe UI", system-ui, sans-serif; }
+      #boot strong { font-size: 22px; letter-spacing: .18em; }
+      #boot button { font: inherit; padding: 8px 22px; color: inherit; background: #1c1c1c; border: 1px solid #666; border-radius: 4px; cursor: pointer; }
+      #boot.failed #boot-text { color: #ff8a80; }
+    </style>
   </head>
   <body>
+    <div id="boot" role="status"><strong>LAUNCHPAD DRUMMER</strong><span id="boot-text">Starting Launchpad Drummer…</span></div>
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

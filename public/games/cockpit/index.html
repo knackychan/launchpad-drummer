@@ -450,7 +450,21 @@ function midiNote(msg){
   console.log('[midi]',t,msg);
 }
 function midiStatus(cls,txt){ if(txt!==midiTxt.textContent) midiNote(txt); lamp.className='lamp '+cls; midiTxt.textContent=txt; }
+// Inside Launchpad Drummer the page sits in a sandboxed frame where Web MIDI is blocked, and the app already
+// owns the Launchpad: it relays pad/button events in as MIDI-shaped messages and takes the LEDs back out.
+const HOST=window.parent!==window; let hostState='disconnected';
+function hostStatus(state){
+  hostState=state;
+  if(state==='connected'){ LP.last.clear(); midiStatus('on','MIDI: Launchpad MK2 via Launchpad Drummer'); }
+  else if(state==='busy') midiStatus('warn','MIDI: Launchpad port busy (close other MIDI apps)');
+  else midiStatus('','MIDI: no Launchpad MK2 (mouse + keys work)');
+}
+if(HOST) window.addEventListener('message',e=>{
+  const m=e.data; if(e.source!==window.parent||!m) return;
+  if(m.lpd==='midi'&&Array.isArray(m.data)) onMidi({data:m.data}); else if(m.lpd==='status') hostStatus(m.state);
+});
 function connectMidi(){
+  if(HOST){ hostStatus(hostState); return; }
   if(!navigator.requestMIDIAccess){ midiStatus('','MIDI: not supported here (use Edge/Chrome)'); return; }
   if(!LP.access) midiStatus('warn','MIDI: waiting for permission…');
   const slow=setTimeout(()=>{ if(!LP.access) midiStatus('warn','MIDI: still waiting (allow the prompt; another tab or app may hold the Launchpad)'); },3000);
@@ -488,7 +502,10 @@ setInterval(()=>{ if(LP.access&&!(LP.input&&LP.output&&LP.input.connection==='op
 function onMidi(e){ const [st,d1,d2]=e.data; const type=st&0xF0;
   if(type===0x90||type===0x80){ const on=type===0x90&&d2>0; const c=d1%10, r=Math.floor(d1/10); if(c>=1&&c<=9&&r>=1&&r<=8) on?padDown(c,r):padUp(c,r); }
   else if(type===0xB0){ const c=d1-103; if(c>=1&&c<=8){ d2>0 ? padDown(c,9) : padUp(c,9); } } }
-function sendLeds(frame){ if(!LP.output) return; const ch=[]; for(const [note,rgb] of frame){ const p=LP.last.get(note); if(!p||p[0]!==rgb[0]||p[1]!==rgb[1]||p[2]!==rgb[2]){ ch.push(note,rgb[0],rgb[1],rgb[2]); LP.last.set(note,rgb); } }
+function sendLeds(frame){
+  if(HOST){ const ch=[]; for(const [note,rgb] of frame){ const p=LP.last.get(note); if(!p||p[0]!==rgb[0]||p[1]!==rgb[1]||p[2]!==rgb[2]){ ch.push([note,rgb[0],rgb[1],rgb[2]]); LP.last.set(note,rgb); } }
+    if(ch.length) window.parent.postMessage({lpd:'leds',leds:ch},'*'); return; }
+  if(!LP.output) return; const ch=[]; for(const [note,rgb] of frame){ const p=LP.last.get(note); if(!p||p[0]!==rgb[0]||p[1]!==rgb[1]||p[2]!==rgb[2]){ ch.push(note,rgb[0],rgb[1],rgb[2]); LP.last.set(note,rgb); } }
   for(let i=0;i<ch.length;i+=160){ try{ LP.output.send([0xF0,0x00,0x20,0x29,0x02,0x18,0x0B,...ch.slice(i,i+160),0xF7]); }catch(e){} } }
 document.getElementById('midiBtn').addEventListener('click',connectMidi); connectMidi();
 

@@ -18,3 +18,47 @@ test('tree navigation clamps and distinguishes folder and file actions', () => {
     [0,'Enter',{index:0,action:'toggle'}], [1,'Enter',{index:1,action:'load'}], [1,'q',{index:1}],
   ] as const) assert.deepEqual(keyNav(rows,index,key),result);
 });
+
+import { clampIndex, OVERSCAN, revealScrollTop, ROW_H, visibleRange } from './tree.ts';
+
+test('an empty list renders nothing', () => {
+  assert.deepEqual(visibleRange(0, 0, 400), { start: 0, end: 0 });
+  assert.deepEqual(visibleRange(0, 999, 0), { start: 0, end: 0 });
+});
+
+test('the range is the viewport plus ten rows each side, clamped to the list', () => {
+  // 400 px = 18.2 rows -> rows 0..18 visible, +10 overscan below, none above.
+  assert.deepEqual(visibleRange(5000, 0, 400), { start: 0, end: Math.ceil(400 / ROW_H) + OVERSCAN });
+  const mid = visibleRange(5000, 22 * 1000, 400);
+  assert.deepEqual(mid, { start: 1000 - OVERSCAN, end: 1000 + Math.ceil(400 / ROW_H) + OVERSCAN });
+  assert.ok(mid.end - mid.start < 50, 'a few dozen rows, not 5000');
+});
+
+test('the end of the list clamps the range', () => {
+  const r = visibleRange(5000, 22 * 4990, 400);
+  assert.equal(r.end, 5000);
+  assert.ok(r.start >= 4900 && r.start < 5000);
+  assert.deepEqual(visibleRange(3, 0, 400), { start: 0, end: 3 });
+  assert.deepEqual(visibleRange(5, 22 * 99, 400), { start: 0, end: 5 }, 'scrolled past a list that shrank');
+});
+
+test('the top padding shifts the range', () => {
+  assert.equal(visibleRange(100, 4 + 22 * 50, 220, ROW_H, 0, 4).start, 50);
+});
+
+test('keyboard navigation scrolls the target row into view with the least movement', () => {
+  assert.equal(revealScrollTop(5, 0, 400), 0, 'already visible');
+  assert.equal(revealScrollTop(30, 0, 400), 30 * ROW_H + ROW_H - 400, 'below the viewport: its bottom edge lines up');
+  assert.equal(revealScrollTop(2, 500, 400), 2 * ROW_H, 'above the viewport: its top edge lines up');
+  assert.equal(revealScrollTop(0, 500, 400, ROW_H, 4), 0);
+  // After revealing, the row is inside the rendered range.
+  const top = revealScrollTop(4999, 0, 400);
+  const r = visibleRange(5000, top, 400);
+  assert.ok(4999 >= r.start && 4999 < r.end);
+});
+
+test('collapsing a folder cannot leave the selection past the end', () => {
+  assert.equal(clampIndex(40, 12), 11);
+  assert.equal(clampIndex(3, 12), 3);
+  assert.equal(clampIndex(5, 0), 0);
+});

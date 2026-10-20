@@ -2,7 +2,7 @@
 //! its five-lane groove. The samples are synthesised here and written as WAV files, so a fresh
 //! set sounds out of the box and stays an ordinary folder of files.
 
-use super::{Pad, PadMode, Set, SAMPLES_DIR};
+use super::{unique_sample_paths, Pad, PadMode, Set, SAMPLES_DIR};
 use crate::seq::{Lane, MAX_STEPS};
 use anyhow::{Context, Result};
 use std::f32::consts::TAU;
@@ -193,18 +193,32 @@ pub fn starter_set() -> Set {
 
 /// Synthesise and write every sample the set references that is not on disk yet.
 pub fn write_starter_samples(dir: &Path, set: &Set) -> Result<()> {
-    for pad in set.banks.iter().flat_map(|b| &b.pads) {
-        let path = dir.join(&pad.sample);
-        if path.exists() {
-            continue;
+    write_starter_samples_with_progress(dir, set, |_, _| {})
+}
+
+/// [`write_starter_samples`], reporting `(completed, total)` over the unique sample paths: once
+/// before the first file and after every file. A file already on disk counts as checked and is
+/// never overwritten.
+pub fn write_starter_samples_with_progress(
+    dir: &Path,
+    set: &Set,
+    progress: impl Fn(usize, usize),
+) -> Result<()> {
+    let paths = unique_sample_paths(set);
+    let total = paths.len();
+    progress(0, total);
+    for (i, sample) in paths.iter().enumerate() {
+        let path = dir.join(sample);
+        if !path.exists() {
+            let name = Path::new(sample)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            fs::create_dir_all(path.parent().unwrap_or(dir))?;
+            fs::write(&path, wav16(&synth(name)))
+                .with_context(|| format!("write {}", path.display()))?;
         }
-        let name = Path::new(&pad.sample)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default();
-        fs::create_dir_all(path.parent().unwrap_or(dir))?;
-        fs::write(&path, wav16(&synth(name)))
-            .with_context(|| format!("write {}", path.display()))?;
+        progress(i + 1, total);
     }
     Ok(())
 }
@@ -566,5 +580,42 @@ mod tests {
         assert!(failed.is_empty(), "{failed:?}");
         assert!(ok.len() >= 30);
         assert!(ok.values().all(|s| !s.data.is_empty()));
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    fn two_pad_set() -> Set {
+        let mut set = Set::new();
+        set.banks[0].set_pad(Pad::new(0, 0, "samples/kick_808.wav", [0, 0, 0]));
+        set.banks[0].set_pad(Pad::new(1, 0, "samples/snare_808.wav", [0, 0, 0]));
+        set.banks[1].set_pad(Pad::new(0, 0, "samples/kick_808.wav", [0, 0, 0]));
+        set
+    }
+
+    #[test]
+    fn preparation_reports_every_unique_file_and_keeps_an_existing_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let set = two_pad_set();
+        fs::create_dir_all(tmp.path().join("samples")).unwrap();
+        fs::write(tmp.path().join("samples/kick_808.wav"), b"mine").unwrap();
+        let seen = RefCell::new(Vec::new());
+        write_starter_samples_with_progress(tmp.path(), &set, |c, t| seen.borrow_mut().push((c, t)))
+            .unwrap();
+        assert_eq!(*seen.borrow(), [(0, 2), (1, 2), (2, 2)]);
+        assert_eq!(fs::read(tmp.path().join("samples/kick_808.wav")).unwrap(), b"mine");
+        assert!(tmp.path().join("samples/snare_808.wav").exists());
+    }
+
+    #[test]
+    fn a_failed_write_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A file where the samples folder should be: the folder cannot be created.
+        fs::write(tmp.path().join("samples"), b"not a folder").unwrap();
+        let result = write_starter_samples_with_progress(tmp.path(), &two_pad_set(), |_, _| {});
+        assert!(result.is_err());
     }
 }

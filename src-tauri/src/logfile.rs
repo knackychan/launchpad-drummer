@@ -30,6 +30,21 @@ fn init_with_limit(dir: PathBuf, limit: u64) {
     *TARGET.lock().unwrap_or_else(PoisonError::into_inner) = Some(Target { dir, limit, owner });
 }
 
+static PROCESS_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Pin the zero of the startup clock. Call first thing in `run`; later calls change nothing.
+pub fn mark_process_start() {
+    let _ = PROCESS_START.set(std::time::Instant::now());
+}
+
+/// Log `Startup +123.4 ms name`: milliseconds on the monotonic clock since `mark_process_start`.
+/// Never call it from an audio callback (it writes to the log file).
+pub fn milestone(name: &str) {
+    let start = *PROCESS_START.get_or_init(std::time::Instant::now);
+    let ms = start.elapsed().as_secs_f64() * 1000.0;
+    log(format!("Startup +{ms:.1} ms {name}"));
+}
+
 /// Append `[YYYY-MM-DD HH:MM:SS] line`. Does nothing before `init`; write errors are ignored.
 pub fn log(line: impl AsRef<str>) {
     #[cfg(debug_assertions)]

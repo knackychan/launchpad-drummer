@@ -126,6 +126,21 @@ fn decode_pad(msg: &[u8]) -> Option<PadEvent> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+struct TopEvent {
+    /// 0 = leftmost round button above the grid .. 7 = rightmost.
+    index: u8,
+    pressed: bool,
+}
+
+fn decode_top(msg: &[u8]) -> Option<TopEvent> {
+    match lp::decode(msg) {
+        Some(LpEvent::TopDown(index)) => Some(TopEvent { index, pressed: true }),
+        Some(LpEvent::TopUp(index)) => Some(TopEvent { index, pressed: false }),
+        _ => None,
+    }
+}
+
 fn rgb_message(frame: &[[u8; 3]]) -> Result<Vec<u8>, String> {
     if frame.len() != 64 || frame.iter().flatten().any(|value| *value > 63) {
         return Err("LED frame requires 64 pads with RGB channels from 0 to 63".to_string());
@@ -137,6 +152,38 @@ fn rgb_message(frame: &[[u8; 3]]) -> Result<Vec<u8>, String> {
         .collect();
     let msgs = lp::rgb_messages(&leds);
     Ok(msgs.into_iter().next().expect("exactly one message"))
+}
+
+/// One RGB SysEx for an arbitrary set of LEDs: grid and side buttons (`row * 10 + col`, rows 1..=8,
+/// cols 1..=9) and the top row (104..=111). A prototype game running in the sandboxed frame draws
+/// all 80 of them through this, since it cannot open the MIDI port itself.
+fn leds_message(leds: &[(u8, [u8; 3])]) -> Result<Vec<u8>, String> {
+    let valid = |led: u8| {
+        ((1..=8).contains(&(led / 10)) && (1..=9).contains(&(led % 10))) || (104..=111).contains(&led)
+    };
+    if leds.is_empty()
+        || leds.len() > lp::MAX_LEDS_PER_MESSAGE
+        || leds.iter().any(|(led, rgb)| !valid(*led) || rgb.iter().any(|value| *value > 63))
+    {
+        return Err(
+            "LED list needs 1..=80 valid Launchpad LEDs with RGB channels from 0 to 63".to_string(),
+        );
+    }
+    Ok(lp::rgb_messages(leds).into_iter().next().expect("exactly one message"))
+}
+
+/// Like `send_led_frame`, for a game that also lights the side and top buttons.
+#[tauri::command]
+pub fn send_led_leds(
+    leds: Vec<(u8, [u8; 3])>,
+    sender: State<'_, FrameSender>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let message = leds_message(&leds)?;
+    if state.input_mode() == InputMode::Game {
+        *sender.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(message);
+    }
+    Ok(())
 }
 
 fn run(app: AppHandle, state: AppState, game_frames: FrameSender) {
@@ -292,6 +339,12 @@ fn check_connection(
             if let Some(pad) = decode_pad(msg) {
                 if let Err(error) = receiver.emit("launchpad-pad", pad) {
                     crate::logfile::log(format!("Launchpad pad event failed: {error}"));
+                }
+            }
+            // The round top-row buttons only matter to a game (the sampler ignores them).
+            if app_state.input_mode() == InputMode::Game {
+                if let Some(top) = decode_top(msg) {
+                    let _ = receiver.emit("launchpad-top", top);
                 }
             }
         },
@@ -473,6 +526,40 @@ mod tests {
         assert!(rgb_message(&frame[..63]).is_err());
         frame[2][0] = 64;
         assert!(rgb_message(&frame).is_err());
+    }
+
+    #[test]
+    fn decodes_top_row_buttons_only() {
+        assert_eq!(decode_top(&[0xB0, 104, 127]), Some(TopEvent { index: 0, pressed: true }));
+        assert_eq!(decode_top(&[0xB0, 111, 0]), Some(TopEvent { index: 7, pressed: false }));
+        for bytes in [&[0xB0, 103, 127][..], &[0xB0, 112, 127], &[0x90, 11, 127], &[0xB0, 104]] {
+            assert_eq!(decode_top(bytes), None);
+        }
+    }
+
+    #[test]
+    fn encodes_grid_side_and_top_leds_and_rejects_bad_input() {
+        let leds = [(11, [1, 2, 3]), (89, [4, 5, 6]), (104, [63, 0, 0]), (111, [0, 63, 0])];
+        let message = leds_message(&leds).unwrap();
+        assert_eq!(&message[..7], &[0xF0, 0, 0x20, 0x29, 2, 0x18, 0x0B]);
+        assert_eq!(&message[7..11], &[11, 1, 2, 3]);
+        assert_eq!(&message[15..19], &[104, 63, 0, 0]);
+        assert_eq!(message.last(), Some(&0xF7));
+        let all: Vec<(u8, [u8; 3])> = (1..=8)
+            .flat_map(|row| (1..=9).map(move |col| (row * 10 + col, [0, 0, 0])))
+            .chain((104..=111).map(|led| (led, [0, 0, 0])))
+            .collect();
+        assert_eq!(all.len(), 80);
+        assert!(leds_message(&all).is_ok());
+        assert!(leds_message(&[]).is_err());
+        assert!(leds_message(&[(10, [0, 0, 0])]).is_err());
+        assert!(leds_message(&[(90, [0, 0, 0])]).is_err());
+        assert!(leds_message(&[(100, [0, 0, 0])]).is_err());
+        assert!(leds_message(&[(112, [0, 0, 0])]).is_err());
+        assert!(leds_message(&[(11, [64, 0, 0])]).is_err());
+        let mut too_many = all;
+        too_many.push((11, [0, 0, 0]));
+        assert!(leds_message(&too_many).is_err());
     }
 
     #[test]

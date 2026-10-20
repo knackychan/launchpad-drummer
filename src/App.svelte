@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, setContext } from 'svelte';
+  import { onMount, setContext, type Component } from 'svelte';
   import Plate from './components/Plate.svelte';
   import LaunchpadPanel from './components/LaunchpadPanel.svelte';
   import MixerStrip from './components/MixerStrip.svelte';
@@ -8,22 +8,16 @@
   import KeysPlate from './components/KeysPlate.svelte';
   import SequencerPlate from './components/SequencerPlate.svelte';
   import CrtLayers from './components/CrtLayers.svelte';
-  import SetupAudio from './components/SetupAudio.svelte';
-  import SetupDisplay from './components/SetupDisplay.svelte';
-  import SetupLog from './components/SetupLog.svelte';
-  import SetupMidi from './components/SetupMidi.svelte';
-  import SetupLearn from './components/SetupLearn.svelte';
-  import SetupKeys from './components/SetupKeys.svelte';
-  import HordeGame from './components/HordeGame.svelte';
   import ConsoleBackdrop from './components/ConsoleBackdrop.svelte';
   import NoticeLcd from './components/NoticeLcd.svelte';
   import SetMenu from './components/SetMenu.svelte';
   import PowerOn from './components/PowerOn.svelte';
+  import StartupLoading from './components/StartupLoading.svelte';
   import SampleBrowser from './components/SampleBrowser.svelte';
   import DragGhost from './components/DragGhost.svelte';
   import ContextMenu, { type MenuItem } from './components/ContextMenu.svelte';
   import { BANK_HOVER_MS, dropTag, hitTest, isAudioName, passedThreshold, physicalToCss, type DropTarget } from './lib/dnd.ts';
-  import { invoke as call, listen, isTauri } from './lib/api.ts';
+  import { invoke as call, listen, isTauri, isStaged } from './lib/api.ts';
   import { activeNotices, type Confirmation, type Level, type Notice, type NoticeInputs } from './lib/notices.ts';
   import { middleTruncate } from './lib/format.ts';
   import { padForKey } from './lib/keymap.ts';
@@ -36,7 +30,8 @@
   import { CRT_FACTORS, readDisplay, saveDisplay } from './lib/display.ts';
   import type { Bend, CrtLevel } from './lib/display.ts';
   import { createEmptySet, createPreviewSet, GROUP_COLORS, groupLegend, padAriaLabel, padLabel } from './lib/model.ts';
-  import type { AppConfig, AudioStatus, Binding, KeysStatus, Pattern, SeqPosition, DropReport, Group, LightModes, MidiDevice, MissingPad, OpenResult, Pad, SamplePeaks, SetModel, Startup } from './lib/model.ts';
+  import type { AppConfig, AudioStatus, Binding, KeysStatus, LoadStatus, Pattern, SeqPosition, DropReport, Group, LightModes, MidiDevice, MissingPad, Pad, SamplePeaks, SetModel, Startup } from './lib/model.ts';
+  import { acceptLoad, createGeneration, eventFirst, fetchReadyState, INITIAL_LOAD, isTerminal } from './lib/startup.ts';
   import { PREVIEW_MIDI, pushLog, roleStatus } from './lib/midi.ts';
   import { solvePlayLayout } from './lib/layout.ts';
   import { feedLive, hitAmount, hitGroup, runActivity } from './lib/activity.ts';
@@ -46,6 +41,8 @@
   import type { TelemetryFrame } from './lib/telemetry.ts';
 
   const tauri = isTauri;
+  /** The desktop app, or the browser preview playing a scripted startup: the UI waits for the backend's load status. */
+  const staged = isStaged;
   const editCommands = new Set(['update_pad', 'clear_pad', 'move_pad', 'drop_files', 'locate_sample', 'update_group', 'rename_bank', 'update_bank_lights', 'update_bank_humanize', 'unbind', 'seq_update', 'seq_add_lane', 'set_keys']);
   async function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     const result = await call<T>(cmd, args);
@@ -60,7 +57,7 @@
   let midiLog = $state<{ time: string; text: string }[]>([]);
   let midiDevices = $state<MidiDevice[]>(tauri ? [] : structuredClone(PREVIEW_MIDI));
   // A `midi-devices` event is newer than the initial fetch.
-  let midiEventSeen = false;
+  const midiFeed = eventFirst<MidiDevice[]>(devices => { midiDevices = devices; });
   let crt = $state<CrtLevel>('low');
   let bend = $state<Bend>('flat');
   let leds = $state<readonly Rgb[]>(createLedFrame());
@@ -70,12 +67,22 @@
 
   let currentSet = $state<SetModel>(tauri ? createEmptySet() : createPreviewSet());
   let activeBank = $state(0);
-  let setName = $state(tauri ? 'DEFAULT SET' : 'PREVIEW KIT');
+  let setName = $state(staged ? 'LOADING…' : 'PREVIEW KIT');
   let audioStatus = $state<AudioStatus | null>(null);
   // An `audio-status` event is newer than the initial fetch, which may have been answered earlier.
-  let audioEventSeen = false;
+  const audioFeed = eventFirst<AudioStatus>(status => { audioStatus = status; });
   let saveStatus = $state<SaveStatus>(IDLE_SAVE);
-  let startup = $state<Startup>({ kind: 'loaded', path: '', name: '', fromBackup: false, backupSavedAt: null });
+  // Startup (the outcome) is only meaningful once the backend says so; `load` (the operation) is what the screens follow.
+  let startup = $state<Startup>(staged ? { kind: 'firstRun' } : { kind: 'loaded', path: '', name: '', fromBackup: false, backupSavedAt: null });
+  let load = $state<LoadStatus>(staged ? INITIAL_LOAD : { ...INITIAL_LOAD, requestId: 1, revision: 1, phase: 'ready' });
+  /** A ready set has been fetched and shown: the interface is usable. Never an empty placeholder. */
+  let hasSet = $state(!staged);
+  let startupError = $state<string | null>(null);
+  /** Newest request for set state: an answer started under an older token must not replace what is shown. */
+  const setGate = createGeneration();
+  let manageInFlight = $state(0);
+  const unlisten: (() => void)[] = [];
+  let disposed = false;
   let setPath = $state('');
   let powerError = $state<string | null>(null);
   let missing = $state<MissingPad[]>([]);
@@ -382,6 +389,7 @@
     for (const p of bank?.pads ?? []) if (p.sample && missingSet.has(`${p.x},${p.y}`)) flags[(7 - p.y) * 8 + p.x] = true;
     return flags;
   });
+  const selectedSample = $derived(selectedPad?.sample); // a string: edits to other pad fields do not re-request the waveform
   const selectedMissing = $derived(!!selectedPad?.sample && !!selXY && missingSet.has(`${selXY.x},${selXY.y}`));
   // The backend light painter streams the real frame; before the first frame (and in the browser
   // preview) the pads show their own colours, pressed pads white.
@@ -458,34 +466,137 @@
     void invoke('send_led_frame', { frame }).catch(() => {});
   }
 
-  async function loadInitialState() {
-    try {
-      startup = await invoke<Startup>('get_startup');
-      if (startup.kind === 'loaded') { setPath = startup.path; setName = startup.name; backup = startup.fromBackup ? { savedAt: startup.backupSavedAt } : null; }
-      await refreshMissing();
-      history = await invoke<typeof history>('history_state');
-      const config = await invoke<AppConfig>('get_config');
-      libraryDir = config.libraryDir; soundfontPath = config.soundfont;
-      const keys = await invoke<KeysStatus>('keys_status');
-      if (keys) keysStatus = keys;
-      // The preview answers with a demo status; the desktop app with the live one.
-      const fetched = await invoke<AudioStatus>('get_audio_status');
-      if (!audioEventSeen) audioStatus = fetched;
-      const devices = await invoke<MidiDevice[]>('midi_devices');
-      if (devices && !midiEventSeen) midiDevices = structuredClone(devices);
-      if (!tauri) return;
-      const [set, b, save] = await Promise.all([
-        invoke<SetModel>('get_current_set'),
-        invoke<number>('get_current_bank'),
-        invoke<SaveStatus>('get_save_status'),
-      ]);
-      currentSet = set;
-      activeBank = b;
-      saveStatus = save;
-    } catch (err) {
-      console.warn('Failed to load initial state:', err);
-    }
+  // The prototype games run in a sandboxed frame that cannot open MIDI itself, and the app already
+  // holds the Launchpad: pad and button events go in as MIDI-shaped messages, and the game's LEDs
+  // come back here to be sent as one full frame (grid, side and top buttons).
+  let protoFrame = $state<HTMLIFrameElement | undefined>();
+  const protoLeds = new Map<number, [number, number, number]>();
+  function resetProtoLeds() {
+    protoLeds.clear();
+    for (let row = 1; row <= 8; row++) for (let col = 1; col <= 9; col++) protoLeds.set(row * 10 + col, [0, 0, 0]);
+    for (let led = 104; led <= 111; led++) protoLeds.set(led, [0, 0, 0]);
   }
+  resetProtoLeds();
+  const protoActive = () => mode === 'games' && game !== 'horde';
+  function toProto(message: object) {
+    protoFrame?.contentWindow?.postMessage(message, '*'); // the frame's origin is opaque (sandbox)
+  }
+  function flushProtoLeds() {
+    if (tauri) void invoke('send_led_leds', { leds: [...protoLeds] }).catch(() => {});
+  }
+  function protoLoaded() {
+    resetProtoLeds();
+    toProto({ lpd: 'status', state: deviceState });
+    flushProtoLeds(); // blank pads, so nothing of the previous game lingers
+  }
+  function onProtoMessage(e: MessageEvent) {
+    if (!protoActive() || !protoFrame || e.source !== protoFrame.contentWindow) return;
+    const data = e.data as { lpd?: string; leds?: unknown };
+    if (data?.lpd !== 'leds' || !Array.isArray(data.leds)) return;
+    let changed = false;
+    for (const led of data.leds) {
+      if (!Array.isArray(led) || led.length !== 4 || !protoLeds.has(led[0])) continue;
+      const rgb = led.slice(1).map((v) => Math.min(63, Math.max(0, Math.round(Number(v)) || 0))) as [number, number, number];
+      const old = protoLeds.get(led[0])!;
+      if (old[0] !== rgb[0] || old[1] !== rgb[1] || old[2] !== rgb[2]) { protoLeds.set(led[0], rgb); changed = true; }
+    }
+    if (changed) flushProtoLeds();
+  }
+
+  /** The independent device and preference requests: none waits for another, none blocks the set. */
+  async function loadDeviceState() {
+    const [config, keys, audio, devices] = await Promise.allSettled([
+      invoke<AppConfig>('get_config'), invoke<KeysStatus>('keys_status'),
+      invoke<AudioStatus>('get_audio_status'), invoke<MidiDevice[]>('midi_devices'),
+    ]);
+    if (config.status === 'fulfilled' && config.value) { libraryDir = config.value.libraryDir; soundfontPath = config.value.soundfont; }
+    if (keys.status === 'fulfilled' && keys.value) keysStatus = keys.value;
+    // The preview answers with a demo status; the desktop app with the live one.
+    if (audio.status === 'fulfilled' && audio.value) audioFeed.snapshot(audio.value);
+    if (devices.status === 'fulfilled' && devices.value) midiFeed.snapshot(structuredClone(devices.value));
+  }
+
+  /** Accept a load status from an event or a snapshot: only a strictly newer revision counts. */
+  function applyLoad(incoming: LoadStatus) {
+    const next = acceptLoad(load, incoming);
+    if (next === load) return;
+    load = next;
+    if (next.phase === 'ready') void enterReady(next.requestId);
+    else if (next.phase === 'needsSet' || next.phase === 'failed') void settleOutcome(next.requestId);
+  }
+
+  /** Subscribe (and wait for the subscription), then ask for the current status. */
+  async function followLoad() {
+    startupError = null;
+    try {
+      const stop = await listen<LoadStatus>('load-status', applyLoad);
+      if (disposed) stop(); else unlisten.push(stop);
+    } catch (e) { startupError = `Couldn't follow startup progress — ${errorText(e)}`; return; }
+    try { applyLoad(await call<LoadStatus>('get_load_status')); }
+    catch (e) { startupError = `Couldn't read the startup state — ${errorText(e)}`; }
+  }
+
+  /** A request ended without a usable set: learn why (not found, unreadable, first run) for the choices screen. */
+  async function settleOutcome(requestId: number) {
+    if (hasSet) return; // a later operation failed: the one that started it reports it
+    try {
+      const outcome = await call<Startup>('get_startup');
+      if (load.requestId === requestId && outcome) startup = outcome;
+    } catch (e) { startupError = `Couldn't read the startup state — ${errorText(e)}`; }
+  }
+
+  /** A set is ready: fetch what the interface shows, all at once, and apply it only if nothing newer happened. */
+  async function enterReady(requestId: number) {
+    const token = setGate.next();
+    startupError = null;
+    const result = await fetchReadyState({
+      set: () => call<SetModel>('get_current_set'), startup: () => call<Startup>('get_startup'), bank: () => call<number>('get_current_bank'),
+      save: () => call<SaveStatus>('get_save_status'), history: () => call<typeof history>('history_state'),
+      missing: () => call<MissingPad[]>('missing_samples'), status: () => call<LoadStatus>('get_load_status'),
+    }, requestId, () => setGate.isCurrent(token));
+    if (result.kind === 'stale') return;
+    if (result.kind === 'error') { startupError = `Couldn't read the set — ${result.error}`; return; }
+    currentSet = result.set;
+    startup = result.startup;
+    if (startup.kind === 'loaded') { setPath = startup.path; setName = startup.name; backup = startup.fromBackup ? { savedAt: startup.backupSavedAt } : null; }
+    if (result.bank !== null) activeBank = result.bank;
+    if (result.save) saveStatus = result.save;
+    if (result.history) history = result.history;
+    if (result.missing) missing = result.missing;
+    dismissed = new Set(); powerError = null; selected = null; peaks = null;
+    hasSet = true;
+    performance.mark('lpd:set-ready');
+  }
+
+  /** TRY AGAIN on a startup error: repeat whichever step failed. */
+  function recoverStartup() {
+    startupError = null;
+    if (load.phase === 'ready') void enterReady(load.requestId);
+    else if (load.phase === 'needsSet' || load.phase === 'failed') void settleOutcome(load.requestId);
+    else void followLoad();
+  }
+
+  /** Read the configured last set again. The backend refuses while a set is still loading. */
+  async function retryStartup() {
+    if (manageInFlight > 0) return;
+    manageInFlight++; powerError = null;
+    const token = setGate.next();
+    try {
+      await invoke('retry_startup');
+      if (setGate.isCurrent(token)) applyLoad(await call<LoadStatus>('get_load_status'));
+    } catch (e) { if (setGate.isCurrent(token)) powerError = errorText(e); }
+    finally { manageInFlight--; }
+  }
+
+  // A later operation (the player opened another set) shows its progress over the set that stays usable
+  // underneath; a quick one finishes before the panel would show.
+  const activeRequest = $derived(hasSet && !isTerminal(load.phase) ? load.requestId : 0);
+  let overlayOn = $state(false);
+  $effect(() => {
+    if (!activeRequest) { overlayOn = false; return; }
+    const timer = window.setTimeout(() => { overlayOn = true; }, 250);
+    return () => window.clearTimeout(timer);
+  });
 
   onMount(() => {
     try { const prefs = readDisplay(window.localStorage); crt = prefs.level; bend = prefs.bend; } catch { crt = 'low'; bend = 'flat'; }
@@ -508,9 +619,8 @@
     window.addEventListener('pointercancel', trackUp, true);
     window.addEventListener('keydown', trackCtrl);
     window.addEventListener('keyup', trackCtrl);
+    window.addEventListener('message', onProtoMessage);
 
-    const unlisten: (() => void)[] = [];
-    let disposed = false;
     function subscribe<T>(event: string, fn: (payload: T) => void) {
       void listen<T>(event, fn).then(stop => { if (disposed) stop(); else unlisten.push(stop); }).catch(e => showToast(errorText(e)));
     }
@@ -518,17 +628,21 @@
       subscribe<{ state: NoticeInputs['launchpad']; message: string }>('launchpad-status', (event) => {
         deviceState = event.state;
         logMidi(event.message);
+        if (protoActive()) toProto({ lpd: 'status', state: event.state });
       });
       subscribe<{ note: number; pressed: boolean }>('launchpad-pad', (event) => {
         logMidi(`PAD ${event.note} ${event.pressed ? 'DOWN' : 'UP'}`);
         padInput({ ...event, source: 'hardware' });
+      });
+      subscribe<{ index: number; pressed: boolean }>('launchpad-top', (event) => {
+        if (protoActive()) toProto({ lpd: 'midi', data: [0xb0, 104 + event.index, event.pressed ? 127 : 0] });
       });
       subscribe<[number, number, number][]>('launchpad-frame', (event) => {
         if (mode === 'games') return;
         leds = event.map(([r, g, b]) => [r, g, b] as const);
         frameSeen = true;
       });
-      subscribe<MidiDevice[]>('midi-devices', (event) => { midiEventSeen = true; midiDevices = event; });
+      subscribe<MidiDevice[]>('midi-devices', (event) => midiFeed.event(event));
       subscribe<{ text: string }>('midi-log', (event) => logMidi(event.text));
       subscribe<{ groups: SetModel['mixer']['groups']; masterDb: number }>('mixer-changed', (event) => {
         currentSet = { ...currentSet, mixer: { ...currentSet.mixer, groups: event.groups, masterDb: event.masterDb } };
@@ -546,15 +660,16 @@
       subscribe<{ bank: number; x: number; y: number }>('pad-hit', (event) => padHit(event.bank, event.x, event.y));
       subscribe<SetModel>('set-changed', (event) => { currentSet = event; });
       subscribe<SaveStatus>('save-status', (event) => { saveStatus = event; });
-      subscribe<AudioStatus>('audio-status', (event) => { audioEventSeen = true; audioStatus = event; });
+      subscribe<AudioStatus>('audio-status', (event) => audioFeed.event(event));
       subscribe<TelemetryFrame>('telemetry', (event) => pushFrame(event));
       subscribe<{ paths: string[]; position: { x: number; y: number } }>('tauri://drag-enter', e => externalEnter(e.paths, e.position));
       subscribe<{ position: { x: number; y: number } }>('tauri://drag-over', e => { if (drag?.external) { const p = physicalToCss(e.position, devicePixelRatio); updateDrag(p.x, p.y, false); } });
       subscribe<{ paths: string[]; position: { x: number; y: number } }>('tauri://drag-drop', e => { externalEnter(e.paths, e.position); void finishDrop(); });
       subscribe<unknown>('tauri://drag-leave', cancelDrag);
     }
-    // After the listeners are requested: the initial fetch must not overwrite a newer event.
-    void loadInitialState();
+    // After the listeners are requested: the initial fetches must not overwrite a newer event.
+    void loadDeviceState();
+    if (staged) void followLoad(); else void enterReady(1);
     return () => {
       disposed = true;
       clearTimeout(historyTimer);
@@ -566,6 +681,7 @@
       window.removeEventListener('pointercancel', trackUp, true);
       window.removeEventListener('keydown', trackCtrl);
       window.removeEventListener('keyup', trackCtrl);
+      window.removeEventListener('message', onProtoMessage);
       stopActivity();
       clearInterval(secondTimer);
       document.removeEventListener('visibilitychange', onVisibility);
@@ -576,7 +692,9 @@
 
   // Editor waveform: peaks of the selected pad's sample from the backend (a stand-in shape in the preview).
   $effect(() => {
-    const sample = selectedPad?.sample;
+    // Only while the pad editor, the one consumer of the waveform, is on screen.
+    const visible = mode === 'play' && drawer === 'editor' && hasSet;
+    const sample = visible ? selectedSample : undefined;
     peaksNonce;
     peaks = null;
     if (!sample) return;
@@ -597,6 +715,28 @@
 
   let hordeComponent = $state<{ padInput: (note: number, pressed: boolean) => void } | undefined>();
 
+  // Screens outside Play are fetched the first time they are opened and kept afterwards.
+  type Optional = 'setup' | 'horde';
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let optional = $state<Partial<Record<Optional, Component<any, any>>>>({});
+  let optionalState = $state<Record<Optional, 'idle' | 'loading' | 'error'>>({ setup: 'idle', horde: 'idle' });
+  const importers = { setup: () => import('./components/SetupPanel.svelte'), horde: () => import('./components/HordeGame.svelte') };
+  async function loadOptional(name: Optional) {
+    if (optional[name] || optionalState[name] === 'loading') return;
+    optionalState[name] = 'loading';
+    try {
+      const module = await importers[name]();
+      if (!disposed) { optional[name] = module.default as Component<any, any>; optionalState[name] = 'idle'; }
+    } catch (e) {
+      console.warn(`Couldn't load the ${name} screen:`, e);
+      if (!disposed) optionalState[name] = 'error';
+    }
+  }
+  $effect(() => {
+    if (mode === 'setup') void loadOptional('setup');
+    else if (mode === 'games' && game === 'horde') void loadOptional('horde');
+  });
+
   function saveDisplayPrefs() {
     try { saveDisplay(window.localStorage, { level: crt, bend }); } catch { /* the switch still works without storage */ }
   }
@@ -612,6 +752,10 @@
   function padInput(input: PadInput) {
     if (mode === 'games' && game === 'horde') {
       hordeComponent?.padInput(input.note, input.pressed);
+      return;
+    }
+    if (protoActive()) {
+      if (input.source === 'hardware') toProto({ lpd: 'midi', data: [0x90, input.note, input.pressed ? 127 : 0] });
       return;
     }
     if (input.note % 10 === 9) {
@@ -708,27 +852,36 @@
     void invoke('stop_all');
   }
 
-  async function manageSet(kind: 'new' | 'open' | 'default') {
+  /**
+   * New / Open / Default. The outcome arrives as load-status events (which then fetch the set); the
+   * command's own answer only reports an error. `supersede` is the explicit way out of a slow load.
+   */
+  async function manageSet(kind: 'new' | 'open' | 'default', supersede = false) {
+    if (!staged) return;
+    if (manageInFlight > 0 && !supersede) return; // no double submission
+    manageInFlight++;
     try {
-      let opened: OpenResult | null;
-      if (kind === 'default') opened = await invoke<OpenResult>('open_default_set');
-      else {
+      let dir: string | null = null;
+      if (kind !== 'default') {
         const defaultDir = await invoke<string>('default_sets_dir');
-        const dir = await invoke<string | null>('pick_folder', { title: kind === 'new' ? 'New set — choose an empty folder' : 'Open set folder', defaultDir });
+        dir = await invoke<string | null>('pick_folder', { title: kind === 'new' ? 'New set — choose an empty folder' : 'Open set folder', defaultDir });
         if (!dir) return;
-        opened = await invoke<OpenResult>(kind === 'new' ? 'new_set' : 'open_set', { dir });
       }
-      if (!opened) return;
-      currentSet = opened.set; setName = opened.name; setPath = opened.path;
-      startup = { kind: 'loaded', path: opened.path, name: opened.name, fromBackup: opened.fromBackup, backupSavedAt: opened.backupSavedAt };
-      backup = opened.fromBackup ? { savedAt: opened.backupSavedAt } : null;
-      dismissed = new Set(); powerError = null; selected = null; peaks = null;
-      activeBank = await invoke<number>('get_current_bank') ?? 0;
-      await refreshMissing(); refreshHistory();
+      const token = setGate.next();
+      powerError = null;
+      try {
+        if (kind === 'default') await invoke('open_default_set');
+        else await invoke(kind === 'new' ? 'new_set' : 'open_set', { dir });
+        // The ready notice normally arrived first; asking once more covers a lost one.
+        if (setGate.isCurrent(token)) applyLoad(await call<LoadStatus>('get_load_status'));
+      } catch (e) {
+        if (!setGate.isCurrent(token)) return; // superseded: the newer request speaks for itself
+        if (!hasSet) powerError = errorText(e);
+        else showToast(errorText(e));
+      }
     } catch (e) {
-      if (startup.kind !== 'loaded') powerError = errorText(e);
-      else showToast(errorText(e));
-    }
+      showToast(errorText(e));
+    } finally { manageInFlight--; }
   }
 
   async function loadBrowserFile(path: string) {
@@ -754,7 +907,7 @@
     if (next !== 'games') exitGameFull();
     if ((was === 'games') !== (next === 'games')) {
       void invoke<number>('set_input_mode', { mode: next === 'games' ? 'game' : 'sampler' })
-        .then((b) => { if (typeof b === 'number') activeBank = b; })
+        .then((b) => { if (typeof b === 'number') activeBank = b; if (next === 'games' && protoActive()) flushProtoLeds(); })
         .catch((e) => showToast(`Launchpad mode not switched — ${errorText(e)}`));
     }
   }
@@ -797,7 +950,7 @@
         const panel = key === 'e' ? 'editor' : 'browser'; drawer = drawer === panel ? null : panel;
       }
       else handled = false;
-    } else if (mode === 'play' && startup.kind === 'loaded') {
+    } else if (mode === 'play' && hasSet) {
       const gridFocused = !!target.closest('.pad-grid') || document.activeElement === document.body;
       if (event.altKey && /^[1-8]$/.test(key)) chooseBank(Number(key) - 1);
       else if (key === 'pageup' || key === 'pagedown') chooseBank(Math.max(0, Math.min(7, activeBank + (key === 'pageup' ? -1 : 1))));
@@ -856,8 +1009,14 @@
     </nav>
 
     <main class="bay" aria-label={mode === 'play' ? 'Play' : mode === 'games' ? 'Games' : 'Setup'} bind:clientWidth={bayW} bind:clientHeight={bayH}>
-      {#if mode === 'play' && startup.kind !== 'loaded'}
-        <PowerOn {startup} error={powerError} launchpad={deviceState} lcxl={lcxlState} audio={audioStatus?.state ?? 'stopped'} onnew={() => void manageSet('new')} onopen={() => void manageSet('open')} ondefault={() => void manageSet('default')} />
+      {#if mode === 'play' && !hasSet}
+        {#if (load.phase === 'needsSet' || load.phase === 'failed') && !startupError}
+          <PowerOn {startup} error={powerError ?? (load.phase === 'failed' ? load.error : null)} launchpad={deviceState} lcxl={lcxlState} audio={audioStatus?.state ?? 'stopped'} busy={manageInFlight > 0}
+            onnew={() => void manageSet('new')} onopen={() => void manageSet('open')} ondefault={() => void manageSet('default')} onretry={() => void retryStartup()} />
+        {:else}
+          <StartupLoading status={load} error={startupError} launchpad={deviceState} lcxl={lcxlState} audio={audioStatus?.state ?? 'opening'}
+            onretry={startupError ? recoverStartup : undefined} onopen={() => void manageSet('open', true)} onreload={() => location.reload()} />
+        {/if}
       {:else if mode === 'play'}
         <section
           class="play-screen"
@@ -974,25 +1133,41 @@
               <button class="key" title="Full screen (Esc leaves)" onclick={enterGameFull}>⛶ FULL SCREEN</button>
             </div>
           {/if}
-          <Plate label={game === 'horde' ? 'HORDE · HOLD THE BEACH' : `${game.toUpperCase()} · PROTOTYPE`} class="game-plate">
+          <Plate label="" class="game-plate">
             {#if game === 'horde'}
-              <HordeGame bind:this={hordeComponent} onframe={sendFrame} />
+              {#if optional.horde}
+                {@const Horde = optional.horde}
+                <Horde bind:this={hordeComponent} onframe={sendFrame} />
+              {:else if optionalState.horde === 'error'}
+                <div class="lazy" role="alert">Couldn't load Horde. <button class="key" onclick={() => void loadOptional('horde')}>TRY AGAIN</button></div>
+              {:else}
+                <div class="lazy" role="status">Loading Horde…</div>
+              {/if}
             {:else}
-              <iframe class="prototype" title={`${game} prototype`} src={`/games/${game}/index.html`} sandbox="allow-scripts"></iframe>
+              <iframe class="prototype" title={`${game} prototype`} src={`/games/${game}/index.html`} sandbox="allow-scripts" bind:this={protoFrame} onload={protoLoaded}></iframe>
             {/if}
           </Plate>
         </div>
       {:else}
         <div class="setup-scroll">
           <div class="setup">
-            <SetupAudio status={audioStatus} dropoutRecent={dropoutIsRecent} onstatus={status => { audioStatus = status; }} onerror={showToast} />
-            <SetupMidi devices={midiDevices} events={midiLog} onrole={(port, role) => void setMidiRole(port, role)} />
-            <SetupKeys status={keysStatus} soundfont={soundfontPath} onload={() => void loadSoundfont()} onclear={() => void applySoundfont(null)} />
-            <SetupLearn set={currentSet} onunbind={(index) => void unbindAt(index)} />
-            <SetupDisplay level={crt} {bend} onchange={setCrt} onbend={setBend} />
-            <SetupLog onopen={() => void invoke('open_log_folder').catch(e => showToast(errorText(e)))} />
+            {#if optional.setup}
+              {@const Panel = optional.setup}
+              <Panel audioStatus={audioStatus} dropoutRecent={dropoutIsRecent} onaudiostatus={(status: AudioStatus) => { audioStatus = status; }} onerror={showToast}
+                midiDevices={midiDevices} midiLog={midiLog} onrole={(port: string, role: 'keys' | 'other') => void setMidiRole(port, role)}
+                keysStatus={keysStatus} soundfont={soundfontPath} onloadsoundfont={() => void loadSoundfont()} onclearsoundfont={() => void applySoundfont(null)}
+                set={currentSet} onunbind={(index: number) => void unbindAt(index)} crt={crt} bend={bend} oncrt={setCrt} onbend={setBend}
+                onopenlog={() => void invoke('open_log_folder').catch(e => showToast(errorText(e)))} />
+            {:else if optionalState.setup === 'error'}
+              <div class="lazy" role="alert">Couldn't load Setup. <button class="key" onclick={() => void loadOptional('setup')}>TRY AGAIN</button></div>
+            {:else}
+              <div class="lazy" role="status">Loading Setup…</div>
+            {/if}
           </div>
         </div>
+      {/if}
+      {#if hasSet && overlayOn}
+        <StartupLoading overlay status={load} launchpad={deviceState} lcxl={lcxlState} audio={audioStatus?.state ?? 'opening'} onopen={() => void manageSet('open', true)} />
       {/if}
     </main>
 

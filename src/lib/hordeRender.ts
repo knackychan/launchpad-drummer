@@ -46,9 +46,10 @@ function roundRect(c: CanvasRenderingContext2D, x: number, y: number, w: number,
 
 export function createRenderer(canvas: HTMLCanvasElement) {
   const ctx = canvas.getContext('2d')!;
-  const layer = () => { const c = document.createElement('canvas'); c.width = W; c.height = H; return c; };
-  const sandCv = layer(), boardCv = layer();
-  const sandCtx = sandCv.getContext('2d')!, boardCtx = boardCv.getContext('2d')!;
+  const layer = (width = W) => { const c = document.createElement('canvas'); c.width = width; c.height = H; return c; };
+  let curVW = W;
+  let sandCv = layer(curVW), boardCv = layer(curVW);
+  let sandCtx = sandCv.getContext('2d')!, boardCtx = boardCv.getContext('2d')!;
   const bloomCv = document.createElement('canvas'); bloomCv.width = 160; bloomCv.height = 90;
   const bloomCtx = bloomCv.getContext('2d')!;
   let cacheKey = '';
@@ -158,9 +159,122 @@ export function createRenderer(canvas: HTMLCanvasElement) {
     }
   }
 
+  function drawBeachWingDecor(sc: CanvasRenderingContext2D, VW: number, wingW: number, shY: number, _bh: number) {
+    if (L.kind !== 'pad') return;
+    const leftLimit = L.arena.x - 110;
+    const rightStart = L.arena.x + L.arena.w + 90;
+
+    const drawPalm = (px: number, py: number, leanRight = true, scale = 1) => {
+      sc.save(); sc.translate(px, py); sc.scale(scale, scale);
+      sc.fillStyle = 'rgba(20,16,10,0.28)'; ell(leanRight ? 12 : -12, 42, 18, 7); sc.fill();
+      sc.strokeStyle = P.ink; sc.lineWidth = 1.6;
+      for (let s = 0; s < 5; s++) {
+        const segX = (leanRight ? 1 : -1) * (s * 3 + Math.sin(s * .8) * 4);
+        const segY = 36 - s * 8;
+        roundRect(sc, segX - 3.5, segY, 7, 9, 2);
+        sc.fillStyle = s % 2 === 0 ? '#8c683e' : '#a8814d'; sc.fill(); sc.stroke();
+      }
+      const topX = (leanRight ? 1 : -1) * 16, topY = -3;
+      sc.fillStyle = '#5c4125';
+      ell(topX - 3, topY + 4, 3, 3); sc.fill();
+      ell(topX + 3, topY + 4, 3, 3); sc.fill();
+      ell(topX, topY + 7, 3, 3); sc.fill();
+      const fronds = [[-24, -14], [-14, -22], [4, -26], [22, -22], [30, -12], [18, 0], [-18, 2]];
+      for (const [fx, fy] of fronds) {
+        sc.beginPath(); sc.moveTo(topX, topY);
+        const midX = (topX + fx) * .5 + (fx > 0 ? 4 : -4), midY = topY - 8;
+        sc.quadraticCurveTo(midX, midY, topX + fx, topY + fy);
+        sc.lineWidth = 3.2; sc.strokeStyle = '#2c8a52'; sc.stroke();
+        sc.lineWidth = 1.6; sc.strokeStyle = '#5fd38a'; sc.stroke();
+      }
+      sc.restore();
+    };
+
+    const drawWatchtower = (wx: number, wy: number) => {
+      sc.save(); sc.translate(wx, wy);
+      sc.fillStyle = 'rgba(20,16,10,0.3)'; roundRect(sc, -16, 36, 32, 8, 4); sc.fill();
+      sc.strokeStyle = '#4a3720'; sc.lineWidth = 2;
+      sc.beginPath();
+      sc.moveTo(-10, 36); sc.lineTo(-7, 12);
+      sc.moveTo(10, 36); sc.lineTo(7, 12);
+      sc.moveTo(-10, 24); sc.lineTo(10, 24);
+      sc.moveTo(-9, 12); sc.lineTo(9, 28);
+      sc.moveTo(9, 12); sc.lineTo(-9, 28);
+      sc.stroke();
+      roundRect(sc, -14, 8, 28, 5, 2); sc.fillStyle = '#8c683e'; sc.fill(); sc.strokeStyle = P.ink; sc.stroke();
+      sc.strokeStyle = '#6f532f'; sc.lineWidth = 1.2; sc.strokeRect(-12, 1, 24, 7);
+      sc.beginPath(); sc.moveTo(-16, 2); sc.lineTo(0, -7); sc.lineTo(16, 2); sc.closePath();
+      sc.fillStyle = '#e06b43'; sc.fill(); sc.strokeStyle = P.ink; sc.lineWidth = 1.5; sc.stroke();
+      sc.strokeStyle = P.ink; sc.lineWidth = 1.5;
+      sc.beginPath(); sc.moveTo(0, -7); sc.lineTo(0, -15); sc.stroke();
+      ell(0, -16, 3, 3); sc.fillStyle = P.amber; sc.fill(); sc.stroke();
+      sc.restore();
+    };
+
+    const drawAmmoCache = (cx: number, cy: number) => {
+      sc.save(); sc.translate(cx, cy);
+      sc.fillStyle = 'rgba(20,16,10,0.32)'; roundRect(sc, -18, 14, 40, 8, 4); sc.fill();
+      roundRect(sc, -16, -2, 22, 16, 2);
+      sc.fillStyle = '#6f532f'; sc.fill(); sc.lineWidth = 1.5; sc.strokeStyle = P.ink; sc.stroke();
+      sc.fillStyle = '#9c7b4f'; sc.fillRect(-14, 2, 18, 8);
+      sc.font = '900 5px monospace'; sc.fillStyle = '#22190f'; sc.textAlign = 'center'; sc.fillText('BOMB', -5, 7);
+      roundRect(sc, -12, -14, 16, 12, 2);
+      sc.fillStyle = '#806037'; sc.fill(); sc.strokeStyle = P.ink; sc.stroke();
+      sc.fillStyle = '#22252a';
+      ell(11, 10, 4, 4); sc.fill(); sc.strokeStyle = P.ink; sc.stroke();
+      ell(18, 10, 4, 4); sc.fill(); sc.stroke();
+      ell(14.5, 4, 4, 4); sc.fill(); sc.stroke();
+      sc.fillStyle = 'rgba(255,255,255,0.4)';
+      sc.fillRect(10, 8, 1.5, 1.5); sc.fillRect(17, 8, 1.5, 1.5); sc.fillRect(13.5, 2.5, 1.5, 1.5);
+      roundRect(sc, -24, -4, 7, 18, 2);
+      sc.fillStyle = '#2a4454'; sc.fill(); sc.strokeStyle = P.ink; sc.stroke();
+      roundRect(sc, -23, 0, 5, 10, 1); sc.fillStyle = P.ice; sc.fill();
+      sc.restore();
+    };
+
+    const drawPier = (jx: number, jy: number) => {
+      sc.save(); sc.translate(jx, jy);
+      for (let p = 0; p < 4; p++) {
+        const py = -p * 7;
+        roundRect(sc, -14, py, 28, 5, 1);
+        sc.fillStyle = p % 2 === 0 ? '#6f532f' : '#8c683e'; sc.fill();
+        sc.strokeStyle = P.ink; sc.lineWidth = 1.2; sc.stroke();
+      }
+      sc.fillStyle = '#3a2b19';
+      sc.fillRect(-12, -26, 3, 26); sc.fillRect(9, -26, 3, 26);
+      sc.strokeStyle = P.foam; sc.lineWidth = 1.5;
+      sc.beginPath(); sc.ellipse(0, -22, 14, 3, 0, 0, Math.PI * 2); sc.stroke();
+      sc.restore();
+    };
+
+    const drawCat = (kx: number, ky: number) => {
+      sc.save(); sc.translate(kx, ky);
+      sc.fillStyle = 'rgba(20,16,10,0.24)'; ell(0, 5, 8, 4); sc.fill();
+      ell(0, 0, 7, 5); sc.fillStyle = P.orange; sc.fill(); sc.strokeStyle = P.ink; sc.lineWidth = 1.2; sc.stroke();
+      sc.beginPath(); sc.moveTo(-5, -3); sc.lineTo(-7, -7); sc.lineTo(-2, -5); sc.closePath(); sc.fillStyle = P.orange; sc.fill(); sc.stroke();
+      sc.beginPath(); sc.moveTo(2, -5); sc.lineTo(7, -7); sc.lineTo(5, -3); sc.closePath(); sc.fill(); sc.stroke();
+      sc.beginPath(); sc.arc(6, 1, 4, -Math.PI / 2, Math.PI / 2); sc.strokeStyle = P.orange2; sc.lineWidth = 2; sc.stroke();
+      sc.font = '700 6px monospace'; sc.fillStyle = '#7a3b12'; sc.fillText('z', -1, 0);
+      sc.restore();
+    };
+
+    if (leftLimit > 25) {
+      drawPalm(Math.min(leftLimit - 20, Math.max(22, wingW * .35)), shY + 22, true, 1);
+      if (leftLimit > 70) drawWatchtower(Math.max(30, leftLimit - 58), shY + 36);
+      if (leftLimit > 50) drawCat(Math.max(16, leftLimit - 38), shY + 68);
+    }
+
+    if (VW - rightStart > 25) {
+      drawAmmoCache(Math.max(rightStart + 24, VW - Math.max(34, wingW * .4)), shY + 54);
+      if (VW - rightStart > 70) drawPier(Math.min(VW - 32, rightStart + 76), shY + 6);
+      if (VW - rightStart > 50) drawPalm(Math.min(VW - 22, rightStart + 36), shY + 22, false, 0.9);
+    }
+  }
+
   function buildSandCache() {
     const sc = sandCtx;
-    sc.clearRect(0, 0, W, H);
+    const VW = L.VW || W;
+    sc.clearRect(0, 0, VW, H);
     const shY = L.sea.h, bh = H - shY, skyH = L.kind === 'keys' ? 22 : 12;
     skyGrad = ctx.createLinearGradient(0, 0, 0, skyH);
     skyGrad.addColorStop(0, theme.skyTop); skyGrad.addColorStop(1, theme.skyBot);
@@ -171,33 +285,53 @@ export function createRenderer(canvas: HTMLCanvasElement) {
 
     const bg = sc.createLinearGradient(0, shY, 0, H);
     bg.addColorStop(0, '#c7ab73'); bg.addColorStop(.14, '#d9c089'); bg.addColorStop(.55, '#e0c996'); bg.addColorStop(1, '#ccb17a');
-    sc.fillStyle = bg; sc.fillRect(0, shY, W, bh);
+    sc.fillStyle = bg; sc.fillRect(0, shY, VW, bh);
     for (let i = 0; i < 5; i++) {
       const dy = shY + 28 + i * 62;
       sc.fillStyle = i % 2 === 0 ? 'rgba(255,244,214,0.16)' : 'rgba(155,126,76,0.14)';
       sc.beginPath(); sc.moveTo(0, dy);
-      for (let x = 0; x <= W; x += 16) sc.lineTo(x, dy + Math.sin(x * .025 + i * 1.7) * 8 + Math.cos(x * .011 - i) * 4);
-      sc.lineTo(W, H); sc.lineTo(0, H); sc.closePath(); sc.fill();
+      for (let x = 0; x <= VW; x += 16) sc.lineTo(x, dy + Math.sin(x * .025 + i * 1.7) * 8 + Math.cos(x * .011 - i) * 4);
+      sc.lineTo(VW, H); sc.lineTo(0, H); sc.closePath(); sc.fill();
     }
     let seed = 1337;
     const sRnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
     const tones = ['#b59860', '#c4a870', '#ebdca8', '#9e824c', '#f5e7b8'];
-    for (let i = 0; i < 1800; i++) {
+    const grainCount = Math.round(1800 * (VW / 640));
+    for (let i = 0; i < grainCount; i++) {
       sc.fillStyle = tones[i % tones.length];
-      sc.fillRect(Math.floor(sRnd() * W), shY + Math.floor(sRnd() * bh), i % 7 === 0 ? 2 : 1, 1);
+      sc.fillRect(Math.floor(sRnd() * VW), shY + Math.floor(sRnd() * bh), i % 7 === 0 ? 2 : 1, 1);
     }
-    for (let i = 0; i < 45; i++) {
-      const side = i % 2 === 0 ? sRnd() * 135 : W - 135 + sRnd() * 135;
-      const x = L.kind === 'pad' ? side : sRnd() * W, y = shY + 14 + sRnd() * (bh - 24);
+    const pebbleCount = Math.round(45 * (VW / 640));
+    for (let i = 0; i < pebbleCount; i++) {
+      const side = i % 2 === 0 ? sRnd() * (L.arena.x - 20) : (L.arena.x + L.arena.w + 20) + sRnd() * (VW - (L.arena.x + L.arena.w + 20));
+      const x = L.kind === 'pad' ? Math.floor(side) : Math.floor(sRnd() * VW), y = shY + 14 + sRnd() * (bh - 24);
       if (x > L.arena.x - 12 && x < L.arena.x + L.arena.w + 12 && y > L.arena.y - 8 && y < L.arena.y + L.arena.h + 12) continue;
       sc.fillStyle = 'rgba(80,62,35,0.28)'; sc.fillRect(x + 1, y + 1, 3, 2);
       sc.fillStyle = i % 3 === 0 ? '#e8d8b0' : '#a88e58'; sc.fillRect(x, y, 3, 2);
     }
-    sc.fillStyle = theme.sandTint; sc.fillRect(0, shY, W, bh);
+    sc.fillStyle = theme.sandTint; sc.fillRect(0, shY, VW, bh);
 
+    const wL = L.wingW || 0;
     const props: [number, number, string, 'star' | 'shell' | 'wood'][] = L.kind === 'pad'
-      ? [[22, 342, P.pink, 'star'], [138, 345, P.teal, 'shell'], [618, 92, P.red, 'star'], [610, 338, P.orange, 'shell'], [28, 165, '#d9b882', 'wood'], [614, 218, P.pink2, 'shell']]
-      : [[16, 132, P.pink, 'star'], [624, 176, P.red, 'star'], [20, 238, P.teal, 'shell'], [618, 262, P.orange, 'shell']];
+      ? [
+          [Math.max(16, wL * .3), 342, P.pink, 'star'],
+          [Math.max(48, wL + 24), 345, P.teal, 'shell'],
+          [VW - Math.max(22, wL * .35), 92, P.red, 'star'],
+          [VW - Math.max(30, wL * .4), 338, P.orange, 'shell'],
+          [Math.max(26, wL * .4), 165, '#d9b882', 'wood'],
+          [VW - Math.max(26, wL * .45), 218, P.pink2, 'shell'],
+          [L.arena.x - 30, 344, P.yellow, 'shell'],
+          [L.arena.x + L.arena.w + 48, 342, P.pink, 'star'],
+          ...(wL > 30 ? [
+            [20, 260, P.teal, 'shell'],
+            [VW - 20, 160, P.pink, 'star'],
+            [wL * .6, 320, '#d9b882', 'wood']
+          ] as [number, number, string, 'star' | 'shell' | 'wood'][] : [])
+        ]
+      : [
+          [16, 132, P.pink, 'star'], [VW - 16, 176, P.red, 'star'],
+          [20, 238, P.teal, 'shell'], [VW - 22, 262, P.orange, 'shell']
+        ];
     for (const [x, y, col, kind] of props) {
       sc.save(); sc.translate(x, y);
       sc.fillStyle = 'rgba(20,16,10,0.32)'; sc.beginPath(); sc.ellipse(1.5, 2.5, 7, 5, 0, 0, Math.PI * 2); sc.fill();
@@ -218,9 +352,12 @@ export function createRenderer(canvas: HTMLCanvasElement) {
       }
       sc.restore();
     }
+
+    drawBeachWingDecor(sc, VW, wL, shY, bh);
+
     // board chassis and every idle keycap, blitted once per frame
     const bc = boardCtx;
-    bc.clearRect(0, 0, W, H);
+    bc.clearRect(0, 0, VW, H);
     if (L.kind === 'pad') {
       const a = L.arena;
       bc.fillStyle = 'rgba(20,15,8,0.36)'; roundRect(bc, a.x - 9, a.y + 3, a.w + 20, a.h + 14, 8); bc.fill();
@@ -238,19 +375,21 @@ export function createRenderer(canvas: HTMLCanvasElement) {
   }
 
   function drawSea() {
+    const VW = L.VW || W;
     const s = L.sea, low = cfg.quality === 'low';
     const skyH = L.kind === 'keys' ? 22 : 12;
-    ctx.fillStyle = skyGrad; ctx.fillRect(0, 0, W, skyH);
-    const sunX = W * .5 + (L.kind === 'pad' ? -195 : 220);
+    ctx.fillStyle = skyGrad; ctx.fillRect(0, 0, VW, skyH);
+    const sunX = VW * .5 + (L.kind === 'pad' ? -195 : 220);
     ctx.fillStyle = theme.sun; ctx.globalAlpha = .85;
     ell(sunX, skyH - 2, L.kind === 'keys' ? 11 : 7, L.kind === 'keys' ? 11 : 7); ctx.fill();
     ctx.globalAlpha = 1;
     ctx.fillStyle = theme.seaDeep;
     ctx.beginPath();
-    ctx.moveTo(18, skyH); ctx.lineTo(38, skyH - 6); ctx.lineTo(52, skyH - 3); ctx.lineTo(68, skyH - 8); ctx.lineTo(92, skyH);
-    ctx.moveTo(535, skyH); ctx.lineTo(558, skyH - 7); ctx.lineTo(582, skyH - 4); ctx.lineTo(605, skyH);
+    for (let x = 18; x < VW; x += 130) {
+      ctx.moveTo(x, skyH); ctx.lineTo(x + 20, skyH - 6); ctx.lineTo(x + 34, skyH - 3); ctx.lineTo(x + 50, skyH - 8); ctx.lineTo(x + 74, skyH);
+    }
     ctx.closePath(); ctx.fill();
-    ctx.fillStyle = seaGrad; ctx.fillRect(0, skyH, W, s.h - skyH);
+    ctx.fillStyle = seaGrad; ctx.fillRect(0, skyH, VW, s.h - skyH);
     ctx.fillStyle = theme.sun; ctx.globalAlpha = .22;
     for (let y = skyH + 2; y < s.h - 6; y += 4) {
       const sw = 10 + (y - skyH) * .55 + Math.sin(S.time * 3 + y * .4) * 5;
@@ -263,7 +402,7 @@ export function createRenderer(canvas: HTMLCanvasElement) {
       ctx.fillStyle = depth > .55 ? theme.foam : theme.seaLit;
       ctx.globalAlpha = .28 + depth * .42;
       const speed = 1.1 + depth * 1.4;
-      for (let x = -24; x < W + 24; x += 44) {
+      for (let x = -24; x < VW + 24; x += 44) {
         const o = Math.sin(S.time * speed + y * .25 + x * .04) * (5 + depth * 4);
         ctx.fillRect(x + o + ((y / stepY | 0) % 2) * 21, y, 16 + depth * 12, depth > .7 ? 2.5 : 1.8);
       }
@@ -273,25 +412,26 @@ export function createRenderer(canvas: HTMLCanvasElement) {
 
   function drawBeach() {
     ctx.drawImage(sandCv, 0, 0);
+    const VW = L.VW || W;
     const s = L.sea, time = S.time;
     const tide = Math.sin(time * 1.6) * 3.5 + Math.sin(time * .7) * 2;
     const wetDepth = 16 + tide * 1.4;
-    ctx.fillStyle = wetGrad; ctx.fillRect(0, s.h - 2, W, wetDepth + 4);
+    ctx.fillStyle = wetGrad; ctx.fillRect(0, s.h - 2, VW, wetDepth + 4);
     ctx.strokeStyle = 'rgba(233,247,243,0.28)'; ctx.lineWidth = 1.5;
     ctx.beginPath();
-    for (let x = 0; x <= W; x += 10) {
+    for (let x = 0; x <= VW; x += 10) {
       const wy = s.h + 7 + Math.sin(time * 1.6 - .8 + x * .06) * 2.5;
       if (x === 0) ctx.moveTo(x, wy); else ctx.lineTo(x, wy);
     }
     ctx.stroke();
     ctx.fillStyle = 'rgba(31,127,140,0.45)';
     ctx.beginPath(); ctx.moveTo(0, s.h - 6);
-    for (let x = 0; x <= W; x += 8) ctx.lineTo(x, s.h + 2 + tide * .7 + Math.sin(time * 2.1 + x * .07) * 2.8);
-    ctx.lineTo(W, s.h - 6); ctx.closePath(); ctx.fill();
+    for (let x = 0; x <= VW; x += 8) ctx.lineTo(x, s.h + 2 + tide * .7 + Math.sin(time * 2.1 + x * .07) * 2.8);
+    ctx.lineTo(VW, s.h - 6); ctx.closePath(); ctx.fill();
     ctx.fillStyle = theme.foam;
     ctx.beginPath(); ctx.moveTo(0, s.h - 2);
-    for (let x = 0; x <= W; x += 8) ctx.lineTo(x, s.h - 4 + tide * .5 + Math.sin(time * 2.2 + x * .07) * 2.8);
-    for (let x = W; x >= 0; x -= 8) ctx.lineTo(x, s.h + 1.5 + tide * .65 + Math.cos(time * 1.9 + x * .09) * 2.2);
+    for (let x = 0; x <= VW; x += 8) ctx.lineTo(x, s.h - 4 + tide * .5 + Math.sin(time * 2.2 + x * .07) * 2.8);
+    for (let x = VW; x >= 0; x -= 8) ctx.lineTo(x, s.h + 1.5 + tide * .65 + Math.cos(time * 1.9 + x * .09) * 2.2);
     ctx.closePath(); ctx.fill();
 
     ctx.drawImage(boardCv, 0, 0);
@@ -317,18 +457,20 @@ export function createRenderer(canvas: HTMLCanvasElement) {
   }
 
   function drawBase() {
-    const b = L.base;
-    ctx.fillStyle = theme.shadowCol; rr(b.x - 4, b.y + 3, b.w + 8, b.h + 20, 7); ctx.fill();
-    rr(b.x, b.y, b.w, b.h + 20, 6); fillOut('#165a66', 2);
-    ctx.fillStyle = '#0f3f47'; ctx.fillRect(b.x + 2, b.y + 10, b.w - 4, b.h + 8);
-    rr(b.x + 3, b.y + 3, b.w - 6, 9, 3); fillOut(P.teal, 1.5);
-    ctx.fillStyle = 'rgba(255,255,255,0.28)'; ctx.fillRect(b.x + 6, b.y + 4, b.w - 12, 2);
+    const b = L.base, VW = L.VW || W;
+    ctx.fillStyle = theme.shadowCol; rr(-4, b.y + 3, VW + 8, b.h + 20, 7); ctx.fill();
+    rr(0, b.y, VW, b.h + 20, 6); fillOut('#165a66', 2);
+    ctx.fillStyle = '#0f3f47'; ctx.fillRect(2, b.y + 10, VW - 4, b.h + 8);
+    rr(3, b.y + 3, VW - 6, 9, 3); fillOut(P.teal, 1.5);
+    ctx.fillStyle = 'rgba(255,255,255,0.28)'; ctx.fillRect(6, b.y + 4, VW - 12, 2);
     ctx.fillStyle = '#0a292e';
-    for (let x = b.x + 14; x < b.x + b.w - 10; x += 24) ctx.fillRect(x, b.y + 14, 2, 2);
+    for (let x = 14; x < VW - 10; x += 24) ctx.fillRect(x, b.y + 14, 2, 2);
     const hurtFlash = S.hurtT > 0 && cfg.motion !== 'reduce' && Math.floor(S.time * 20) % 2 === 0;
-    for (let x = b.x + 6; x < b.x + b.w - 14; x += 18) {
+    const aStart = L.arena.x - 8, aEnd = L.arena.x + L.arena.w + 8;
+    for (let x = 6; x < VW - 14; x += 18) {
+      const isCentral = x >= aStart && x <= aEnd;
       ell(x + 8, b.y + 3.5, 9.5, 5); ctx.fillStyle = 'rgba(15,12,8,0.35)'; ctx.fill();
-      ell(x + 8, b.y + 1.5, 9, 4.8); fillOut(hurtFlash ? P.red : '#d9c38f', 1.5);
+      ell(x + 8, b.y + 1.5, 9, 4.8); fillOut(hurtFlash ? P.red : (isCentral ? '#d9c38f' : '#b89f6d'), 1.5);
       ctx.fillStyle = hurtFlash ? '#ff8a80' : '#f3e3b8'; ctx.fillRect(x + 4, b.y - 1, 8, 1.5);
       ctx.strokeStyle = 'rgba(90,70,40,0.5)'; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(x + 8, b.y - 2); ctx.lineTo(x + 8, b.y + 5); ctx.stroke();
@@ -741,10 +883,16 @@ export function createRenderer(canvas: HTMLCanvasElement) {
   function drawHUD() {
     const rk = rankOf(S.combo), rc = { S: P.pink, A: P.orange, B: P.yellow, C: P.green, D: P.grey }[rk]!;
     const p = 1 - F.rankPop, pop = F.rankPop > 0 ? 1 + Math.sin(p * Math.PI * 2.2) * F.rankPop * .72 : 1;
-    const mult = multiplier(S), pad = L.kind === 'pad';
-    const rx = pad ? 72 : 40, ry = pad ? 200 : 318, sx = pad ? 72 : 118, sy = pad ? 262 : 318;
-    if (pad) { hudPanel(14, 44, 116, 86); hudPanel(18, 156, 108, 156); }
-    else { hudPanel(12, 294, 198, 56); hudPanel(W / 2 - 112, 298, 224, 52); }
+    const mult = multiplier(S), pad = L.kind === 'pad', VW = L.VW || W;
+    const leftCx = pad ? Math.max(72, L.arena.x - 86) : 40;
+    const rx = pad ? leftCx : 40, ry = pad ? 200 : 318, sx = pad ? leftCx : 118, sy = pad ? 262 : 318;
+    if (pad) {
+      hudPanel(leftCx - 58, 44, 116, 86);
+      hudPanel(leftCx - 54, 156, 108, 156);
+    } else {
+      hudPanel(12, 294, 198, 56);
+      hudPanel(VW / 2 - 112, 298, 224, 52);
+    }
     ctx.save(); ctx.translate(rx, ry);
     if (F.rankPop > .15) {
       ctx.save(); const g = 1 + (1 - F.rankPop) * 1.4; ctx.scale(g, g); ctx.rotate(-.12); ctx.globalAlpha = F.rankPop * .55;
@@ -756,12 +904,12 @@ export function createRenderer(canvas: HTMLCanvasElement) {
       bar(rx - 42, ry + 50, 84, 5, S.comboIn / 3, rc, undefined, true);
       text(`MULT ×${mult}`, rx, ry + 64, 9, P.yellow, 'center');
       text(String(S.score).padStart(6, '0'), sx, sy + 34, 18, P.cream, 'center');
-      text(`WAVE ${S.wave}`, 72, 58, 14, P.cream, 'center');
-      bar(22, 72, 100, 6, S.waveTotal ? S.waveDone / S.waveTotal : 0, P.teal);
-      text('HP', 22, 94, 10, P.cream, 'left');
-      bar(42, 90, 80, 8, S.hp / 100, hpCol(), F.hpTrail / 100);
-      text(`BEST ×${S.best}`, 72, 115, 9, P.cream2, 'center');
-      beatDots(56, 140);
+      text(`WAVE ${S.wave}`, leftCx, 58, 14, P.cream, 'center');
+      bar(leftCx - 50, 72, 100, 6, S.waveTotal ? S.waveDone / S.waveTotal : 0, P.teal);
+      text('HP', leftCx - 50, 94, 10, P.cream, 'left');
+      bar(leftCx - 30, 90, 80, 8, S.hp / 100, hpCol(), F.hpTrail / 100);
+      text(`BEST ×${S.best}`, leftCx, 115, 9, P.cream2, 'center');
+      beatDots(leftCx - 16, 140);
       for (let r = 8; r >= 1; r--) {
         const R = L.side!(r), cx = R.x + R.w / 2, cy = R.y + R.h / 2;
         ell(cx, cy + 1.5, 13.5, 13.5); ctx.fillStyle = 'rgba(12,12,18,0.75)'; ctx.fill();
@@ -788,25 +936,27 @@ export function createRenderer(canvas: HTMLCanvasElement) {
       text('BOMB', L.side!(8).x + 40, L.side!(8).y + 18, 8, P.cream, 'left');
       text('FREEZE', L.side!(7).x + 40, L.side!(7).y + 18, 8, P.cream, 'left');
       text('BASE HP', L.side!(4).x + 40, L.side!(4).y + 18, 8, P.cream, 'left');
-      hudPanel(514, 286, 92, 42);
-      text(`KILLS ${S.kills}`, 560, 299, 9, P.cream2, 'center');
-      text(`SAVED ${S.saved}`, 560, 315, 9, P.teal, 'center');
+      const rightPanelX = Math.min(VW - 100, L.arena.x + L.arena.w + 64);
+      hudPanel(rightPanelX, 286, 92, 42);
+      text(`KILLS ${S.kills}`, rightPanelX + 46, 299, 9, P.cream2, 'center');
+      text(`SAVED ${S.saved}`, rightPanelX + 46, 315, 9, P.teal, 'center');
     } else {
       text(`×${S.combo}`, rx + 24, ry - 10, 10, P.cream, 'left');
       bar(rx + 24, ry, 54, 5, S.comboIn / 3, rc, undefined, true);
       text(String(S.score).padStart(6, '0'), sx + 40, sy + 20, 16, P.cream, 'center');
       text(`MULT ×${mult}   BEST ×${S.best}`, sx + 40, sy - 14, 8, P.yellow, 'center');
-      text(`WAVE ${S.wave}`, W / 2, 310, 11, P.cream, 'center');
-      beatDots(W / 2 - 150, 310);
-      bar(W / 2 - 100, 321, 200, 8, S.hp / 100, hpCol(), F.hpTrail / 100);
-      text(`${S.hp} / 100`, W / 2, 340, 9, P.cream, 'center');
-      abilityButton(520, 318, `B${S.bombs}`, 'SHIFT', S.bombs > 0, S.armed);
-      abilityButton(590, 318, 'ICE', 'SPACE', S.charge >= 100, S.freezeIn > 0, S.charge / 100);
+      text(`WAVE ${S.wave}`, VW / 2, 310, 11, P.cream, 'center');
+      beatDots(VW / 2 - 150, 310);
+      bar(VW / 2 - 100, 321, 200, 8, S.hp / 100, hpCol(), F.hpTrail / 100);
+      text(`${S.hp} / 100`, VW / 2, 340, 9, P.cream, 'center');
+      abilityButton(VW - 120, 318, `B${S.bombs}`, 'SHIFT', S.bombs > 0, S.armed);
+      abilityButton(VW - 50, 318, 'ICE', 'SPACE', S.charge >= 100, S.freezeIn > 0, S.charge / 100);
     }
   }
 
   function drawAdditiveGlow() {
     if (cfg.quality === 'low') return;
+    const VW = L.VW || W;
     ctx.save(); ctx.globalCompositeOperation = 'lighter';
     for (const e of S.enemies) {
       if (e.state === 'gate') continue;
@@ -834,11 +984,11 @@ export function createRenderer(canvas: HTMLCanvasElement) {
       ctx.globalAlpha = (f.kind === 'bomb' ? .25 : .16) * a; ctx.fillStyle = f.kind === 'bomb' ? P.orange : P.ice;
       ell(R.x + R.w * .5, R.y + R.h * .5, R.w * .6, R.h * .6); ctx.fill();
     }
-    bloomCtx.clearRect(0, 0, 160, 90);
-    bloomCtx.drawImage(canvas, 0, 0, 160, 90);
+    bloomCtx.clearRect(0, 0, bloomCv.width, bloomCv.height);
+    bloomCtx.drawImage(canvas, 0, 0, bloomCv.width, bloomCv.height);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalCompositeOperation = 'screen'; ctx.globalAlpha = .16; ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(bloomCv, 0, 0, W, H);
+    ctx.drawImage(bloomCv, 0, 0, VW, H);
     ctx.imageSmoothingEnabled = false;
     ctx.restore();
   }
@@ -846,18 +996,19 @@ export function createRenderer(canvas: HTMLCanvasElement) {
   function drawWaveBanner() {
     const b = F.banner;
     if (!b) return;
+    const VW = L.VW || W;
     const t0 = b.t0 || 2.4, elapsed = t0 - b.t;
     const enter = clamp(elapsed / .22, 0, 1), exit = clamp(b.t / .24, 0, 1), a = Math.min(enter, exit);
-    const slideX = enter < 1 ? (1 - enter) * (1 - enter) * -W * .65 : exit < 1 ? (1 - exit) * (1 - exit) * W * .65 : 0;
+    const slideX = enter < 1 ? (1 - enter) * (1 - enter) * -VW * .65 : exit < 1 ? (1 - exit) * (1 - exit) * VW * .65 : 0;
     const isBoss = S.wave % 3 === 0 && S.mode === 'play';
     ctx.save(); ctx.globalAlpha = a; ctx.translate(slideX, 0);
-    ctx.fillStyle = 'rgba(14,16,24,0.92)'; ctx.fillRect(-W, 136, W * 3, 62);
-    ctx.fillStyle = isBoss ? P.red : P.teal; ctx.fillRect(-W, 136, W * 3, 5); ctx.fillRect(-W, 193, W * 3, 5);
+    ctx.fillStyle = 'rgba(14,16,24,0.92)'; ctx.fillRect(-VW, 136, VW * 3, 62);
+    ctx.fillStyle = isBoss ? P.red : P.teal; ctx.fillRect(-VW, 136, VW * 3, 5); ctx.fillRect(-VW, 193, VW * 3, 5);
     ctx.fillStyle = P.yellow;
     const stripeOff = (S.time * 40) % 24;
-    for (let x = -40 + stripeOff; x < W + 40; x += 24) { ctx.fillRect(x, 136, 10, 5); ctx.fillRect(x, 193, 10, 5); }
-    text(b.text, W / 2, 160, 24, isBoss ? P.red : P.yellow, 'center');
-    if (b.sub) text(b.sub, W / 2, 182, 9, P.cream, 'center');
+    for (let x = -40 + stripeOff; x < VW + 40; x += 24) { ctx.fillRect(x, 136, 10, 5); ctx.fillRect(x, 193, 10, 5); }
+    text(b.text, VW / 2, 160, 24, isBoss ? P.red : P.yellow, 'center');
+    if (b.sub) text(b.sub, VW / 2, 182, 9, P.cream, 'center');
     ctx.restore();
   }
 
@@ -876,42 +1027,45 @@ export function createRenderer(canvas: HTMLCanvasElement) {
     ctx.restore();
   }
   function drawTitle() {
-    ctx.fillStyle = 'rgba(10,12,24,.76)'; ctx.fillRect(0, 0, W, H);
-    hudPanel(W / 2 - 220, 40, 440, 286);
-    text('HOLD THE BEACH', W / 2, 70, 36, P.yellow, 'center');
-    text('a horde defense for the Launchpad (or your keyboard)', W / 2, 102, 10, P.cream, 'center');
+    const VW = L.VW || W;
+    ctx.fillStyle = 'rgba(10,12,24,.76)'; ctx.fillRect(0, 0, VW, H);
+    hudPanel(VW / 2 - 220, 40, 440, 286);
+    text('HOLD THE BEACH', VW / 2, 70, 36, P.yellow, 'center');
+    text('a horde defense for the Launchpad (or your keyboard)', VW / 2, 102, 10, P.cream, 'center');
     const rows: [EnemyType, string][] = [['grunt', '1 hit · gill-fin waddler'], ['runner', '1 hit · fast darting zig-zagger'],
       ['brute', '3 hits · horned tank, pushed back'], ['splitter', '2 hits · splits in two along seam'],
       ['survivor', 'DON\'T SHOOT · life-ring castaway'], ['boss', '2×2 CRAB KING · hit flashing weak core']];
     rows.forEach(([t, sub], i) => {
       const y = 134 + i * 20;
-      drawMiniBadge(t, W / 2 - 158, y);
-      text(ENEMY[t].name, W / 2 - 138, y, 10, LOOK[t].c1, 'left');
-      text(sub, W / 2 - 46, y, 9, P.cream, 'left');
+      drawMiniBadge(t, VW / 2 - 158, y);
+      text(ENEMY[t].name, VW / 2 - 138, y, 10, LOOK[t].c1, 'left');
+      text(sub, VW / 2 - 46, y, 9, P.cream, 'left');
     });
-    text(L.kind === 'pad' ? 'PADS = SHOOT · SIDE ▶ TOP = BOMB · NEXT = FREEZE' : 'KEYS = SHOOT · SHIFT+KEY = BOMB · SPACE = FREEZE', W / 2, 266, 10, P.teal, 'center');
-    text(beat() ? 'BEAT MODE: THE HORDE MOVES ON THE BEAT · HIT ON THE BEAT FOR ×2' : 'FREE MODE · SWITCH TO BEAT MODE IN THE BAR', W / 2, 282, 9, beat() ? P.pink : P.cream2, 'center');
-    text(Math.floor(S.time * 2) % 2 ? (L.kind === 'pad' ? 'PRESS ANY PAD TO START' : 'PRESS ANY KEY TO START') : '', W / 2, 306, 13, P.yellow, 'center');
+    text(L.kind === 'pad' ? 'PADS = SHOOT · SIDE ▶ TOP = BOMB · NEXT = FREEZE' : 'KEYS = SHOOT · SHIFT+KEY = BOMB · SPACE = FREEZE', VW / 2, 266, 10, P.teal, 'center');
+    text(beat() ? 'BEAT MODE: THE HORDE MOVES ON THE BEAT · HIT ON THE BEAT FOR ×2' : 'FREE MODE · SWITCH TO BEAT MODE IN THE BAR', VW / 2, 282, 9, beat() ? P.pink : P.cream2, 'center');
+    text(Math.floor(S.time * 2) % 2 ? (L.kind === 'pad' ? 'PRESS ANY PAD TO START' : 'PRESS ANY KEY TO START') : '', VW / 2, 306, 13, P.yellow, 'center');
   }
   function drawResults() {
-    ctx.fillStyle = 'rgba(10,12,24,.78)'; ctx.fillRect(0, 0, W, H);
-    hudPanel(W / 2 - 190, 42, 380, 256);
-    text('THE BEACH HAS FALLEN', W / 2, 72, 26, P.red, 'center');
+    const VW = L.VW || W;
+    ctx.fillStyle = 'rgba(10,12,24,.78)'; ctx.fillRect(0, 0, VW, H);
+    hudPanel(VW / 2 - 190, 42, 380, 256);
+    text('THE BEACH HAS FALLEN', VW / 2, 72, 26, P.red, 'center');
     const acc = S.shots ? Math.round(100 * S.hits / S.shots) : 0;
     const lines = [`SCORE ${S.score}`, `WAVE REACHED ${S.wave}`, `KILLS ${S.kills}   SURVIVORS SAVED ${S.saved}`, `BEST COMBO ×${S.best}`,
       `ACCURACY ${acc}%  (${S.hits}/${S.shots})`, ...(beat() ? [`ON-BEAT HITS ${S.perfect}`] : [])];
-    lines.forEach((line, i) => text(line, W / 2, 114 + i * 22, 12, P.cream, 'center'));
-    if (S.modeT > 1.2) text(Math.floor(S.time * 2) % 2 ? 'PRESS ANY PAD OR KEY TO PLAY AGAIN' : '', W / 2, 272, 12, P.yellow, 'center');
+    lines.forEach((line, i) => text(line, VW / 2, 114 + i * 22, 12, P.cream, 'center'));
+    if (S.modeT > 1.2) text(Math.floor(S.time * 2) % 2 ? 'PRESS ANY PAD OR KEY TO PLAY AGAIN' : '', VW / 2, 272, 12, P.yellow, 'center');
   }
 
   function postProcess() {
     if (cfg.quality === 'low' || !cfg.crush) return;
+    const VW = L.VW || W;
     const lut = crushLut(cfg.crush);
-    const img = ctx.getImageData(0, 0, W, H), d = img.data;
+    const img = ctx.getImageData(0, 0, VW, H), d = img.data;
     for (let y = 0; y < H; y++) {
       const by = (y & 3) * 4;
-      let i = y * W * 4;
-      for (let x = 0; x < W; x++, i += 4) {
+      let i = y * VW * 4;
+      for (let x = 0; x < VW; x++, i += 4) {
         const shift = (by + (x & 3)) << 8;
         d[i] = lut[shift | d[i]]; d[i + 1] = lut[shift | d[i + 1]]; d[i + 2] = lut[shift | d[i + 2]];
       }
@@ -921,18 +1075,27 @@ export function createRenderer(canvas: HTMLCanvasElement) {
 
   function draw(state: HordeState, fx: Fx, layout: ArenaLayout, settings: HordeSettings) {
     S = state; F = fx; L = layout; cfg = settings;
+    const targetW = L.VW || W;
+    if (sandCv.width !== targetW) {
+      curVW = targetW;
+      sandCv.width = curVW;
+      boardCv.width = curVW;
+      bloomCv.width = Math.round(curVW / 4);
+      cacheKey = '';
+    }
+    const VW = curVW;
     const index = themeIndex(S.wave);
     theme = THEMES[index];
-    const key = `${L.kind}|${index}|${cfg.aids}`;
+    const key = `${L.kind}|${index}|${cfg.aids}|${VW}`;
     if (key !== cacheKey) { cacheKey = key; buildSandCache(); }
-    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = '#000'; ctx.fillRect(0, 0, VW, H);
     ctx.imageSmoothingEnabled = false;
     const reduce = cfg.motion === 'reduce', shake = reduce ? 0 : F.shake;
     if (shake > 0) {
       const dx = Math.round((Math.random() * 2 - 1) * shake * .55), dy = Math.round((Math.random() * 2 - 1) * shake * .55);
-      ctx.translate(W / 2 + dx, H / 2 + dy);
+      ctx.translate(VW / 2 + dx, H / 2 + dy);
       if (S.hurtT > 0) ctx.rotate((Math.random() * 2 - 1) * .015 * (shake / 10));
-      ctx.translate(-W / 2, -H / 2);
+      ctx.translate(-VW / 2, -H / 2);
     }
     drawSea(); drawBeach();
     if (beat() && S.mode === 'play') drawBeatPulse();
@@ -943,10 +1106,10 @@ export function createRenderer(canvas: HTMLCanvasElement) {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     drawHUD();
     if (S.freezeIn > 0) drawFreezeOverlay();
-    if (S.hurtT > 0 && !reduce) { ctx.globalAlpha = S.hurtT; ctx.lineWidth = 18; ctx.strokeStyle = P.red; ctx.strokeRect(0, 0, W, H); ctx.globalAlpha = 1; }
-    if (S.armed) text('BOMB ARMED: HIT A CELL', W / 2, L.kind === 'pad' ? 50 : 74, 11, P.orange, 'center');
+    if (S.hurtT > 0 && !reduce) { ctx.globalAlpha = S.hurtT; ctx.lineWidth = 18; ctx.strokeStyle = P.red; ctx.strokeRect(0, 0, VW, H); ctx.globalAlpha = 1; }
+    if (S.armed) text('BOMB ARMED: HIT A CELL', VW / 2, L.kind === 'pad' ? 50 : 74, 11, P.orange, 'center');
     drawWaveBanner();
-    if (S.paused) { ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(0, 0, W, H); text('PAUSED', W / 2, H / 2, 24, P.yellow, 'center'); text('P TO RESUME', W / 2, H / 2 + 24, 10, P.cream, 'center'); }
+    if (S.paused) { ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(0, 0, VW, H); text('PAUSED', VW / 2, H / 2, 24, P.yellow, 'center'); text('P TO RESUME', VW / 2, H / 2 + 24, 10, P.cream, 'center'); }
     if (S.mode === 'title') drawTitle(); else if (S.mode === 'over') drawResults();
     postProcess();
   }

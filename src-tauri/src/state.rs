@@ -5,7 +5,7 @@
 //! separate: `painter` and `assigns` are leaves (nothing is taken while holding them) and
 //! `save_gate` is taken first, only to order disk writes. No lock is held across disk I/O,
 //! sample decoding or MIDI output. `config` → `startup` are leaves too (taken after nothing
-//! else); the one exception to "no lock across disk I/O" is `config`, held while its own small
+//! else); `load` and `load_notifier` are leaves as well (the notifier runs with none held); the one exception to "no lock across disk I/O" is `config`, held while its own small
 //! file is written.
 
 use crate::audio::{self, AudioStats, AudioStatus};
@@ -16,7 +16,7 @@ use crate::logfile;
 use crate::router::{LearnTarget, Router, UiEvent};
 use crate::saver::{SaveState, SaveStatus, Saver};
 use crate::sequencer::{Fired, Params, SeqState};
-use crate::startup::{self, Startup};
+use crate::startup::{self, LoadPhase, LoadStatus, LoadStep, LoadTracker, Startup};
 use crate::store::{prepare_sample, KitManager, LoadedKit};
 use lpd_core::audio::{Command, Event, Sample, Taps};
 use lpd_core::devices::launchpad::LpEvent;
@@ -28,7 +28,7 @@ use rtrb::{Consumer, Producer};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Instant;
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -37,6 +37,15 @@ pub struct SamplePeaks {
     pub peaks: Vec<f32>,
     pub length_ms: f32,
     pub rate: u32,
+}
+
+/// The one envelope kept for the editor: which loaded sample (identity, not path) and bucket count it
+/// belongs to. A `Weak` keeps the entry from holding a replaced sample's audio alive.
+struct PeaksEntry {
+    path: String,
+    buckets: usize,
+    sample: Weak<Sample>,
+    peaks: SamplePeaks,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -98,6 +107,9 @@ impl KeysStatus {
 /// Called when the keys engine changes without a command asking for it (a SoundFont reloaded
 /// after the audio stream restarted).
 pub type KeysNotifier = Arc<dyn Fn(&KeysStatus) + Send + Sync>;
+
+/// Called with a copy of each `load-status` update, after every internal lock was released.
+pub type LoadNotifier = Arc<dyn Fn(&LoadStatus) + Send + Sync>;
 
 /// The app config and the file it lives in (none in tests until `restore`).
 #[derive(Default)]
@@ -180,6 +192,9 @@ pub struct AppState {
     pub history: Arc<Mutex<History>>,
     /// What the app opened at launch, or the set opened since.
     pub startup: Arc<Mutex<Startup>>,
+    /// Progress of the newest set operation (a leaf lock: never held across I/O or other locks).
+    load: Arc<Mutex<LoadTracker>>,
+    load_notifier: Arc<Mutex<Option<LoadNotifier>>>,
     config: Arc<Mutex<ConfigFile>>,
     /// Known MIDI devices (a leaf lock; the Launchpad bridge and the input poller report here).
     pub midi: devices::SharedRegistry,
@@ -204,6 +219,9 @@ pub struct AppState {
     installed: Arc<AtomicU64>,
     assigns: Arc<Mutex<Assigns>>,
     input_mode: Arc<AtomicU8>,
+    /// Last waveform envelope (a leaf lock) and how many full scans were made (tests).
+    peaks_cache: Arc<Mutex<Option<PeaksEntry>>>,
+    peak_scans: Arc<AtomicU64>,
 }
 
 impl AppState {
@@ -235,6 +253,8 @@ impl AppState {
             audio_stats: Arc::new(Mutex::new(Arc::new(AudioStats::new()))),
             history: Arc::new(Mutex::new(History::new())),
             startup: Arc::new(Mutex::new(Startup::FirstRun)),
+            load: Arc::default(),
+            load_notifier: Arc::default(),
             config: Arc::default(),
             midi: Arc::default(),
             wheel: Arc::default(),
@@ -250,6 +270,8 @@ impl AppState {
             installed: Arc::new(AtomicU64::new(0)),
             assigns: Arc::new(Mutex::new(Assigns::default())),
             input_mode: Arc::new(AtomicU8::new(InputMode::Sampler as u8)),
+            peaks_cache: Arc::default(),
+            peak_scans: Arc::default(),
         }
     }
 
@@ -1095,11 +1117,20 @@ impl AppState {
     }
 
     /// Peak envelope of a loaded sample for the editor waveform: `buckets` max-abs values
-    /// over both channels. None when the sample is not loaded.
+    /// over both channels. None when the sample is not loaded. The scan runs with no application
+    /// lock held (call it from a worker); the last envelope is reused while the same loaded sample
+    /// is asked for with the same bucket count.
     pub fn sample_peaks(&self, path: &str, buckets: usize) -> Option<SamplePeaks> {
-        let sample = lock(&self.kit_manager).samples.get(path)?.clone();
-        let frames = sample.frames();
         let buckets = buckets.clamp(16, 2048);
+        let sample = lock(&self.kit_manager).samples.get(path)?.clone();
+        if let Some(entry) = lock(&self.peaks_cache).as_ref() {
+            let same = entry.sample.upgrade().is_some_and(|s| Arc::ptr_eq(&s, &sample));
+            if same && entry.path == path && entry.buckets == buckets {
+                return Some(entry.peaks.clone());
+            }
+        }
+        self.peak_scans.fetch_add(1, Ordering::Relaxed);
+        let frames = sample.frames();
         let mut peaks = vec![0.0f32; buckets];
         if frames > 0 {
             for (i, peak) in peaks.iter_mut().enumerate() {
@@ -1111,11 +1142,30 @@ impl AppState {
                 }
             }
         }
-        Some(SamplePeaks {
+        let result = SamplePeaks {
             peaks,
             length_ms: frames as f32 * 1000.0 / sample.rate.max(1) as f32,
             rate: sample.rate,
-        })
+        };
+        *lock(&self.peaks_cache) = Some(PeaksEntry {
+            path: path.to_string(),
+            buckets,
+            sample: Arc::downgrade(&sample),
+            peaks: result.clone(),
+        });
+        Some(result)
+    }
+
+    /// Full waveform scans made so far (cache hits do not count). For tests.
+    pub fn peak_scans(&self) -> u64 {
+        self.peak_scans.load(Ordering::Relaxed)
+    }
+
+    /// Whether the cached envelope still has its sample alive. For tests.
+    pub fn peaks_cache_holds_audio(&self) -> bool {
+        lock(&self.peaks_cache)
+            .as_ref()
+            .is_some_and(|e| e.sample.strong_count() > 0)
     }
 
     pub fn rename_bank(&self, bank: usize, name: String) {
@@ -1126,40 +1176,216 @@ impl AppState {
         });
     }
 
+    // ---- load progress ---------------------------------------------------------------------
+
+    pub fn set_load_notifier(&self, notifier: LoadNotifier) {
+        *lock(&self.load_notifier) = Some(notifier);
+    }
+
+    /// The newest set operation's status (also sent as `load-status` events).
+    pub fn get_load_status(&self) -> LoadStatus {
+        lock(&self.load).status().clone()
+    }
+
+    /// Tell the notifier. Call with no lock held: the notifier is foreign code.
+    fn emit_load(&self, status: &LoadStatus) {
+        let notifier = lock(&self.load_notifier).clone();
+        if let Some(notify) = notifier {
+            notify(status);
+        }
+    }
+
+    /// Take the next open ticket and make it the newest request. Allocation and registration
+    /// happen under the load lock, so a superseded worker can never publish for the new one.
+    fn begin_request(&self, phase: LoadPhase) -> u64 {
+        let (ticket, status) = {
+            let mut tracker = lock(&self.load);
+            self.begin_locked(&mut tracker, phase)
+        };
+        self.emit_load(&status);
+        ticket
+    }
+
+    fn begin_locked(&self, tracker: &mut LoadTracker, phase: LoadPhase) -> (u64, LoadStatus) {
+        let ticket = self.open_ticket.fetch_add(1, Ordering::SeqCst) + 1;
+        (ticket, tracker.begin(ticket, phase))
+    }
+
+    /// Publish a step of `ticket`'s operation. False when a newer request replaced it: the
+    /// caller is stale and its numbers are dropped.
+    fn report(&self, ticket: u64, step: LoadStep) -> bool {
+        let outcome = lock(&self.load).update(ticket, step, Instant::now());
+        match outcome {
+            None => false,
+            Some(send) => {
+                if let Some(status) = send {
+                    self.emit_load(&status);
+                }
+                true
+            }
+        }
+    }
+
+    /// Sample counting for a counted phase. Nothing to report for a set without samples.
+    fn report_samples(
+        &self,
+        ticket: u64,
+        phase: LoadPhase,
+        done: usize,
+        total: usize,
+        failed: usize,
+    ) {
+        if total > 0 {
+            self.report(ticket, LoadStep::counted(phase, done, total, failed));
+        }
+    }
+
+    /// The operation of `ticket` ended with `error`; ignored when it was superseded.
+    pub fn fail_load(&self, ticket: u64, error: &str) {
+        logfile::log(format!("Load failed: {error}"));
+        self.report(ticket, LoadStep::failed(error));
+    }
+
+    /// Run a New/Open/Default operation under its own fresh ticket. A failure or a panic ends
+    /// the operation as `failed` for this ticket only; the caller never has to remember to.
+    fn run_ticketed<T>(
+        &self,
+        phase: LoadPhase,
+        op: impl FnOnce(u64) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let ticket = self.begin_request(phase);
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op(ticket))) {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => {
+                self.fail_load(ticket, &error);
+                Err(error)
+            }
+            Err(_) => {
+                let error = "Something went wrong while loading the set. See the log.";
+                self.fail_load(ticket, error);
+                Err(error.into())
+            }
+        }
+    }
+
     // ---- opening and creating sets -------------------------------------------------------
 
     /// Start an open/new request. Only the newest request may commit.
     pub fn begin_open(&self) -> u64 {
-        self.open_ticket.fetch_add(1, Ordering::SeqCst) + 1
+        self.begin_request(LoadPhase::ReadingSet)
     }
 
-    /// Launch: load the config at `config_path`, reopen its last set when possible and
-    /// remember the outcome for `get_startup`. Slow: loads samples.
-    pub fn restore(&self, config_path: PathBuf) -> Startup {
+    /// Launch, part 1: read the config at `config_path` (defaults when missing or broken) and
+    /// remember where it lives. Quick: no set or sample is touched.
+    pub fn init_config(&self, config_path: PathBuf) -> AppConfig {
         let loaded_config = config::load(&config_path);
-        let last = loaded_config.last_set.clone();
         *lock(&self.config) = ConfigFile {
             path: Some(config_path),
-            config: loaded_config,
+            config: loaded_config.clone(),
         };
-        let (decision, kit) =
-            startup::decide_startup(last.as_deref().map(Path::new), KitManager::load_from_dir);
-        let decision = match (decision, kit) {
+        loaded_config
+    }
+
+    /// Launch, part 2a: reserve the restore's ticket, before any slow work is started.
+    pub fn begin_restore(&self) -> u64 {
+        self.begin_request(LoadPhase::Settings)
+    }
+
+    /// Retry the restore of the configured last set. Refused while an operation is running.
+    pub fn retry_startup(&self) -> Result<Startup, String> {
+        let (ticket, status) = {
+            let mut tracker = lock(&self.load);
+            if !tracker.status().phase.is_terminal() {
+                return Err("Already loading a set. Wait for it to finish.".into());
+            }
+            self.begin_locked(&mut tracker, LoadPhase::Settings)
+        };
+        self.emit_load(&status);
+        Ok(self.restore_guarded(ticket))
+    }
+
+    /// Launch, part 2, synchronously: config, ticket and restore in one call.
+    pub fn restore(&self, config_path: PathBuf) -> Startup {
+        self.init_config(config_path);
+        let ticket = self.begin_restore();
+        self.run_restore(ticket)
+    }
+
+    /// [`Self::run_restore`] for a worker thread: a panic ends the request as failed instead of
+    /// leaving the UI waiting for ever.
+    pub fn restore_guarded(&self, ticket: u64) -> Startup {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_restore(ticket))) {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                self.fail_load(ticket, "Starting up went wrong. See the log.");
+                self.get_startup()
+            }
+        }
+    }
+
+    /// Launch, part 2c: reopen the configured last set under `ticket` (from `begin_restore`) and
+    /// remember the outcome for `get_startup`. Slow: decodes samples.
+    pub fn run_restore(&self, ticket: u64) -> Startup {
+        self.run_restore_with(ticket, |dir, progress| {
+            KitManager::load_from_dir_with_progress(dir, progress)
+        })
+    }
+
+    /// [`Self::run_restore`] with the loader injected (tests pause or fail it).
+    pub fn run_restore_with(
+        &self,
+        ticket: u64,
+        load: impl Fn(&Path, &dyn Fn(usize, usize, usize)) -> anyhow::Result<LoadedKit>,
+    ) -> Startup {
+        let last = lock(&self.config).config.last_set.clone();
+        if last.is_some() {
+            self.report(ticket, LoadStep::phase(LoadPhase::ReadingSet));
+        }
+        let progress = |done, total, failed| {
+            self.report_samples(ticket, LoadPhase::LoadingSamples, done, total, failed)
+        };
+        let (decision, kit) = startup::decide_startup(last.as_deref().map(Path::new), |dir| {
+            load(dir, &progress)
+        });
+        let outcome = match (decision, kit) {
             (Startup::Loaded { path, name, .. }, Some(kit)) => {
-                let ticket = self.begin_open();
                 match self.finish_open(ticket, kit) {
+                    // `adopt` stored the outcome, unless a newer set got there first.
                     Ok(_) => self.get_startup(),
                     Err(reason) => {
                         logfile::log(format!("Startup: couldn't install {path}: {reason}"));
-                        Startup::Unreadable { path, name }
+                        let outcome = Startup::Unreadable { path, name };
+                        if self.set_startup_for(ticket, outcome.clone()) {
+                            self.fail_load(ticket, &reason);
+                            outcome
+                        } else {
+                            self.get_startup()
+                        }
                     }
                 }
             }
-            (other, _) => other,
+            (other, _) => {
+                if self.set_startup_for(ticket, other.clone()) {
+                    self.report(ticket, LoadStep::phase(LoadPhase::NeedsSet));
+                    other
+                } else {
+                    self.get_startup()
+                }
+            }
         };
-        logfile::log(format!("Startup: {decision:?}"));
-        *lock(&self.startup) = decision.clone();
-        decision
+        logfile::log(format!("Startup: {outcome:?}"));
+        outcome
+    }
+
+    /// Remember a launch outcome that is not a loaded set, unless a newer request has started:
+    /// checked under the `startup` lock, which `adopt` also takes before it writes.
+    fn set_startup_for(&self, ticket: u64, outcome: Startup) -> bool {
+        let mut startup = lock(&self.startup);
+        if self.open_ticket.load(Ordering::SeqCst) != ticket {
+            return false;
+        }
+        *startup = outcome;
+        true
     }
 
     pub fn get_startup(&self) -> Startup {
@@ -1168,22 +1394,30 @@ impl AppState {
 
     /// Open a set folder. A failure changes nothing. Slow: call from a worker thread.
     pub fn open_set(&self, dir_str: &str) -> Result<OpenResult, String> {
-        let ticket = self.begin_open();
-        let dir = Path::new(dir_str);
-        let loaded = KitManager::load_from_dir(dir).map_err(|e| {
-            logfile::log(format!("Open {}: {e:#}", dir.display()));
-            open_error(dir, &e)
-        })?;
-        self.finish_open(ticket, loaded)
+        self.run_ticketed(LoadPhase::ReadingSet, |ticket| {
+            let dir = Path::new(dir_str);
+            let loaded = KitManager::load_from_dir_with_progress(dir, |done, total, failed| {
+                self.report_samples(ticket, LoadPhase::LoadingSamples, done, total, failed)
+            })
+            .map_err(|e| {
+                logfile::log(format!("Open {}: {e:#}", dir.display()));
+                open_error(dir, &e)
+            })?;
+            self.finish_open(ticket, loaded)
+        })
     }
 
-    /// Commit a loaded kit if no newer open/new request started meanwhile.
+    /// Commit a loaded kit if no newer open/new request started meanwhile. Publishes
+    /// `installing`, then `ready` once the set is adopted; a failure is left for the caller to
+    /// publish (it may turn it into another outcome).
     pub fn finish_open(&self, ticket: u64, loaded: LoadedKit) -> Result<OpenResult, String> {
         for (path, error) in &loaded.failed_samples {
             logfile::log(format!("{path}: {error}"));
         }
+        let failed = loaded.failed_samples.len();
         let set = loaded.set.clone();
         let dir = loaded.dir.clone();
+        self.report(ticket, LoadStep::phase(LoadPhase::Installing));
         let seq = self.install(
             ticket,
             loaded.set,
@@ -1195,7 +1429,9 @@ impl AppState {
             // set.json was moved aside: let autosave write it back.
             self.touch();
         }
-        Ok(self.adopt(seq, &dir, set, loaded.from_backup))
+        let result = self.adopt(seq, &dir, set, loaded.from_backup);
+        self.report(ticket, LoadStep::ready(failed));
+        Ok(result)
     }
 
     /// A set is now open: it becomes the startup state and the last set in the config, unless
@@ -1252,39 +1488,50 @@ impl AppState {
         set: Set,
         write_samples: bool,
     ) -> Result<OpenResult, String> {
-        let ticket = self.begin_open();
-        let dir = Path::new(dir_str);
-        kit::ensure_new_set_dir(dir).map_err(|e| format!("{e:#}"))?;
-        let created_dir = !dir.exists();
-        std::fs::create_dir_all(dir).map_err(|e| format!("{e:#}"))?;
-        if write_samples {
-            kit::write_starter_samples(dir, &set).map_err(|e| format!("{e:#}"))?;
-        }
-        kit::save(dir, &set).map_err(|e| format!("{e:#}"))?;
-        let (samples, failed) = kit::load_samples(dir, &set);
-        let failed = failed
-            .into_iter()
-            .map(|(p, e)| (p, e.to_string()))
-            .collect();
-        let installed = self.install(
-            ticket,
-            set.clone(),
-            Some(dir.to_path_buf()),
-            samples,
-            failed,
-        );
-        let seq = match installed {
-            Ok(seq) => seq,
-            Err(reason) => {
-                // Not adopted: take back what this call created so a retry finds the folder free.
-                let _ = std::fs::remove_file(dir.join(kit::SET_FILE));
-                if created_dir {
-                    let _ = std::fs::remove_dir_all(dir); // only this call's files are in it
-                }
-                return Err(reason);
+        self.run_ticketed(LoadPhase::ReadingSet, |ticket| {
+            let dir = Path::new(dir_str);
+            kit::ensure_new_set_dir(dir).map_err(|e| format!("{e:#}"))?;
+            let created_dir = !dir.exists();
+            std::fs::create_dir_all(dir).map_err(|e| format!("{e:#}"))?;
+            if write_samples {
+                kit::write_starter_samples_with_progress(dir, &set, |done, total| {
+                    self.report_samples(ticket, LoadPhase::PreparingSamples, done, total, 0)
+                })
+                .map_err(|e| format!("{e:#}"))?;
             }
-        };
-        Ok(self.adopt(seq, dir, set, false))
+            kit::save(dir, &set).map_err(|e| format!("{e:#}"))?;
+            let (samples, failed) =
+                kit::load_samples_with_progress(dir, &set, |done, total, failed| {
+                    self.report_samples(ticket, LoadPhase::LoadingSamples, done, total, failed)
+                });
+            let failed_count = failed.len();
+            let failed = failed
+                .into_iter()
+                .map(|(p, e)| (p, e.to_string()))
+                .collect();
+            self.report(ticket, LoadStep::phase(LoadPhase::Installing));
+            let installed = self.install(
+                ticket,
+                set.clone(),
+                Some(dir.to_path_buf()),
+                samples,
+                failed,
+            );
+            let seq = match installed {
+                Ok(seq) => seq,
+                Err(reason) => {
+                    // Not adopted: take back what this call created so a retry finds the folder free.
+                    let _ = std::fs::remove_file(dir.join(kit::SET_FILE));
+                    if created_dir {
+                        let _ = std::fs::remove_dir_all(dir); // only this call's files are in it
+                    }
+                    return Err(reason);
+                }
+            };
+            let result = self.adopt(seq, dir, set, false);
+            self.report(ticket, LoadStep::ready(failed_count));
+            Ok(result)
+        })
     }
 
     // ---- app config ----------------------------------------------------------------------

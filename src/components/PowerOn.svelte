@@ -1,13 +1,15 @@
 <script lang="ts">
   import type { Startup } from '../lib/model.ts';
-  let { startup, error, launchpad, lcxl, audio, onnew, onopen, ondefault }: { startup: Startup; error: string | null; launchpad: string; lcxl: string; audio: string; onnew: () => void; onopen: () => void; ondefault: () => void } = $props();
+  let { startup, error, launchpad, lcxl, audio, busy = false, onnew, onopen, ondefault, onretry }: { startup: Startup; error: string | null; launchpad: string; lcxl: string; audio: string; busy?: boolean; onnew: () => void; onopen: () => void; ondefault: () => void; onretry?: () => void } = $props();
+  // The last set may only be temporarily out of reach (a drive, a share): reading it again is a real option.
+  const canRetry = $derived(!!onretry && (!!error || startup.kind === 'notFound' || startup.kind === 'unreadable'));
   const status = $derived(error ?? (startup.kind === 'notFound' ? `Last set not found: ${startup.path}` : startup.kind === 'unreadable' ? `Couldn't open ${startup.name} — set.json and backup are unreadable. Files left untouched.` : 'No set yet. Create one, open a set folder or start from the default set.'));
   const lamp = (s: string) => s === 'connected' || s === 'running' ? 'ok' : s === 'busy' ? 'warn' : ['lost', 'error', 'stopped', 'bootloader'].includes(s) ? 'error' : '';
 </script>
 <div class="power-screen"><div class="power plate">
   <h1 class="chromatic-fringe">LAUNCHPAD DRUMMER</h1><div class="sub" class:err={!!error || startup.kind === 'unreadable'} role="status">{status}</div>
   <div class="lamps">{#each [['LAUNCHPAD', launchpad], ['LCXL', lcxl], ['AUDIO', audio]] as [label, state]}<span class="silk"><i class="lamp {lamp(state)}"></i>{label}</span>{/each}</div>
-  <div class="keys"><button class="key" onclick={onnew}>NEW SET</button><button class="key" onclick={onopen}>OPEN SET</button><button class="key" onclick={ondefault}>DEFAULT SET</button></div>
+  <div class="keys"><button class="key" disabled={busy} onclick={onnew}>NEW SET</button><button class="key" disabled={busy} onclick={onopen}>OPEN SET</button><button class="key" disabled={busy} onclick={ondefault}>DEFAULT SET</button>{#if canRetry}<button class="key" disabled={busy} onclick={onretry}>TRY AGAIN</button>{/if}</div>
 </div></div>
 <style>
   .power-screen { height: 100%; display: grid; place-items: center; }

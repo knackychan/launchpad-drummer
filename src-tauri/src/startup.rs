@@ -27,6 +27,190 @@ pub enum Startup {
     },
 }
 
+/// Which step of a set operation (launch restore, New, Open, Default) is running.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LoadPhase {
+    Settings,
+    ReadingSet,
+    PreparingSamples,
+    LoadingSamples,
+    Installing,
+    Ready,
+    NeedsSet,
+    Failed,
+}
+
+impl LoadPhase {
+    /// The request is over: nothing more will be reported for it.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Ready | Self::NeedsSet | Self::Failed)
+    }
+}
+
+/// Progress of the newest set operation, as the UI sees it (`get_load_status`, `load-status`).
+/// `Startup` stays the outcome; this is the operation. `request_id` is the open ticket.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadStatus {
+    pub request_id: u64,
+    /// Rises with every accepted update in the process; the UI keeps only strictly newer ones.
+    pub revision: u64,
+    pub phase: LoadPhase,
+    pub completed: u64,
+    /// `None`: unknown.
+    pub total: Option<u64>,
+    /// Samples that failed to decode so far (not a fatal error).
+    pub failed: u64,
+    pub error: Option<String>,
+}
+
+impl LoadStatus {
+    pub fn initial() -> Self {
+        Self {
+            request_id: 0,
+            revision: 0,
+            phase: LoadPhase::Settings,
+            completed: 0,
+            total: None,
+            failed: 0,
+            error: None,
+        }
+    }
+}
+
+/// One report from a running operation.
+#[derive(Clone, Debug)]
+pub struct LoadStep {
+    pub phase: LoadPhase,
+    pub completed: u64,
+    pub total: Option<u64>,
+    pub failed: u64,
+    pub error: Option<String>,
+}
+
+impl LoadStep {
+    /// A phase with no count (indeterminate).
+    pub fn phase(phase: LoadPhase) -> Self {
+        Self {
+            phase,
+            completed: 0,
+            total: None,
+            failed: 0,
+            error: None,
+        }
+    }
+
+    /// A phase counting files: `completed` of `total`, `failed` of them failed.
+    pub fn counted(phase: LoadPhase, completed: usize, total: usize, failed: usize) -> Self {
+        Self {
+            phase,
+            completed: completed as u64,
+            total: Some(total as u64),
+            failed: failed as u64,
+            error: None,
+        }
+    }
+
+    /// The set is installed; `failed` samples did not decode (a warning, not an error).
+    pub fn ready(failed: usize) -> Self {
+        Self {
+            failed: failed as u64,
+            ..Self::phase(LoadPhase::Ready)
+        }
+    }
+
+    /// The operation ended with a fatal error.
+    pub fn failed(error: impl Into<String>) -> Self {
+        Self {
+            error: Some(error.into()),
+            ..Self::phase(LoadPhase::Failed)
+        }
+    }
+}
+
+/// Progress events are sent at most this often within one phase.
+pub const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The newest request's status plus the emission throttle. Pure: the caller passes the clock and
+/// sends what [`LoadTracker::update`] returns after releasing its lock.
+pub struct LoadTracker {
+    status: LoadStatus,
+    last_emit: Option<std::time::Instant>,
+}
+
+impl Default for LoadTracker {
+    fn default() -> Self {
+        Self {
+            status: LoadStatus::initial(),
+            last_emit: None,
+        }
+    }
+}
+
+impl LoadTracker {
+    pub fn status(&self) -> &LoadStatus {
+        &self.status
+    }
+
+    /// `request_id` is now the newest request, in `phase`. Always worth sending.
+    pub fn begin(&mut self, request_id: u64, phase: LoadPhase) -> LoadStatus {
+        self.status = LoadStatus {
+            request_id,
+            revision: self.status.revision + 1,
+            phase,
+            completed: 0,
+            total: None,
+            failed: 0,
+            error: None,
+        };
+        self.last_emit = None;
+        self.status.clone()
+    }
+
+    /// Record progress for `request_id`. `None` when it is no longer the newest request (the
+    /// caller was superseded and must not publish). Otherwise `Some(send)`: the status is always
+    /// stored, and `send` is the copy to emit, or `None` while the throttle holds it back.
+    /// A phase change, a finished count and a terminal phase are always sent.
+    pub fn update(
+        &mut self,
+        request_id: u64,
+        step: LoadStep,
+        now: std::time::Instant,
+    ) -> Option<Option<LoadStatus>> {
+        if self.status.request_id != request_id {
+            return None;
+        }
+        let LoadStep {
+            phase,
+            completed,
+            total,
+            failed,
+            error,
+        } = step;
+        let phase_changed = self.status.phase != phase;
+        let finished = total.is_some_and(|t| completed >= t);
+        self.status = LoadStatus {
+            request_id,
+            revision: self.status.revision + 1,
+            phase,
+            completed,
+            total,
+            failed,
+            error,
+        };
+        let due = self
+            .last_emit
+            .is_none_or(|at| now.saturating_duration_since(at) >= PROGRESS_INTERVAL);
+        if phase_changed || phase.is_terminal() || finished || due {
+            self.last_emit = Some(now);
+            Some(Some(self.status.clone()))
+        } else {
+            Some(None)
+        }
+    }
+}
+
 /// `load` is `KitManager::load_from_dir` in the app, a fake in tests.
 pub fn decide_startup(
     last: Option<&Path>,

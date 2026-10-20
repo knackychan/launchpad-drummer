@@ -74,8 +74,17 @@ impl KitManager {
     }
 
     pub fn load_from_dir(dir: &Path) -> Result<LoadedKit> {
+        Self::load_from_dir_with_progress(dir, |_, _, _| {})
+    }
+
+    /// [`Self::load_from_dir`], reporting `(completed, total, failed)` while the samples decode.
+    /// The callback runs on the calling thread, between files, holding no application lock.
+    pub fn load_from_dir_with_progress(
+        dir: &Path,
+        progress: impl Fn(usize, usize, usize),
+    ) -> Result<LoadedKit> {
         let Loaded { set, from_backup } = kit::load(dir)?;
-        let (samples, failed) = kit::load_samples(dir, &set);
+        let (samples, failed) = kit::load_samples_with_progress(dir, &set, progress);
         let failed_samples = failed
             .into_iter()
             .map(|(path, err)| (path, err.to_string()))

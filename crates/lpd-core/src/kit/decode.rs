@@ -71,23 +71,46 @@ pub fn decode_file(path: &Path) -> Result<Sample> {
     Ok(Sample { rate, data })
 }
 
+/// The sample paths a set references, each once, in the order they are first referenced.
+pub fn unique_sample_paths(set: &Set) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    set.banks
+        .iter()
+        .flat_map(|b| &b.pads)
+        .filter(|pad| seen.insert(pad.sample.as_str()))
+        .map(|pad| pad.sample.clone())
+        .collect()
+}
+
 /// Decode every sample the set references. Failures are returned per path; the rest load.
 pub fn load_samples(
     dir: &Path,
     set: &Set,
 ) -> (HashMap<String, Arc<Sample>>, Vec<(String, anyhow::Error)>) {
+    load_samples_with_progress(dir, set, |_, _, _| {})
+}
+
+/// [`load_samples`], reporting `(completed, total, failed)` over the unique sample paths: once
+/// before the first file (also for an empty set: 0, 0, 0) and after every file, failed ones
+/// included. The callback runs on the calling thread between files; keep it cheap.
+pub fn load_samples_with_progress(
+    dir: &Path,
+    set: &Set,
+    progress: impl Fn(usize, usize, usize),
+) -> (HashMap<String, Arc<Sample>>, Vec<(String, anyhow::Error)>) {
+    let paths = unique_sample_paths(set);
+    let total = paths.len();
     let mut ok = HashMap::new();
     let mut failed: Vec<(String, anyhow::Error)> = Vec::new();
-    for pad in set.banks.iter().flat_map(|b| &b.pads) {
-        if ok.contains_key(&pad.sample) || failed.iter().any(|(p, _)| p == &pad.sample) {
-            continue;
-        }
-        match decode_file(&dir.join(&pad.sample)) {
+    progress(0, total, 0);
+    for (i, path) in paths.into_iter().enumerate() {
+        match decode_file(&dir.join(&path)) {
             Ok(s) => {
-                ok.insert(pad.sample.clone(), Arc::new(s));
+                ok.insert(path, Arc::new(s));
             }
-            Err(e) => failed.push((pad.sample.clone(), e)),
+            Err(e) => failed.push((path, e)),
         }
+        progress(i + 1, total, failed.len());
     }
     (ok, failed)
 }

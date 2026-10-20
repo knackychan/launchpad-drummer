@@ -584,7 +584,21 @@ function midiNote(msg) {
   console.log('[midi]', t, msg);
 }
 function midiStatus(cls, txt) { if (txt !== midiTxt.textContent) midiNote(txt); lamp.className = 'lamp ' + cls; midiTxt.textContent = txt; }
+// Inside Launchpad Drummer the page sits in a sandboxed frame where Web MIDI is blocked, and the app already
+// owns the Launchpad: it relays pad/button events in as MIDI-shaped messages and takes the LEDs back out.
+const HOST = window.parent !== window; let hostState = 'disconnected';
+function hostStatus(state) {
+  hostState = state;
+  if (state === 'connected') { LP.last.clear(); midiStatus('on', 'MIDI: Launchpad MK2 via Launchpad Drummer'); }
+  else if (state === 'busy') midiStatus('warn', 'MIDI: Launchpad port busy (close other MIDI apps)');
+  else midiStatus('', 'MIDI: no Launchpad MK2 (mouse works)');
+}
+if (HOST) window.addEventListener('message', e => {
+  const m = e.data; if (e.source !== window.parent || !m) return;
+  if (m.lpd === 'midi' && Array.isArray(m.data)) onMidi({ data:m.data }); else if (m.lpd === 'status') hostStatus(m.state);
+});
 function connectMidi() {
+  if (HOST) { hostStatus(hostState); return; }
   if (!navigator.requestMIDIAccess) { midiStatus('', 'MIDI: not supported (use Edge/Chrome)'); return; }
   if (!LP.access) midiStatus('warn', 'MIDI: waiting for permission…');
   const slow = setTimeout(() => { if (!LP.access) midiStatus('warn', 'MIDI: still waiting (allow the prompt; another tab or app may hold the Launchpad)'); }, 3000);
@@ -637,6 +651,12 @@ function sideButton(r) {
   if (r === 8) undo(); else if (r === 1) askNewGame();
 }
 function sendLeds(frame) {
+  if (HOST) {
+    const changes = [];
+    for (const [note, rgb] of frame) { const prev = LP.last.get(note); if (!prev || prev[0]!==rgb[0] || prev[1]!==rgb[1] || prev[2]!==rgb[2]) { changes.push([note, rgb[0], rgb[1], rgb[2]]); LP.last.set(note, rgb); } }
+    if (changes.length) window.parent.postMessage({ lpd:'leds', leds:changes }, '*');
+    return;
+  }
   if (!LP.output) return;
   const changes = [];
   for (const [note, rgb] of frame) { const prev = LP.last.get(note); if (!prev || prev[0]!==rgb[0] || prev[1]!==rgb[1] || prev[2]!==rgb[2]) { changes.push(note, rgb[0], rgb[1], rgb[2]); LP.last.set(note, rgb); } }

@@ -20,27 +20,29 @@ export type ArenaLayout = {
   arena: Rect; sea: Rect; base: Rect; turret: { x: number; y: number };
   side: ((row: number) => Rect) | null;
   label: (column: number, row: number) => string;
+  wingW: number;
+  VW: number;
 };
 
 // Game logic knows columns 1..cols and rows 1..rows; row rows+1 is the sea gate above the arena.
-export function makeLayout(kind: Layout): ArenaLayout {
+export function makeLayout(kind: Layout, wingW = 0, VW = W + wingW * 2): ArenaLayout {
   if (kind === 'pad') {
-    const S = 36, x0 = 158, y0 = 0;
+    const S = 36, x0 = 158 + wingW, y0 = 0;
     const rect = (c: number, r: number): Rect => ({ x: x0 + (c - 1) * S, y: y0 + (9 - Math.min(r, 9)) * S, w: S, h: S });
-    return { kind, cols: 8, rows: 8, S, rect, arena: { x: x0, y: y0 + S, w: 8 * S, h: 8 * S }, sea: { x: 0, y: 0, w: W, h: y0 + S },
-      base: { x: x0 - 8, y: y0 + 9 * S, w: 8 * S + 16, h: H - (y0 + 9 * S) }, turret: { x: x0 + 4 * S, y: y0 + 9 * S + 16 },
+    return { kind, cols: 8, rows: 8, S, rect, arena: { x: x0, y: y0 + S, w: 8 * S, h: 8 * S }, sea: { x: 0, y: 0, w: VW, h: y0 + S },
+      base: { x: 0, y: y0 + 9 * S, w: VW, h: H - (y0 + 9 * S) }, turret: { x: x0 + 4 * S, y: y0 + 9 * S + 16 },
       side: r => ({ x: x0 + 8 * S + 3, y: y0 + (9 - r) * S, w: S - 2, h: S }),
-      label: (c, r) => 'ABCDEFGH'[c - 1] + r };
+      label: (c, r) => 'ABCDEFGH'[c - 1] + r, wingW, VW };
   }
-  const S = 50, x0 = 40, y0 = 60;
+  const S = 50, x0 = 40 + wingW, y0 = 60;
   const rect = (c: number, r: number): Rect => {
     if (r > 4) return { x: x0 + (c - 1) * S, y: y0 - S, w: S, h: S };
     const line = KEY_ROWS[4 - r];
     return { x: x0 + (line.offset + c - 1) * S, y: y0 + (4 - r) * S, w: S, h: S };
   };
-  return { kind, cols: 10, rows: 4, S, rect, arena: { x: x0, y: y0, w: 11.25 * S, h: 4 * S }, sea: { x: 0, y: 0, w: W, h: y0 },
-    base: { x: x0 + 20, y: y0 + 4 * S + 8, w: 11.25 * S - 40, h: 14 }, turret: { x: x0 + 5.6 * S, y: y0 + 4 * S + 24 },
-    side: null, label: (c, r) => KEY_ROWS[4 - r].labels[c - 1] };
+  return { kind, cols: 10, rows: 4, S, rect, arena: { x: x0, y: y0, w: 11.25 * S, h: 4 * S }, sea: { x: 0, y: 0, w: VW, h: y0 },
+    base: { x: 0, y: y0 + 4 * S + 8, w: VW, h: H - (y0 + 4 * S + 8) }, turret: { x: x0 + 5.6 * S, y: y0 + 4 * S + 24 },
+    side: null, label: (c, r) => KEY_ROWS[4 - r].labels[c - 1], wingW, VW };
 }
 
 // Canvas point to game cell, or null when the point is outside every key.
