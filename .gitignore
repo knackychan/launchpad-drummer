@@ -8,3 +8,15 @@ src-tauri/gen/
 *.db
 *.pdb
 Thumbs.db
+
+# secrets and local tooling
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
+.superpowers/
+.claude/

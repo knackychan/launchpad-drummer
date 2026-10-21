@@ -23,9 +23,12 @@
   #wrap { width:100%; height:100%; position:relative; }
   canvas#screen { display:block; width:100%; height:100%; background:#000; cursor:crosshair; }
 </style>
+<link rel="stylesheet" href="../shared/launchband-menu.css">
+<script src="../shared/launchband-menu.js"></script>
 </head>
 <body>
 <div id="bar">
+  <button id="openMenuBtn" style="border-color:var(--orange); color:#fff; font-weight:800; background:rgba(255,94,26,0.18); padding:3px 8px; border-radius:3px;">⚙️ MENU / SETUP</button>
   <span class="brand">LPD · COCKPIT v2.1 · 3D</span>
   <span id="midi"><span class="lamp" id="lamp"></span><span id="midiTxt">MIDI: starting…</span><button id="midiBtn" title="Ask again for MIDI access">Connect</button></span>
   <label>Mode <select id="gameMode"><option value="normal" selected>Normal (∞ Ammo)</option><option value="hard">Hard (Reload · 24)</option></select></label>
@@ -450,21 +453,7 @@ function midiNote(msg){
   console.log('[midi]',t,msg);
 }
 function midiStatus(cls,txt){ if(txt!==midiTxt.textContent) midiNote(txt); lamp.className='lamp '+cls; midiTxt.textContent=txt; }
-// Inside Launchpad Drummer the page sits in a sandboxed frame where Web MIDI is blocked, and the app already
-// owns the Launchpad: it relays pad/button events in as MIDI-shaped messages and takes the LEDs back out.
-const HOST=window.parent!==window; let hostState='disconnected';
-function hostStatus(state){
-  hostState=state;
-  if(state==='connected'){ LP.last.clear(); midiStatus('on','MIDI: Launchpad MK2 via Launchpad Drummer'); }
-  else if(state==='busy') midiStatus('warn','MIDI: Launchpad port busy (close other MIDI apps)');
-  else midiStatus('','MIDI: no Launchpad MK2 (mouse + keys work)');
-}
-if(HOST) window.addEventListener('message',e=>{
-  const m=e.data; if(e.source!==window.parent||!m) return;
-  if(m.lpd==='midi'&&Array.isArray(m.data)) onMidi({data:m.data}); else if(m.lpd==='status') hostStatus(m.state);
-});
 function connectMidi(){
-  if(HOST){ hostStatus(hostState); return; }
   if(!navigator.requestMIDIAccess){ midiStatus('','MIDI: not supported here (use Edge/Chrome)'); return; }
   if(!LP.access) midiStatus('warn','MIDI: waiting for permission…');
   const slow=setTimeout(()=>{ if(!LP.access) midiStatus('warn','MIDI: still waiting (allow the prompt; another tab or app may hold the Launchpad)'); },3000);
@@ -502,10 +491,7 @@ setInterval(()=>{ if(LP.access&&!(LP.input&&LP.output&&LP.input.connection==='op
 function onMidi(e){ const [st,d1,d2]=e.data; const type=st&0xF0;
   if(type===0x90||type===0x80){ const on=type===0x90&&d2>0; const c=d1%10, r=Math.floor(d1/10); if(c>=1&&c<=9&&r>=1&&r<=8) on?padDown(c,r):padUp(c,r); }
   else if(type===0xB0){ const c=d1-103; if(c>=1&&c<=8){ d2>0 ? padDown(c,9) : padUp(c,9); } } }
-function sendLeds(frame){
-  if(HOST){ const ch=[]; for(const [note,rgb] of frame){ const p=LP.last.get(note); if(!p||p[0]!==rgb[0]||p[1]!==rgb[1]||p[2]!==rgb[2]){ ch.push([note,rgb[0],rgb[1],rgb[2]]); LP.last.set(note,rgb); } }
-    if(ch.length) window.parent.postMessage({lpd:'leds',leds:ch},'*'); return; }
-  if(!LP.output) return; const ch=[]; for(const [note,rgb] of frame){ const p=LP.last.get(note); if(!p||p[0]!==rgb[0]||p[1]!==rgb[1]||p[2]!==rgb[2]){ ch.push(note,rgb[0],rgb[1],rgb[2]); LP.last.set(note,rgb); } }
+function sendLeds(frame){ if(!LP.output) return; const ch=[]; for(const [note,rgb] of frame){ const p=LP.last.get(note); if(!p||p[0]!==rgb[0]||p[1]!==rgb[1]||p[2]!==rgb[2]){ ch.push(note,rgb[0],rgb[1],rgb[2]); LP.last.set(note,rgb); } }
   for(let i=0;i<ch.length;i+=160){ try{ LP.output.send([0xF0,0x00,0x20,0x29,0x02,0x18,0x0B,...ch.slice(i,i+160),0xF7]); }catch(e){} } }
 document.getElementById('midiBtn').addEventListener('click',connectMidi); connectMidi();
 
@@ -2406,7 +2392,7 @@ function drawTitle() {
     'EVADE AN ASTEROID: PRESS ITS CELL, OR ROLL ON THE YOKE (D1 / E1).',
     'REPAIR SHIP MODULES: COMMS · VENT · BREAKER · COOLANT · FUSE · PATCH CABLES.',
     hard ? 'SIDE RACK: SHIELD · RELOAD A/B (' + HARD_MAX_AMMO + ') · POWER (WPN/SHD/ENG) · DRONE · CHARGE.' : 'SIDE RACK: SHIELD · GUN A/B (∞ AMMO) · POWER (WPN/SHD/ENG) · DRONE · CHARGE.',
-    'KEYS: M SWITCH MODE · P PAUSE · ESC TITLE · SHIFT SHIELD · ARROWS ROLL'
+    'KEYS: M SWITCH MODE · P PAUSE · ESC MENU · SHIFT SHIELD · ARROWS ROLL'
   ];
   lines.forEach((l, i) => ptext(ox, l, W / 2, 78 + i * 14, i === 0 ? P.yellow : P.cream, 'center'));
   if (Math.floor(G.time * 2) % 2) ptext(ox, 'PRESS ANY PAD TO START', W / 2, 178, P.yellow, 'center', 2, INK);
@@ -2568,6 +2554,130 @@ Object.assign(window, {
   __frame: frame, __takeHit: takeHit, __renderer: renderer
 });
 
+// Initialize LaunchBand Universal Menu
+window.gameMenu = new LaunchBandMenu({
+  gameId: 'cockpit',
+  gameTitle: 'Cockpit 3D: Space Combat',
+  gameSubtitle: 'Modular Equipment Dashboard & Starfighter Dogfight // Launchpad MK2',
+  requiredDevices: [
+    { id: 'lp', name: 'Novation Launchpad MK2', match: /launchpad/i, required: true }
+  ],
+  parameters: [
+    {
+      id: 'gameMode',
+      label: 'Flight & Munition Mode',
+      type: 'select',
+      default: document.getElementById('gameMode').value || 'normal',
+      options: [
+        { value: 'normal', label: 'Normal (Infinite Laser Ammunition)' },
+        { value: 'hard', label: 'Hard (24 Shots · Tactical Ammo Reload)' }
+      ]
+    },
+    {
+      id: 'aids',
+      label: 'Tactical HUD & Pad Aids',
+      type: 'select',
+      default: document.getElementById('aids').value || 'medium',
+      options: [
+        { value: 'full', label: 'Full Aids (Grid + Coordinates + Mini Pad Mirror)' },
+        { value: 'medium', label: 'Medium Aids (System Labels + Status Legends)' },
+        { value: 'low', label: 'Low Aids (Hardware Pilot Mastery)' }
+      ]
+    },
+    {
+      id: 'line',
+      label: 'Ligne-Claire Outline Width',
+      type: 'select',
+      default: document.getElementById('line').value || '1',
+      options: [
+        { value: '0', label: 'Off (No Inked Edges)' },
+        { value: '0.7', label: 'Thin (Subtle Precision Line)' },
+        { value: '1', label: 'Clean (Default Architectural Line)' },
+        { value: '1.5', label: 'Bold (Heavy Graphic Novel Outline)' }
+      ]
+    },
+    {
+      id: 'crush',
+      label: 'Dither Crunch & Bit-Depth',
+      type: 'select',
+      default: document.getElementById('crush').value || '0',
+      options: [
+        { value: '0', label: 'Off (Smooth Pastel Shading)' },
+        { value: '6', label: '6-bit Bayer Dither' },
+        { value: '5', label: '5-bit Bayer Dither' },
+        { value: '4', label: '4-bit Retro Pixel Crunch' }
+      ]
+    },
+    {
+      id: 'crt',
+      label: 'Canopy CRT Phosphor Shader',
+      type: 'select',
+      default: document.getElementById('crt').value || 'off',
+      options: [
+        { value: 'off', label: 'Off (Clean Modern Glass)' },
+        { value: 'subtle', label: 'Subtle Scanlines' },
+        { value: 'on', label: 'On (Full Cathode Scanlines + Bloom)' }
+      ]
+    },
+    {
+      id: 'snd',
+      label: 'Acoustic Sound Profile',
+      type: 'select',
+      default: document.getElementById('snd').value || 'sfx',
+      options: [
+        { value: 'sfx', label: 'SFX Audio (Tactical Voice & Impact SFX)' },
+        { value: 'synth', label: 'Retro WebAudio Synth Beeps' },
+        { value: 'off', label: 'Mute Audio' }
+      ]
+    }
+  ],
+  keybindings: [
+    { key: 'Click Pad', desc: 'Shoot target enemy in canopy / Repair damaged module' },
+    { key: 'Hold Pad', desc: 'Hold jammed vent louvres or turbine valves' },
+    { key: 'Shift + Click', desc: 'Raise energy deflection shields (S8)' },
+    { key: '1 - 8 / Q - I', desc: 'Keyboard mapping for Launchpad grid matrix' },
+    { key: 'P', desc: 'Pause / Resume space dogfight' },
+    { key: 'Esc / M', desc: 'Open Mission Menu & Hardware Controller Setup' }
+  ],
+  onStart: (settings, mode) => {
+    document.getElementById('gameMode').value = settings.gameMode;
+    document.getElementById('aids').value = settings.aids;
+    document.getElementById('line').value = settings.line;
+    document.getElementById('crush').value = settings.crush;
+    document.getElementById('crt').value = settings.crt;
+    document.getElementById('snd').value = settings.snd;
+    Snd.setMode(settings.snd);
+    startGame();
+  },
+  onResume: () => {
+    // If paused, resume
+    G.paused = false;
+  },
+  onPause: () => {
+    G.paused = true;
+  },
+  onRestart: (settings) => {
+    document.getElementById('gameMode').value = settings.gameMode;
+    document.getElementById('aids').value = settings.aids;
+    document.getElementById('line').value = settings.line;
+    document.getElementById('crush').value = settings.crush;
+    document.getElementById('crt').value = settings.crt;
+    document.getElementById('snd').value = settings.snd;
+    Snd.setMode(settings.snd);
+    startGame();
+  },
+  onParameterChange: (key, val) => {
+    const el = document.getElementById(key);
+    if (el) {
+      el.value = val;
+      el.dispatchEvent(new Event('change'));
+    }
+    if (key === 'snd') Snd.setMode(val);
+  }
+});
+
+const openCockpitMenuBtn = document.getElementById('openMenuBtn');
+if (openCockpitMenuBtn) openCockpitMenuBtn.onclick = () => window.gameMenu.open();
 </script>
 </body>
 </html>

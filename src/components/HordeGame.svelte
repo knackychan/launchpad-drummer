@@ -7,8 +7,27 @@
   import { createRenderer, type HordeRenderer } from '../lib/hordeRender.ts';
   import { createHordeAudio } from '../lib/hordeAudio.ts';
   import type { Rgb } from '../lib/led.ts';
+  import type { NoticeInputs } from '../lib/notices.ts';
 
-  let { onframe }: { onframe: (frame: Rgb[]) => void } = $props();
+  let { onframe, launchpad = 'disconnected' }: { onframe: (frame: Rgb[]) => void; launchpad?: NoticeInputs['launchpad'] } = $props();
+  let inputMode = $state<'hardware' | 'keyboard'>(
+    typeof localStorage !== 'undefined' && localStorage.getItem('lbm_input_mode_horde') === 'keyboard' ? 'keyboard' : 'hardware'
+  );
+  function setInputMode(m: 'hardware' | 'keyboard') {
+    inputMode = m;
+    try { localStorage.setItem('lbm_input_mode_horde', m); } catch (e) {}
+    if (m === 'keyboard' && ui.layout === 'pad') {
+      ui.layout = 'keys';
+      changeLayout();
+    } else if (m === 'hardware' && ui.layout === 'keys') {
+      ui.layout = 'pad';
+      changeLayout();
+    }
+  }
+  const canStart = () => inputMode === 'keyboard' || launchpad === 'connected';
+  function tryStart(): boolean {
+    return canStart();
+  }
   let canvas: HTMLCanvasElement, ambient: HTMLCanvasElement, mirrorCv: HTMLCanvasElement;
   let stageWidth = $state(640), stageHeight = $state(360);
   let VW = $state(640);
@@ -68,7 +87,11 @@
   }
   function pointerDown(event: PointerEvent) {
     audio.init();
-    if (game.mode !== 'play') { hitCell(game, 1, 1); return; }
+    if (game.mode !== 'play') {
+      if (!tryStart()) return;
+      hitCell(game, 1, 1);
+      return;
+    }
     const { x, y } = canvasPoint(event);
     const cell = cellAt(layout, x, y);
     if (cell) {
@@ -97,14 +120,15 @@
     if (event.code === 'KeyP' && game.layout === 'pad') { togglePause(game); return; }
     if (event.code === 'Backquote') { togglePause(game); return; }
     if (event.code === 'Space' || event.code === 'Enter') {
-      if (game.mode === 'play') freezeEnemies(game); else hitCell(game, 1, 1);
+      if (game.mode === 'play') freezeEnemies(game);
+      else if (tryStart()) hitCell(game, 1, 1);
       return;
     }
     if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') { if (game.mode === 'play' && !game.armed) armBomb(game); return; }
     const key = CODE_TO_CELL[event.code];
     if (!key) return;
     if (game.layout === 'keys') { event.preventDefault(); hitCell(game, key.column, key.row); }
-    else if (game.mode !== 'play') hitCell(game, 1, 1);
+    else if (game.mode !== 'play') { if (tryStart()) hitCell(game, 1, 1); }
   }
   function keyup(event: KeyboardEvent) {
     if ((event.code === 'ShiftLeft' || event.code === 'ShiftRight') && game.armed && game.layout === 'keys') disarmBomb(game);
@@ -184,6 +208,7 @@
       </div>
 
       <div class="settings-fields">
+        <label>INPUT <select value={inputMode} onchange={(e) => setInputMode(e.currentTarget.value as 'hardware' | 'keyboard')}><option value="hardware">🎛️ Launchpad</option><option value="keyboard">⌨️ Keys / Mouse</option></select></label>
         <label>ARENA <select bind:value={ui.layout} onchange={changeLayout}><option value="pad">Launchpad 8×8</option><option value="keys">Keyboard 10×4</option></select></label>
         <label>MODE <select bind:value={ui.playMode} onchange={changeMode}><option value="free">Free</option><option value="beat">Beat</option></select></label>
         <label>SPEED <select bind:value={ui.speed}><option value="0.8">Easy</option><option value="1">Normal</option><option value="1.25">Hard</option></select></label>
@@ -210,6 +235,18 @@
     </aside>
 
     <div class="stage" bind:clientWidth={stageWidth} bind:clientHeight={stageHeight}>
+      {#if summary.mode !== 'play' && inputMode === 'hardware' && launchpad !== 'connected'}
+        <div class="horde-hw-warning" role="alert">
+          <div class="hw-warn-title">⚠️ HARDWARE CONTROLLER REQUIRED</div>
+          <div class="hw-warn-desc">
+            <b>Novation Launchpad</b> is not detected on USB.
+            Connect controller, or switch to <b>Keyboard & Mouse Mode</b> to play immediately:
+          </div>
+          <button class="hw-warn-btn" onclick={() => setInputMode('keyboard')}>
+            ⌨️ Play with Keyboard & Mouse
+          </button>
+        </div>
+      {/if}
       <canvas class="ambient" bind:this={ambient} width="64" height="36" aria-hidden="true"></canvas>
       <div class="wrap" class:curved={ui.crt === 'curved'} class:nocrt={ui.crt === 'off'}>
         <canvas bind:this={canvas} width={VW} height={H} aria-label="Horde game: hit the pads beneath the approaching enemies"
@@ -220,6 +257,11 @@
   </div>
 
   <div class="game-controls lcd" aria-label="Horde controls">
+    {#if summary.mode !== 'play'}
+      <button class="start-btn" onclick={() => { if (tryStart()) hitCell(game, 1, 1); }} disabled={!canStart()}>
+        {canStart() ? (inputMode === 'hardware' ? '🚀 START (PAD READY)' : '🎮 START (KEYBOARD)') : '🔒 CONTROLLER REQUIRED'}
+      </button>
+    {/if}
     <button onclick={() => togglePause(game)} disabled={summary.mode !== 'play'} aria-pressed={summary.paused}>{summary.paused ? 'RESUME' : 'PAUSE'}</button>
     <button onclick={() => armBomb(game)} disabled={summary.mode !== 'play'} aria-label="Arm bomb" class:active={summary.armed}>BOMB {summary.bombs}{summary.armed ? ' ARMED' : ''}</button>
     <button onclick={() => freezeEnemies(game)} disabled={summary.mode !== 'play' || summary.charge < 100} aria-label="Freeze enemies">FREEZE {summary.charge}%</button>
@@ -458,5 +500,58 @@
   }
   .game-controls button.active, .game-controls button:focus-visible { color: var(--silk); border-color: var(--silk); }
   .game-controls button:disabled { opacity: .5; cursor: default; }
+  .game-controls button.start-btn {
+    background: #22c55e;
+    color: #041007;
+    font-weight: 800;
+    border-color: #4ade80;
+    padding: 3px 12px;
+  }
+  .game-controls button.start-btn:disabled {
+    background: #1e293b;
+    color: #64748b;
+    border-color: #334155;
+  }
+  .horde-hw-warning {
+    position: absolute;
+    top: 14px;
+    left: 20px;
+    right: 20px;
+    z-index: 50;
+    background: rgba(15, 23, 42, 0.95);
+    border: 2px solid #f59e0b;
+    border-radius: 6px;
+    padding: 12px 16px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.8), 0 0 15px rgba(245, 158, 11, 0.25);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    color: #e2e8f0;
+    font-size: 11px;
+  }
+  .hw-warn-title {
+    color: #fef08a;
+    font-weight: 800;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+  }
+  .hw-warn-desc {
+    color: #cbd5e1;
+    line-height: 1.4;
+  }
+  .hw-warn-btn {
+    align-self: flex-start;
+    margin-top: 4px;
+    background: #38bdf8;
+    color: #07090e;
+    font-weight: 800;
+    border: none;
+    padding: 5px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .hw-warn-btn:hover {
+    background: #7dd3fc;
+  }
   .hint { margin-left: auto; opacity: .75; font-size: 10px; }
 </style>

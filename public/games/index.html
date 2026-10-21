@@ -1,0 +1,683 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LaunchBand // Arcade Hub & Hardware Launcher</title>
+<link rel="stylesheet" href="./shared/launchband-menu.css">
+<style>
+  :root {
+    --bg-dark: #07090e;
+    --panel-bg: #0d121c;
+    --panel-sub: #131a27;
+    --border: #1f2a3e;
+    --border-highlight: #2f3e58;
+    --text-main: #e2e8f0;
+    --text-dim: #7987a0;
+    --text-bright: #ffffff;
+    --orange: #ff5e1a;
+    --orange-glow: rgba(255, 94, 26, 0.45);
+    --cyan: #38bdf8;
+    --cyan-glow: rgba(56, 189, 248, 0.4);
+    --green: #22c55e;
+    --green-glow: rgba(34, 197, 94, 0.45);
+    --amber: #f59e0b;
+    --red: #ef4444;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(circle at 50% 20%, #111a2d 0%, #07090e 75%);
+    color: var(--text-main);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Share Tech Mono", Consolas, monospace;
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+    overflow-x: hidden;
+  }
+
+  /* Scanlines CRT effect overlay */
+  .hub-crt {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(to bottom, rgba(0,0,0,0) 0 2px, rgba(0,0,0,0.12) 2px 3px);
+    z-index: 900;
+  }
+
+  /* Top Command Masthead */
+  .hub-masthead {
+    background: rgba(13, 18, 28, 0.95);
+    border-bottom: 2px solid var(--border-highlight);
+    backdrop-filter: blur(10px);
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    flex-wrap: wrap;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.7);
+  }
+
+  .hub-brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .hub-logo {
+    background: var(--orange);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 900;
+    letter-spacing: 0.14em;
+    padding: 4px 9px;
+    border-radius: 4px;
+    box-shadow: 0 2px 10px var(--orange-glow);
+  }
+
+  .hub-title {
+    font-size: 19px;
+    font-weight: 900;
+    letter-spacing: 0.1em;
+    color: #fff;
+    text-transform: uppercase;
+  }
+
+  .hub-sub {
+    font-size: 11px;
+    color: var(--text-dim);
+    letter-spacing: 0.05em;
+  }
+
+  /* Global Hardware Status Pill */
+  .hub-status-bar {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    background: var(--panel-sub);
+    border: 1px solid var(--border);
+    padding: 6px 14px;
+    border-radius: 30px;
+  }
+
+  .hub-hw-pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+
+  .hub-lamp {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #475569;
+    box-shadow: 0 0 0 1px #000 inset;
+  }
+  .hub-lamp.online { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .hub-lamp.warn { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+
+  /* Mode switcher in Masthead */
+  .hub-mode-select {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .hub-mode-tab {
+    background: #090e17;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .hub-mode-tab:hover { color: #fff; border-color: var(--border-highlight); }
+  .hub-mode-tab.active.hw {
+    background: rgba(255, 94, 26, 0.15);
+    border-color: var(--orange);
+    color: #fff;
+    box-shadow: 0 0 12px var(--orange-glow);
+  }
+  .hub-mode-tab.active.kb {
+    background: rgba(56, 189, 248, 0.15);
+    border-color: var(--cyan);
+    color: #fff;
+    box-shadow: 0 0 12px var(--cyan-glow);
+  }
+
+  /* Main Container */
+  .hub-main {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 30px 20px 60px;
+    width: 100%;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+
+  /* Global Warning Banner */
+  .hub-alert-banner {
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.15) 0%, rgba(239, 68, 68, 0.12) 100%);
+    border: 2px solid var(--amber);
+    border-radius: 8px;
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  }
+  .hub-alert-left {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .hub-alert-icon { font-size: 28px; line-height: 1; }
+  .hub-alert-title { font-size: 13.5px; font-weight: 800; color: #fef08a; text-transform: uppercase; }
+  .hub-alert-sub { font-size: 12px; color: #cbd5e1; margin-top: 2px; }
+
+  /* Games Grid */
+  .hub-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+    gap: 20px;
+  }
+
+  /* Game Card */
+  .game-card {
+    background: var(--panel-bg);
+    border: 2px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+    position: relative;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+  }
+
+  .game-card:hover {
+    border-color: var(--border-highlight);
+    transform: translateY(-2px);
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.8), 0 0 20px rgba(56, 189, 248, 0.08);
+  }
+
+  .game-card-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .game-card-badge {
+    font-size: 9px;
+    font-weight: 900;
+    letter-spacing: 0.12em;
+    padding: 2px 7px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    background: #1e293b;
+    border: 1px solid var(--border-highlight);
+    color: var(--cyan);
+  }
+
+  .game-card-title {
+    font-size: 18px;
+    font-weight: 900;
+    letter-spacing: 0.06em;
+    color: #fff;
+    text-transform: uppercase;
+  }
+
+  .game-card-sub {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 2px;
+  }
+
+  .game-card-desc {
+    font-size: 12px;
+    color: #94a3b8;
+    line-height: 1.5;
+    flex: 1;
+  }
+
+  .game-card-hw {
+    background: #090e17;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 11px;
+  }
+
+  .game-card-hw-label {
+    font-size: 9.5px;
+    font-weight: 800;
+    letter-spacing: 0.1em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+  }
+
+  .game-card-hw-val {
+    color: #f1f5f9;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .game-card-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 4px;
+  }
+
+  .game-launch-btn {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    background: var(--green);
+    color: #041007;
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 10px 18px;
+    border-radius: 4px;
+    border: none;
+    cursor: pointer;
+    text-decoration: none;
+    transition: all 0.18s ease;
+    box-shadow: 0 2px 14px var(--green-glow);
+  }
+
+  .game-launch-btn:hover:not(.locked) {
+    background: #4ade80;
+    box-shadow: 0 4px 22px rgba(34, 197, 94, 0.6);
+    transform: translateY(-1px);
+  }
+
+  .game-launch-btn.kb-mode {
+    background: var(--cyan);
+    color: #04111d;
+    box-shadow: 0 2px 14px var(--cyan-glow);
+  }
+
+  .game-launch-btn.kb-mode:hover:not(.locked) {
+    background: #60a5fa;
+    box-shadow: 0 4px 22px rgba(56, 189, 248, 0.6);
+  }
+
+  .game-launch-btn.locked {
+    background: #232d3d;
+    color: #64748b;
+    box-shadow: none;
+    cursor: not-allowed;
+  }
+
+  .game-cfg-btn {
+    background: #141c2c;
+    border: 1px solid var(--border-highlight);
+    color: var(--text-main);
+    padding: 10px 14px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .game-cfg-btn:hover {
+    border-color: var(--cyan);
+    color: #fff;
+    background: #1c273e;
+  }
+</style>
+</head>
+<body>
+<div class="hub-crt"></div>
+
+<!-- Masthead -->
+<header class="hub-masthead">
+  <div class="hub-brand">
+    <span class="hub-logo">LAUNCHBAND</span>
+    <div>
+      <div class="hub-title">MISSION CONTROL & ARCADIA</div>
+      <div class="hub-sub">Universal Hardware Game Hub // Novation Launchpad MK2 & Launch Control XL</div>
+    </div>
+  </div>
+
+  <div class="hub-status-bar">
+    <div class="hub-hw-pill">
+      <span class="hub-lamp" id="hub-lamp"></span>
+      <span id="hub-status-txt">SCANNING HARDWARE...</span>
+    </div>
+    <button class="lbm-pill-btn" id="hub-scan-btn">🔄 Scan</button>
+    <button class="lbm-pill-btn" id="hub-led-btn">💡 Test LEDs</button>
+  </div>
+
+  <div class="hub-mode-select">
+    <button class="hub-mode-tab hw active" id="tab-hw" title="Requires connected Novation hardware to launch">
+      🎛️ Hardware Mode
+    </button>
+    <button class="hub-mode-tab kb" id="tab-kb" title="Bypasses hardware device check">
+      ⌨️ Keyboard / Mouse
+    </button>
+  </div>
+</header>
+
+<!-- Main Body -->
+<main class="hub-main">
+
+  <!-- Lockout Notice (Hardware mode without connected devices) -->
+  <div class="hub-alert-banner" id="hub-lock-banner" style="display:none;">
+    <div class="hub-alert-left">
+      <div class="hub-alert-icon">⚠️</div>
+      <div>
+        <div class="hub-alert-title">Hardware Controller Required To Launch Games</div>
+        <div class="hub-alert-sub">
+          You are currently in <b>Hardware Controller Mode</b>, but no Novation Launchpad or Launch Control XL was detected on USB.
+          Plug in your controller, or switch to <b>Keyboard & Mouse Mode</b> to play without hardware.
+        </div>
+      </div>
+    </div>
+    <button class="lbm-pill-btn" id="hub-switch-kb-btn" style="padding:8px 16px; font-size:11px; background:var(--cyan); color:#07090e; border:none; font-weight:800;">
+      ⌨️ Play With Keyboard / Mouse
+    </button>
+  </div>
+
+  <!-- Games Grid -->
+  <div class="hub-grid">
+
+    <!-- BROADSIDE (HIDDEN: INCOMPLETE PROTOTYPE) -->
+    <div class="game-card" data-game="broadside" data-devices="lp,lcxl" style="display:none;" aria-hidden="true">
+      <div class="game-card-top">
+        <div>
+          <div class="game-card-title">⚓ Broadside: Naval Warfare</div>
+          <div class="game-card-sub">Asymmetric 2-Player Co-op Combat</div>
+        </div>
+        <span class="game-card-badge">CO-OP SIM</span>
+      </div>
+      <div class="game-card-desc">
+        Command a 3-warship flotilla with physical hardware! Player 1 commands Fleet Gunnery on the <b>Launch Control XL</b> (8 turret channels, AP/HE munitions, elevation & powder). Player 2 commands Damage Control, Fleet Helm & Tactical Point Defense on the <b>Launchpad MK2</b> (8×8 ship blueprint, fire parties, pumps, flak bursts).
+      </div>
+      <div class="game-card-hw">
+        <span class="game-card-hw-label">CONTROLLERS REQUIRED (HARDWARE MODE)</span>
+        <span class="game-card-hw-val">🎛️ Novation Launch Control XL + Launchpad MK2</span>
+      </div>
+      <div class="game-card-actions">
+        <a href="./broadside/index.html" class="game-launch-btn" data-launch="broadside">
+          🚀 LAUNCH BROADSIDE
+        </a>
+      </div>
+    </div>
+
+    <!-- HORDE -->
+    <div class="game-card" data-game="horde" data-devices="lp">
+      <div class="game-card-top">
+        <div>
+          <div class="game-card-title">🦀 Horde: Hold the Beach</div>
+          <div class="game-card-sub">Rhythm Arcade Beach Defense</div>
+        </div>
+        <span class="game-card-badge">ACTION / BEAT</span>
+      </div>
+      <div class="game-card-desc">
+        Monsters wade in from the sea across an 8×8 pad matrix or 10×4 keyboard arena! Tap lit enemies on beat to build massive combo multipliers, drop 3×3 bomb blasts, charge cryogenic freeze pulses, and survive relentless Crab King boss waves.
+      </div>
+      <div class="game-card-hw">
+        <span class="game-card-hw-label">CONTROLLER REQUIRED (HARDWARE MODE)</span>
+        <span class="game-card-hw-val">🎛️ Novation Launchpad MK2 (or 10×4 Keyboard)</span>
+      </div>
+      <div class="game-card-actions">
+        <a href="./horde/index.html" class="game-launch-btn" data-launch="horde">
+          🚀 HOLD THE BEACH
+        </a>
+      </div>
+    </div>
+
+    <!-- COCKPIT 3D -->
+    <div class="game-card" data-game="cockpit" data-devices="lp">
+      <div class="game-card-top">
+        <div>
+          <div class="game-card-title">🚀 Cockpit 3D: Space Sim</div>
+          <div class="game-card-sub">Pastel Modular Starfighter Flight Deck</div>
+        </div>
+        <span class="game-card-badge">3D SPACE SIM</span>
+      </div>
+      <div class="game-card-desc">
+        Piloting from an X-Wing style widescreen canopy, the 9×9 Launchpad matrix maps 1:1 to ship equipment: twin primary cannons, tactical radar core, dual-pole breaker unit, loose umbilical wire plugs, coolant handwheels, and reactor fuse canisters.
+      </div>
+      <div class="game-card-hw">
+        <span class="game-card-hw-label">CONTROLLER REQUIRED (HARDWARE MODE)</span>
+        <span class="game-card-hw-val">🎛️ Novation Launchpad MK2 (9×9 Matrix)</span>
+      </div>
+      <div class="game-card-actions">
+        <a href="./cockpit/index.html" class="game-launch-btn" data-launch="cockpit">
+          🚀 LAUNCH COCKPIT
+        </a>
+      </div>
+    </div>
+
+    <!-- CHESS -->
+    <div class="game-card" data-game="chess" data-devices="lp">
+      <div class="game-card-top">
+        <div>
+          <div class="game-card-title">♟️ Launchpad Chess</div>
+          <div class="game-card-sub">Tactical 8×8 Board with RGB Piece Matrix</div>
+        </div>
+        <span class="game-card-badge">TACTICS / AI</span>
+      </div>
+      <div class="game-card-desc">
+        Play classical chess on illuminated pads! Features full move validation, AI opponent with selectable search depths, blitz turn clock, legal move glowing paths, check warnings, and promotion selectors directly on the Launchpad's pads.
+      </div>
+      <div class="game-card-hw">
+        <span class="game-card-hw-label">CONTROLLER REQUIRED (HARDWARE MODE)</span>
+        <span class="game-card-hw-val">🎛️ Novation Launchpad MK2 (8×8 Matrix)</span>
+      </div>
+      <div class="game-card-actions">
+        <a href="./chess/index.html" class="game-launch-btn" data-launch="chess">
+          🚀 PLAY CHESS
+        </a>
+      </div>
+    </div>
+
+    <!-- XIANGQI -->
+    <div class="game-card" data-game="xiangqi" data-devices="lp">
+      <div class="game-card-top">
+        <div>
+          <div class="game-card-title">🏯 Xiangqi: Chinese Chess</div>
+          <div class="game-card-sub">Imperial Battlefield Tactics</div>
+        </div>
+        <span class="game-card-badge">STRATEGY</span>
+      </div>
+      <div class="game-card-desc">
+        Classic Chinese Chess adapted for the hardware console. Navigate chariots, cannons that hop over pieces, palace guards, river crossings, and tactical checkmate patterns with high-contrast piece illumination.
+      </div>
+      <div class="game-card-hw">
+        <span class="game-card-hw-label">CONTROLLER REQUIRED (HARDWARE MODE)</span>
+        <span class="game-card-hw-val">🎛️ Novation Launchpad MK2 (Pads & Round Controls)</span>
+      </div>
+      <div class="game-card-actions">
+        <a href="./xiangqi/index.html" class="game-launch-btn" data-launch="xiangqi">
+          🚀 COMMENCE XIANGQI
+        </a>
+      </div>
+    </div>
+
+  </div>
+</main>
+
+<script src="./shared/launchband-menu.js"></script>
+<script>
+  let mode = localStorage.getItem('lbm_hub_mode') || 'hardware';
+  let midiAccess = null;
+  let lpConnected = false;
+  let lcxlConnected = false;
+
+  const lamp = document.getElementById('hub-lamp');
+  const statusTxt = document.getElementById('hub-status-txt');
+  const lockBanner = document.getElementById('hub-lock-banner');
+  const tabHw = document.getElementById('tab-hw');
+  const tabKb = document.getElementById('tab-kb');
+  const switchKbBtn = document.getElementById('hub-switch-kb-btn');
+  const scanBtn = document.getElementById('hub-scan-btn');
+  const ledBtn = document.getElementById('hub-led-btn');
+
+  function setMode(m) {
+    mode = m;
+    localStorage.setItem('lbm_hub_mode', m);
+    tabHw.classList.toggle('active', m === 'hardware');
+    tabKb.classList.toggle('active', m === 'keyboard');
+    updateUI();
+  }
+
+  tabHw.onclick = () => setMode('hardware');
+  tabKb.onclick = () => setMode('keyboard');
+  switchKbBtn.onclick = () => setMode('keyboard');
+
+  function initMIDI() {
+    if (!navigator.requestMIDIAccess) {
+      statusTxt.textContent = 'NO WEB MIDI SUPPORT';
+      updateUI();
+      return;
+    }
+    navigator.requestMIDIAccess({ sysex: true }).then(acc => {
+      midiAccess = acc;
+      acc.onstatechange = scanDevices;
+      scanDevices();
+    }, () => {
+      navigator.requestMIDIAccess({ sysex: false }).then(acc => {
+        midiAccess = acc;
+        acc.onstatechange = scanDevices;
+        scanDevices();
+      }, () => {
+        statusTxt.textContent = 'MIDI PERMISSION REFUSED';
+        updateUI();
+      });
+    });
+  }
+
+  function scanDevices() {
+    if (!midiAccess) return;
+    lpConnected = false;
+    lcxlConnected = false;
+
+    for (const inp of midiAccess.inputs.values()) {
+      const n = (inp.name || '').toLowerCase();
+      if (n.includes('launchpad') && inp.state === 'connected') lpConnected = true;
+      if (n.includes('launch control xl') && inp.state === 'connected') lcxlConnected = true;
+    }
+    updateUI();
+  }
+
+  function updateUI() {
+    const isHw = mode === 'hardware';
+    const anyHw = lpConnected || lcxlConnected;
+
+    if (isHw) {
+      if (lpConnected && lcxlConnected) {
+        lamp.className = 'hub-lamp online';
+        statusTxt.textContent = 'LAUNCHPAD + LCXL CONNECTED';
+      } else if (lpConnected) {
+        lamp.className = 'hub-lamp online';
+        statusTxt.textContent = 'LAUNCHPAD MK2 CONNECTED';
+      } else if (lcxlConnected) {
+        lamp.className = 'hub-lamp online';
+        statusTxt.textContent = 'LAUNCH CONTROL XL CONNECTED';
+      } else {
+        lamp.className = 'hub-lamp warn';
+        statusTxt.textContent = 'NO HARDWARE DETECTED';
+      }
+      lockBanner.style.display = (!anyHw) ? 'flex' : 'none';
+    } else {
+      lamp.className = 'hub-lamp online';
+      statusTxt.textContent = 'KEYBOARD & MOUSE MODE (CHECK BYPASSED)';
+      lockBanner.style.display = 'none';
+    }
+
+    // Update launch buttons
+    document.querySelectorAll('.game-card').forEach(card => {
+      const req = card.getAttribute('data-devices').split(',');
+      const btn = card.querySelector('.game-launch-btn');
+      let ready = false;
+
+      if (!isHw) {
+        ready = true;
+      } else {
+        // Hardware mode check
+        if (req.includes('lcxl') && req.includes('lp')) {
+          ready = lpConnected || lcxlConnected; // If either is present in hardware mode
+        } else if (req.includes('lp')) {
+          ready = lpConnected;
+        } else {
+          ready = anyHw;
+        }
+      }
+
+      if (ready) {
+        btn.classList.remove('locked');
+        btn.classList.toggle('kb-mode', !isHw);
+        btn.innerHTML = !isHw ? '🎮 LAUNCH (KEYBOARD / MOUSE)' : '🚀 LAUNCH WITH HARDWARE';
+        btn.removeAttribute('aria-disabled');
+        btn.onclick = null;
+      } else {
+        btn.classList.add('locked');
+        btn.classList.remove('kb-mode');
+        btn.innerHTML = '🔒 CONTROLLER REQUIRED';
+        btn.setAttribute('aria-disabled', 'true');
+        btn.onclick = (e) => {
+          e.preventDefault();
+          alert('Hardware Controller Required! Please plug in your Novation controller or switch to Keyboard / Mouse mode in the top right.');
+        };
+      }
+    });
+  }
+
+  scanBtn.onclick = () => {
+    scanDevices();
+  };
+
+  ledBtn.onclick = () => {
+    if (!midiAccess) return;
+    for (const out of midiAccess.outputs.values()) {
+      const n = (out.name || '').toLowerCase();
+      if (n.includes('launchpad')) {
+        // Rainbow SysEx test
+        const batch = [];
+        for (let note = 11; note <= 88; note++) batch.push(note, 63, 20, 40);
+        try { out.send([0xF0, 0x00, 0x20, 0x29, 0x02, 0x18, 0x0B, ...batch, 0xF7]); } catch (e) {}
+        setTimeout(() => {
+          try { out.send([0xF0, 0x00, 0x20, 0x29, 0x02, 0x18, 0x0E, 0x00, 0xF7]); } catch (e) {}
+        }, 1200);
+      }
+    }
+  };
+
+  setMode(mode);
+  initMIDI();
+</script>
+</body>
+</html>

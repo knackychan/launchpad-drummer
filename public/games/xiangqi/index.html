@@ -8,7 +8,7 @@
   :root { --bg:#07080c; --panel:#11141c; --line:#2a3040; --text:#e6dcc3; --dim:#8a8f9c; --orange:#ff5b1f; --amber:#ffb21a; --cyan:#41c8ff; --green:#3ddc84; --red:#ff3b3b; }
   * { box-sizing:border-box; }
   html, body { margin:0; height:100%; background:var(--bg); color:var(--text); font-family:"Segoe UI", system-ui, sans-serif; overflow:hidden; }
-  #bar { height:44px; display:flex; align-items:center; gap:12px; padding:0 12px; background:var(--panel); border-bottom:1px solid var(--line); font-size:12px; letter-spacing:.04em; text-transform:uppercase; white-space:nowrap; overflow:hidden; }
+  #bar { height:44px; display:flex; align-items:center; gap:10px; padding:0 12px; background:var(--panel); border-bottom:1px solid var(--line); font-size:12px; letter-spacing:.04em; text-transform:uppercase; white-space:nowrap; overflow-x:auto; overflow-y:hidden; }
   #bar .brand { color:var(--orange); font-weight:700; letter-spacing:.12em; }
   #bar label { color:var(--dim); display:flex; align-items:center; gap:6px; }
   #bar select, #bar button { background:#1a1f2b; color:var(--text); border:1px solid var(--line); border-radius:3px; padding:3px 6px; font:inherit; text-transform:uppercase; }
@@ -35,10 +35,18 @@
   #keys { padding:8px 10px; border-top:1px solid var(--line); color:var(--dim); line-height:1.55; font-size:11px; }
   #keys b { color:var(--text); font-weight:600; }
 </style>
+<link rel="stylesheet" href="../shared/launchband-menu.css">
+<script src="../shared/launchband-menu.js"></script>
+<script src="xiangqi-rules.js"></script>
+<script src="xiangqi-ai.js"></script>
 </head>
 <body>
 <div id="bar">
+  <button id="openMenuBtn" style="border-color:var(--orange); color:#fff; font-weight:800; background:rgba(255,94,26,0.18); padding:3px 8px; border-radius:3px;">⚙️ MENU / SETUP</button>
   <span class="brand">LPD · XIANGQI 象棋</span>
+  <label>Mode <select id="modeSel"><option value="ai-b" selected>vs AI (Play Red)</option><option value="ai-r">vs AI (Play Black)</option><option value="pvp">2 Players</option><option value="ai-ai">AI vs AI</option></select></label>
+  <label>AI Level <select id="aiLevelSel"><option value="1">L1 Easy</option><option value="2">L2 Relaxed</option><option value="3" selected>L3 Standard</option><option value="4">L4 Hard</option><option value="5">L5 Strongest</option></select></label>
+  <span id="aiStatus" style="display:none; align-items:center; gap:6px; font-size:11px; color:#38bdf8; font-weight:700;"><span class="lamp on" style="background:#38bdf8; box-shadow:0 0 8px #38bdf8; display:inline-block; width:7px; height:7px; border-radius:50%;"></span><span id="aiStatusTxt">AI THINKING...</span></span>
   <span id="midi"><span class="lamp" id="lamp"></span><span id="midiTxt">MIDI: starting…</span><button id="midiBtn" title="Ask again for MIDI access">Connect</button></span>
   <label>Clock <select id="clockSel"><option value="0">Off</option><option value="180,2">3 + 2</option><option value="300,0">5 min</option><option value="600,0" selected>10 min</option><option value="900,10">15 + 10</option></select></label>
   <label>Pads <select id="padCol"><option value="piece" selected>Colour per piece</option><option value="team">Colour per side</option></select></label>
@@ -92,73 +100,12 @@ const sqName = i => FILES[fileOf(i)] + rankOf(i);
 const sqXY = i => [fileOf(i) - 4, rankOf(i) - 4.5];   // world units, red at the near side
 
 // ───────────────────────────── xiangqi rules ─────────────────────────────
-let NEXT_ID = 1;
-function initialState() {
-  const b = new Array(NSQ).fill(null), back = 'rneakaenr';
-  const put = (f, r, t, c) => b[r*NF+f] = { t, c, id:NEXT_ID++ };
-  for (let f = 0; f < 9; f++) { put(f, 0, back[f], 'r'); put(f, 9, back[f], 'b'); }
-  put(1, 2, 'c', 'r'); put(7, 2, 'c', 'r'); put(1, 7, 'c', 'b'); put(7, 7, 'c', 'b');
-  for (const f of [0,2,4,6,8]) { put(f, 3, 'p', 'r'); put(f, 6, 'p', 'b'); }
-  return { b, turn:'r', half:0, full:1 };
-}
-function at(s, f, r) { return (f<0||f>=NF||r<0||r>=NR) ? undefined : s.b[r*NF+f]; }
-const inPalace = (c, f, r) => f >= 3 && f <= 5 && (c === 'r' ? r <= 2 : r >= 7);
-const ownHalf = (c, r) => c === 'r' ? r <= 4 : r >= 5;
-const ORTH = [[1,0],[-1,0],[0,1],[0,-1]], DIAG = [[1,1],[1,-1],[-1,1],[-1,-1]];
-function pseudo(s, from) {
-  const p = s.b[from], out = [], f = fileOf(from), r = rankOf(from), c = p.c;
-  const add = (x, y) => { const q = at(s,x,y); if (q === undefined || (q && q.c === c)) return; out.push({ from, to:y*NF+x, piece:p, cap:q||null, capSq:y*NF+x }); };
-  switch (p.t) {
-    case 'k': for (const [dx,dy] of ORTH) if (inPalace(c, f+dx, r+dy)) add(f+dx, r+dy); break;
-    case 'a': for (const [dx,dy] of DIAG) if (inPalace(c, f+dx, r+dy)) add(f+dx, r+dy); break;
-    case 'e': for (const [dx,dy] of DIAG) if (at(s,f+dx,r+dy) === null && ownHalf(c, r+2*dy)) add(f+2*dx, r+2*dy); break;   // blocked at the "elephant eye", never crosses the river
-    case 'n': for (const [dx,dy] of ORTH) { if (at(s,f+dx,r+dy) !== null) continue;   // hobbled horse leg
-      if (dx) { add(f+2*dx, r+1); add(f+2*dx, r-1); } else { add(f+1, r+2*dy); add(f-1, r+2*dy); } } break;
-    case 'r': for (const [dx,dy] of ORTH) { let x = f+dx, y = r+dy; for (;;) { const q = at(s,x,y); if (q === undefined) break; if (q === null) { add(x,y); x += dx; y += dy; continue; } add(x,y); break; } } break;
-    case 'c': for (const [dx,dy] of ORTH) { let x = f+dx, y = r+dy, screen = false;
-      for (;;) { const q = at(s,x,y); if (q === undefined) break;
-        if (!screen) { if (q === null) add(x,y); else screen = true; }
-        else if (q) { if (q.c !== c) add(x,y); break; }
-        x += dx; y += dy; } } break;
-    case 'p': { const d = c === 'r' ? 1 : -1; add(f, r+d); if (!ownHalf(c, r)) { add(f+1, r); add(f-1, r); } break; }
-  }
-  return out;
-}
-function generalSq(s, c) { for (let i = 0; i < NSQ; i++) { const p = s.b[i]; if (p && p.t==='k' && p.c===c) return i; } return -1; }
-function generalsFace(s) {   // the "flying general" rule: the two generals may never see each other on an open file
-  const a = generalSq(s,'r'), b = generalSq(s,'b'); if (a < 0 || b < 0 || fileOf(a) !== fileOf(b)) return false;
-  for (let r = rankOf(a)+1; r < rankOf(b); r++) if (s.b[r*NF+fileOf(a)]) return false;
-  return true;
-}
-function attackers(s, sq, by) { const out = []; for (let i = 0; i < NSQ; i++) { const p = s.b[i]; if (p && p.c === by && pseudo(s, i).some(m => m.to === sq)) out.push(i); } return out; }
-const inCheck = (s, c) => attackers(s, generalSq(s,c), opp(c)).length > 0;
-function applyMove(s, m) {
-  const b = s.b.slice(); b[m.from] = null; b[m.to] = m.piece;
-  return { b, turn:opp(m.piece.c), half: m.cap ? 0 : s.half+1, full: s.full + (m.piece.c==='b'?1:0) };
-}
-function legalMoves(s, from = -1) {
-  const out = [];
-  for (let i = 0; i < NSQ; i++) {
-    if (from >= 0 && i !== from) continue;
-    const p = s.b[i]; if (!p || p.c !== s.turn) continue;
-    for (const m of pseudo(s, i)) { const ns = applyMove(s, m); if (!inCheck(ns, s.turn) && !generalsFace(ns)) out.push(m); }
-  }
-  return out;
-}
-function posKey(s) { let k = ''; for (const p of s.b) k += p ? (p.c==='r' ? p.t.toUpperCase() : p.t) : '.'; return k + s.turn; }
-function san(s, m) {   // simple coordinate notation: piece letter, from, to (x = capture), + check, # mate
-  let t = LETTER[m.piece.t] + sqName(m.from) + (m.cap ? 'x' : '-') + sqName(m.to);
-  const ns = applyMove(s, m);
-  if (inCheck(ns, ns.turn)) t += legalMoves(ns).length ? '+' : '#';
-  return t;
-}
-function noAttackers(s) { return !s.b.some(p => p && 'rncp'.includes(p.t)); }
+const { initialState, legalMoves, applyMove, inCheck, posKey, san, resetIds, drawReason, generalSq, attackers, generalsFace } = GameRules;
 function evaluate() {
   const s = G.s;
   if (!legalMoves(s).length) return { winner:opp(s.turn), reason: inCheck(s, s.turn) ? 'CHECKMATE' : 'NO LEGAL MOVE' };   // in xiangqi a stalemated side loses
-  const k = posKey(s); if (G.keys.filter(x => x === k).length >= 3) return { winner:null, reason:'THREEFOLD REPETITION' };
-  if (s.half >= 120) return { winner:null, reason:'60 MOVES WITHOUT CAPTURE' };
-  if (noAttackers(s)) return { winner:null, reason:'NO ATTACKING PIECES LEFT' };
+  const reason = drawReason(s, G.keys);
+  if (reason) return { winner:null, reason };
   return null;
 }
 
@@ -211,7 +158,95 @@ const DISC_R = .42, DISC_H = .25, TRAY_X = 5.5;
 
 // ───────────────────────────── game state ─────────────────────────────
 const G = { camX:0, camY:0 };
-const settings = { clock:[600,0], padCol:'piece', padBoard:true, coords:true };
+const settings = { clock:[600,0], padCol:'piece', padBoard:true, coords:true, mode:'ai-b', aiLevel:3 };
+
+let aiTimer = null;
+let currentSearchId = 0;
+let aiWorker = null;
+let aiWatchdog = null;
+
+function cancelAISearch() {
+  currentSearchId++;
+  clearTimeout(aiTimer); aiTimer = null;
+  clearTimeout(aiWatchdog); aiWatchdog = null;
+  if (aiWorker) { aiWorker.terminate(); aiWorker = null; }
+  updateAIStatus(false);
+}
+window.addEventListener('pagehide', cancelAISearch);
+
+function isAITurn() {
+  if (G.over) return false;
+  const mode = settings.mode;
+  if (mode === 'ai-b' && G.s.turn === 'b') return true;
+  if (mode === 'ai-r' && G.s.turn === 'r') return true;
+  if (mode === 'ai-ai') return true;
+  return false;
+}
+
+function updateAIStatus(thinking, text) {
+  G.aiThinking = thinking;
+  const el = document.getElementById('aiStatus');
+  const txt = document.getElementById('aiStatusTxt');
+  if (el) el.style.display = thinking ? 'inline-flex' : 'none';
+  if (txt && text) txt.textContent = text;
+}
+
+function checkTriggerAI() {
+  cancelAISearch();
+  if (!isAITurn()) {
+    updateAIStatus(false);
+    return;
+  }
+  const lvlNames = { 1:'L1 EASY', 2:'L2 RELAXED', 3:'L3 STANDARD', 4:'L4 HARD', 5:'L5 STRONGEST' };
+  updateAIStatus(true, `AI THINKING... [${lvlNames[settings.aiLevel] || 'L3'}]`);
+  const searchId = ++currentSearchId;
+  const delay = settings.mode === 'ai-ai' ? 450 : 250;
+  aiTimer = setTimeout(() => {
+    if (searchId !== currentSearchId || !isAITurn()) return;
+    executeAISearch(searchId);
+  }, delay);
+}
+
+function executeAISearch(searchId) {
+  if (searchId !== currentSearchId || !isAITurn()) return;
+  const fail = error => {
+    if (searchId !== currentSearchId) return;
+    console.error('AI worker error:', error);
+    cancelAISearch();
+    settings.mode = 'pvp';
+    document.getElementById('modeSel').value = 'pvp';
+    flashBanner('AI UNAVAILABLE', 'Human control enabled. Choose an AI mode to retry.', '#ff8a2a', 6);
+  };
+  let url;
+  try {
+    // Bundle already-loaded code: no imports/fetches inside the worker, including file:///.
+    url = URL.createObjectURL(new Blob([GameRules.workerSource, '\n', XiangqiAI.workerSource], { type:'text/javascript' }));
+    aiWorker = new Worker(url);
+    aiWorker.onerror = e => { e.preventDefault(); fail(e.message); };
+    aiWorker.onmessageerror = () => fail('Unreadable worker message');
+    aiWorker.onmessage = ({ data }) => {
+      if (data.id !== currentSearchId || searchId !== currentSearchId) return;
+      if (data.type === 'progress') updateAIStatus(true, `D${data.depth} · ${Math.round(data.nodes/1000)}k`);
+      else if (data.type === 'error') fail(data.message);
+      else if (data.type === 'result') {
+        aiWorker.terminate(); aiWorker = null;
+        clearTimeout(aiWatchdog); aiWatchdog = null;
+        handleAIResult(searchId, data.result);
+      }
+    };
+    aiWatchdog = setTimeout(() => fail('Worker startup/search timed out'), 10000);
+    aiWorker.postMessage({ type:'search', id:searchId, state:G.s, level:Number(settings.aiLevel)||3, historyKeys:G.keys });
+  } catch (e) { fail(e); }
+  finally { if (url) URL.revokeObjectURL(url); }
+}
+
+function handleAIResult(searchId, res) {
+  if (searchId !== currentSearchId || !isAITurn()) return;
+  updateAIStatus(false);
+  if (!res || !res.move || G.over) return;
+  const move = legalMoves(G.s).find(m => m.from === res.move.from && m.to === res.move.to && m.promo === res.move.promo);
+  if (move) doMove(move);
+}
 function resetScene() {
   Object.assign(G, {
     time:G.time||0, shake:0, flash:0, flashCol:'#fff', timeScale:1,
@@ -228,7 +263,8 @@ function resetScene() {
   ];
 }
 function newGame() {
-  NEXT_ID = 1;
+  cancelAISearch();
+  resetIds();
   resetScene();
   G.s = initialState(); G.history = []; G.moves = []; G.keys = [posKey(G.s)];
   G.sel = -1; G.legal = []; G.last = null; G.over = null; G.hover = -1; G.view = 0; G.viewAnim = 0;
@@ -243,7 +279,7 @@ function newGame() {
     vp.z = z0; vp.hidden = true; maxEnd = Math.max(maxEnd, delay + 0.5);
     tween(0.5, k => { vp.hidden = false; vp.z = z0 * (1 - k*k); vp.rot = (1-k) * Math.PI * 4; }, () => { vp.z = 0; vp.rot = 0; vp.squash = 1; puff(vp.x, vp.y, BOARD_Z, 0.22, 2); Snd.drop(); }, delay);
   }
-  tween(0.01, null, () => { G.busy = false; flashBanner('RED MOVES FIRST', '紅先', TEAM.r.css, 1.6); }, maxEnd);
+  tween(0.01, null, () => { G.busy = false; flashBanner('RED MOVES FIRST', '紅先', TEAM.r.css, 1.6); checkTriggerAI(); }, maxEnd);
   Snd.swoosh();
   renderMoves();
 }
@@ -303,6 +339,7 @@ function hiddenTargets() { return G.legal.filter(m => rankOf(m.to) < G.view || r
 // ───────────────────────────── input → moves ─────────────────────────────
 function pressSquare(sq) {
   Snd.init(); Snd.resume();
+  if (isAITurn()) return;
   if (G.over) { if (G.over.t > 1.2) newGame(); return; }
   if (G.busy) return;
   const p = G.s.b[sq];
@@ -375,6 +412,7 @@ function land(m, result) {
     Snd.check(); shakeIt(4); flashBanner('CHECK · 將軍', TEAM[G.s.turn].name + ' GENERAL UNDER ATTACK', '#ff4040', 1.1);
     ring(kx, ky, BOARD_Z, '#ff3030', 1.8, 0.6); G.V.get(G.s.b[k].id).flash = 1; G.lamp.v += .6;
   }
+  checkTriggerAI();
 }
 function gameOver(result) {
   G.over = Object.assign({ t:0 }, result);
@@ -401,7 +439,21 @@ function gameOver(result) {
 function undo() {
   Snd.init();
   if (!G.history.length || G.busy) return;
-  const h = G.history.pop();
+  cancelAISearch();
+
+  const isVsAI = settings.mode === 'ai-b' || settings.mode === 'ai-r';
+  const playerColor = settings.mode === 'ai-b' ? 'r' : 'b';
+  let steps = 1;
+  if (isVsAI && G.s.turn === playerColor && G.history.length >= 2) {
+    steps = 2;
+  }
+
+  let h = null;
+  for (let s = 0; s < steps; s++) {
+    if (G.history.length) h = G.history.pop();
+  }
+  if (!h) return;
+
   G.s = h.s; G.moves = h.moves; G.keys = h.keys; G.last = h.last; G.captured = h.captured; G.clock = h.clock;
   G.over = null; G.banner = null; G.mateFx = 0; G.timeScale = 1; G.confetti = []; G.bursts = [];
   setSel(-1); setView(G.s.turn === 'r' ? 0 : 2);
@@ -415,7 +467,7 @@ function undo() {
     else if (vp.x !== x || vp.y !== y) { const x0 = vp.x, y0 = vp.y; vp.moving = true; tween(0.3, k => { const e = easeIO(k); vp.x = lerp(x0,x,e); vp.y = lerp(y0,y,e); vp.z = Math.sin(Math.PI*k)*.6; }, () => { vp.x = x; vp.y = y; vp.z = 0; vp.moving = false; vp.squash = 1; }); }
   }
   for (const vp of G.V.values()) if (!live.has(vp.id)) vp.alive = false;
-  tween(0.4, null, () => { G.busy = false; });
+  tween(0.4, null, () => { G.busy = false; checkTriggerAI(); });
   Snd.swoosh(); renderMoves();
 }
 function askNewGame() {
@@ -444,6 +496,8 @@ window.addEventListener('keydown', e => {
 });
 document.getElementById('undoBtn').addEventListener('click', undo);
 document.getElementById('newBtn').addEventListener('click', askNewGame);
+document.getElementById('modeSel').addEventListener('change', e => { settings.mode = e.target.value; checkTriggerAI(); });
+document.getElementById('aiLevelSel').addEventListener('change', e => { settings.aiLevel = Number(e.target.value) || 3; checkTriggerAI(); });
 document.getElementById('clockSel').addEventListener('change', e => { settings.clock = e.target.value === '0' ? null : e.target.value.split(',').map(Number); askNewGame(); });
 document.getElementById('padCol').addEventListener('change', e => settings.padCol = e.target.value);
 document.getElementById('padBoard').addEventListener('change', e => settings.padBoard = e.target.value === 'on');
@@ -474,21 +528,7 @@ function midiNote(msg) {
   console.log('[midi]', t, msg);
 }
 function midiStatus(cls, txt) { if (txt !== midiTxt.textContent) midiNote(txt); lamp.className = 'lamp ' + cls; midiTxt.textContent = txt; }
-// Inside Launchpad Drummer the page sits in a sandboxed frame where Web MIDI is blocked, and the app already
-// owns the Launchpad: it relays pad/button events in as MIDI-shaped messages and takes the LEDs back out.
-const HOST = window.parent !== window; let hostState = 'disconnected';
-function hostStatus(state) {
-  hostState = state;
-  if (state === 'connected') { LP.last.clear(); midiStatus('on', 'MIDI: Launchpad MK2 via Launchpad Drummer'); }
-  else if (state === 'busy') midiStatus('warn', 'MIDI: Launchpad port busy (close other MIDI apps)');
-  else midiStatus('', 'MIDI: no Launchpad MK2 (mouse works)');
-}
-if (HOST) window.addEventListener('message', e => {
-  const m = e.data; if (e.source !== window.parent || !m) return;
-  if (m.lpd === 'midi' && Array.isArray(m.data)) onMidi({ data:m.data }); else if (m.lpd === 'status') hostStatus(m.state);
-});
 function connectMidi() {
-  if (HOST) { hostStatus(hostState); return; }
   if (!navigator.requestMIDIAccess) { midiStatus('', 'MIDI: not supported (use Edge/Chrome)'); return; }
   if (!LP.access) midiStatus('warn', 'MIDI: waiting for permission…');
   const slow = setTimeout(() => { if (!LP.access) midiStatus('warn', 'MIDI: still waiting (allow the prompt; another tab or app may hold the Launchpad)'); }, 3000);
@@ -537,12 +577,6 @@ function onMidi(e) {
   }
 }
 function sendLeds(frame) {
-  if (HOST) {
-    const changes = [];
-    for (const [note, rgb] of frame) { const prev = LP.last.get(note); if (!prev || prev[0]!==rgb[0] || prev[1]!==rgb[1] || prev[2]!==rgb[2]) { changes.push([note, rgb[0], rgb[1], rgb[2]]); LP.last.set(note, rgb); } }
-    if (changes.length) window.parent.postMessage({ lpd:'leds', leds:changes }, '*');
-    return;
-  }
   if (!LP.output) return;
   const changes = [];
   for (const [note, rgb] of frame) { const prev = LP.last.get(note); if (!prev || prev[0]!==rgb[0] || prev[1]!==rgb[1] || prev[2]!==rgb[2]) { changes.push(note, rgb[0], rgb[1], rgb[2]); LP.last.set(note, rgb); } }
@@ -605,6 +639,7 @@ function buildLedFrame() {
   for (let i = 0; i < 4; i++) {
     let rgb;
     if (G.over) rgb = G.over.winner ? scale(TEAM[G.over.winner].lp, (Math.floor(T*4 + i) % 2) ? 1 : .2) : [12,12,12];
+    else if (G.aiThinking) rgb = scale([0,50,63], .3 + .4*Math.sin(T*8 - i*.8));
     else if (G.clock && G.clock.running) { const lit = G.clock[turn] / settings.clock[0] * 4; rgb = i < Math.floor(lit) ? tc : i < lit ? scale(tc, lit - Math.floor(lit)) : [0,0,0]; if (G.clock[turn] < 10 && blink) rgb = [63,0,0]; }
     else rgb = scale(tc, .45 + .35*Math.sin(T*3 - i*.6));
     f.set(107 + i, rgb);
@@ -1186,6 +1221,155 @@ requestAnimationFrame(loop);
 window.addEventListener('beforeunload', () => { if (LP.output) { const off = new Map(); for (let r=1;r<=8;r++) for (let c=1;c<=9;c++) off.set(key(c,r),[0,0,0]); for (let n=104;n<=111;n++) off.set(n,[0,0,0]); LP.last.clear(); sendLeds(off); } });
 // test hooks
 window.__engine = { legalMoves, applyMove, initialState, inCheck, generalsFace }; window.__G = G; window.__press = pressSquare; window.__undo = undo; window.__sq = n => FILES.indexOf(n[0]) + (+n.slice(1))*NF;
+
+// Initialize LaunchBand Universal Menu
+window.gameMenu = new LaunchBandMenu({
+  gameId: 'xiangqi',
+  gameTitle: 'Xiangqi: Chinese Chess 象棋',
+  gameSubtitle: 'Imperial Battlefield Tactics & Palace Battles // Launchpad MK2',
+  requiredDevices: [
+    { id: 'lp', name: 'Novation Launchpad MK2', match: /launchpad/i, required: true }
+  ],
+  parameters: [
+    {
+      id: 'modeSel',
+      label: 'Game Mode / Opponent',
+      type: 'select',
+      default: document.getElementById('modeSel').value || 'ai-b',
+      options: [
+        { value: 'ai-b', label: 'Play Red vs Black AI (紅先)' },
+        { value: 'ai-r', label: 'Play Black vs Red AI (黑先)' },
+        { value: 'pvp', label: '2 Players (Pass & Play)' },
+        { value: 'ai-ai', label: 'AI vs AI (Spectator Demo)' }
+      ]
+    },
+    {
+      id: 'aiLevelSel',
+      label: 'AI Difficulty Level',
+      type: 'select',
+      default: document.getElementById('aiLevelSel').value || '3',
+      options: [
+        { value: '1', label: 'Level 1 · Easy' },
+        { value: '2', label: 'Level 2 · Relaxed' },
+        { value: '3', label: 'Level 3 · Standard' },
+        { value: '4', label: 'Level 4 · Hard' },
+        { value: '5', label: 'Level 5 · Strongest' }
+      ]
+    },
+    {
+      id: 'viewSel',
+      label: 'Board Camera Perspective',
+      type: 'select',
+      default: document.getElementById('viewSel').value || 'table',
+      options: [
+        { value: 'table', label: 'Isometric Classical Table' },
+        { value: 'top', label: 'Top-Down 2D Tactical Battlefield' }
+      ]
+    },
+    {
+      id: 'clockSel',
+      label: 'Turn Timer & Clock',
+      type: 'select',
+      default: document.getElementById('clockSel').value || '600,0',
+      options: [
+        { value: '0', label: 'Untimed (Casual Analysis)' },
+        { value: '180,2', label: 'Blitz (3 min + 2 sec increment)' },
+        { value: '300,0', label: 'Blitz (5 min per side)' },
+        { value: '600,0', label: 'Standard Rapid (10 min per side)' },
+        { value: '900,10', label: 'Classical (15 min + 10 sec increment)' }
+      ]
+    },
+    {
+      id: 'padCol',
+      label: 'Launchpad LED Color Encoding',
+      type: 'select',
+      default: document.getElementById('padCol').value || 'piece',
+      options: [
+        { value: 'piece', label: 'Color Per Piece (General/Advisor/Elephant/Horse/Chariot/Cannon/Soldier)' },
+        { value: 'team', label: 'Color Per Side (Red vs Black Imperial Armies)' }
+      ]
+    },
+    {
+      id: 'padBoard',
+      label: 'Illuminated Palace & Yellow River',
+      type: 'select',
+      default: document.getElementById('padBoard').value || 'on',
+      options: [
+        { value: 'on', label: 'Palace Fortress + River Boundary LEDs' },
+        { value: 'off', label: 'Dark Empty Squares' }
+      ]
+    },
+    {
+      id: 'coords',
+      label: 'Board Coordinate Labels',
+      type: 'select',
+      default: document.getElementById('coords').value || 'on',
+      options: [
+        { value: 'on', label: 'Display Grid Coordinates' },
+        { value: 'off', label: 'Clean Border' }
+      ]
+    },
+    {
+      id: 'crt',
+      label: 'CRT Display Filter',
+      type: 'select',
+      default: document.getElementById('crt').value || 'on',
+      options: [
+        { value: 'on', label: 'Phosphor Scanlines Glow' },
+        { value: 'off', label: 'Clean Crisp Display' }
+      ]
+    },
+    {
+      id: 'snd',
+      label: 'Tactile Sound Effects',
+      type: 'select',
+      default: document.getElementById('snd').value || 'on',
+      options: [
+        { value: 'on', label: 'Audio ON (Tactile Piece Clacks)' },
+        { value: 'off', label: 'Audio Mute' }
+      ]
+    }
+  ],
+  keybindings: [
+    { key: 'Click / Pad', desc: 'Select Xiangqi piece / Highlight legal palace & river moves' },
+    { key: 'Target Square', desc: 'Execute move / Cannon jump / Capture enemy general' },
+    { key: 'U', desc: 'Undo last turn' },
+    { key: 'N', desc: 'Start new imperial match' },
+    { key: 'Esc / M', desc: 'Open Xiangqi Menu & Hardware Controller Setup' }
+  ],
+  onStart: (settings, mode) => {
+    for (const id of ['modeSel', 'aiLevelSel', 'viewSel', 'clockSel', 'padCol', 'padBoard', 'coords', 'crt', 'snd']) {
+      const el = document.getElementById(id);
+      if (el && settings[id]) {
+        el.value = settings[id];
+        el.dispatchEvent(new Event('change'));
+      }
+    }
+    newGame();
+  },
+  onResume: () => {},
+  onPause: () => {},
+  onRestart: (settings) => {
+    for (const id of ['modeSel', 'aiLevelSel', 'viewSel', 'clockSel', 'padCol', 'padBoard', 'coords', 'crt', 'snd']) {
+      const el = document.getElementById(id);
+      if (el && settings[id]) {
+        el.value = settings[id];
+        el.dispatchEvent(new Event('change'));
+      }
+    }
+    newGame();
+  },
+  onParameterChange: (key, val) => {
+    const el = document.getElementById(key);
+    if (el) {
+      el.value = val;
+      el.dispatchEvent(new Event('change'));
+    }
+  }
+});
+
+const openXiangqiMenuBtn = document.getElementById('openMenuBtn');
+if (openXiangqiMenuBtn) openXiangqiMenuBtn.onclick = () => window.gameMenu.open();
 </script>
 </body>
 </html>

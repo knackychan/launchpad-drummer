@@ -492,6 +492,10 @@
   function onProtoMessage(e: MessageEvent) {
     if (!protoActive() || !protoFrame || e.source !== protoFrame.contentWindow) return;
     const data = e.data as { lpd?: string; leds?: unknown };
+    if (data?.lpd === 'req_status') {
+      toProto({ lpd: 'status', state: deviceState });
+      return;
+    }
     if (data?.lpd !== 'leds' || !Array.isArray(data.leds)) return;
     let changed = false;
     for (const led of data.leds) {
@@ -1137,7 +1141,7 @@
             {#if game === 'horde'}
               {#if optional.horde}
                 {@const Horde = optional.horde}
-                <Horde bind:this={hordeComponent} onframe={sendFrame} />
+                <Horde bind:this={hordeComponent} onframe={sendFrame} launchpad={deviceState} />
               {:else if optionalState.horde === 'error'}
                 <div class="lazy" role="alert">Couldn't load Horde. <button class="key" onclick={() => void loadOptional('horde')}>TRY AGAIN</button></div>
               {:else}
