@@ -6,7 +6,7 @@ title Launchpad Drummer (LPD-01)
 cd /d "%~dp0"
 
 :: Usage: run.bat [release | build | dev | test | probe | cli <args>]
-::   (none), release  open the built app directly: no Node, Cargo or Vite involved
+::   (none), release  open the built app (builds it first if missing)
 ::   build            build the production frontend and executable (no installer)
 ::   dev              development workflow (Vite dev server + debug build)
 ::   test, probe, cli unchanged
@@ -36,11 +36,15 @@ exit /b 2
 :RUN_APP
 set "APP_EXE=%~dp0target\release\launchpad-drummer.exe"
 if not exist "%APP_EXE%" (
-    echo [FAIL] The built app was not found:
-    echo        %APP_EXE%
-    echo        Build it once with:  run.bat build
-    call :PAUSE
-    exit /b 1
+    if defined AUTO_BUILT (
+        echo [FAIL] The build finished but the app was not found:
+        echo        %APP_EXE%
+        call :PAUSE
+        exit /b 1
+    )
+    echo [INFO] The app is not built yet. Building it first...
+    set "AUTO_BUILT=1"
+    goto RUN_BUILD
 )
 "%APP_EXE%"
 set "APP_RC=%errorlevel%"
@@ -66,7 +70,9 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 echo.
-echo [OK] Built target\release\launchpad-drummer.exe. Start it with:  run.bat
+echo [OK] Built target\release\launchpad-drummer.exe.
+if defined AUTO_BUILT goto RUN_APP
+echo      Start it with:  run.bat
 exit /b 0
 
 :RUN_DEV
