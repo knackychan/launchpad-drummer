@@ -211,7 +211,7 @@ fn run(app: AppHandle, state: AppState, game_frames: FrameSender) {
                 led.clear_game();
                 game_frames.take();
                 let full_frame = state.paint_frame(now);
-                let sent = led.send_sampler(&state.painter, &full_frame);
+                let sent = led.send_sampler(&state.painter, &full_frame, now);
 
                 tick_counter = tick_counter.wrapping_add(1);
                 if tick_counter % 2 == 0 {

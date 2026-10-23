@@ -16,6 +16,7 @@ const BLINK_HALF_PERIOD_MS: u128 = 250;
 const WHITE: [u8; 3] = [63, 63, 63];
 const OFF: [u8; 3] = [0, 0, 0];
 const MISSING_RED: [u8; 3] = [63, 0, 0];
+const FULL_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug)]
 struct PadHit {
@@ -212,8 +213,8 @@ impl LightPainter {
         frame
     }
 
-    /// LEDs that changed since the last frame the device acknowledged. Does not update the cache;
-    /// call `mark_sent` once the output was delivered.
+    /// LEDs that changed since the last successful MIDI send. Does not update the cache;
+    /// call `mark_sent` once the output was sent.
     pub fn diff(&self, full_frame: &[(u8, [u8; 3])]) -> Diff {
         let leds = full_frame
             .iter()
@@ -251,6 +252,7 @@ pub trait LedSink {
 /// across a send (a stalled USB port must not block pad input).
 pub struct LedOutput<S: LedSink> {
     sink: Option<S>,
+    last_full_refresh: Option<Instant>,
     /// Latest game frame (full SysEx); resent after a reconnect while a game owns the pads.
     game_frame: Option<Vec<u8>>,
 }
@@ -259,6 +261,7 @@ impl<S: LedSink> Default for LedOutput<S> {
     fn default() -> Self {
         Self {
             sink: None,
+            last_full_refresh: None,
             game_frame: None,
         }
     }
@@ -280,23 +283,33 @@ impl<S: LedSink> LedOutput<S> {
         sink.send(&lp::SELECT_SESSION_LAYOUT)?;
         sink.send(&lp::set_all(0))?;
         self.sink = Some(sink);
+        self.last_full_refresh = None;
         Ok(())
     }
 
     pub fn disconnect(&mut self, painter: &Mutex<LightPainter>) {
         self.sink = None;
+        self.last_full_refresh = None;
         leaf(painter).invalidate();
     }
 
-    /// Send what changed of the sampler frame. `Err` means the device was lost (already
-    /// disconnected and invalidated). Without a device nothing is sent or remembered.
+    /// Send sampler changes, with a full repaint each second to repair silently lost updates.
+    /// A send error disconnects and invalidates. Without a device nothing is sent or remembered.
     pub fn send_sampler(
         &mut self,
         painter: &Mutex<LightPainter>,
         frame: &[(u8, [u8; 3])],
+        now: Instant,
     ) -> Result<(), String> {
         if self.sink.is_none() {
             return Ok(());
+        }
+        let full_refresh = self
+            .last_full_refresh
+            .is_none_or(|last| now.saturating_duration_since(last) >= FULL_REFRESH_INTERVAL);
+        // MIDI success is not a device acknowledgement; a lost update must not stay cached forever.
+        if full_refresh {
+            leaf(painter).invalidate();
         }
         let diff = leaf(painter).diff(frame);
         let mut failure = None;
@@ -315,6 +328,9 @@ impl<S: LedSink> LedOutput<S> {
             }
             None => {
                 leaf(painter).mark_sent(&diff);
+                if full_refresh {
+                    self.last_full_refresh = Some(now);
+                }
                 Ok(())
             }
         }
