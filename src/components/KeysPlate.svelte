@@ -10,8 +10,8 @@
   import { noteBoundTo } from '../lib/learn.ts';
   import {
     isBlackKey, KEY_HI, KEY_LO, noteName, outputLabel, rangeLabel, SOUNDS, SOUND_COLORS, SOUND_LABELS, velocityFromY, windowRange,
-    type KeysSettings,
   } from '../lib/keys.ts';
+  import type { KeysMix } from '../lib/synth-types.ts';
 
   let {
     short = false, folded = false, set, octave, deviceName = 'KEYSTATION 49', devicePresent = false, remoteDown = new Set<number>(),
@@ -30,7 +30,7 @@
     last?: { note: number; velocity: number } | null;
     /** Positions of the hardware wheels (pitch −1…1, mod 0…1). */
     wheel?: { pitch: number; mod: number };
-    onsettings: (keys: KeysSettings) => void;
+    onsettings: (mix: KeysMix) => void;
     /** A key of the screen keybed that is not bound to a pad. */
     onnote: (note: number, velocity: number, on: boolean) => void;
     /** A key bound to a pad: the pad plays. */
@@ -42,6 +42,7 @@
   } = $props();
 
   const keys = $derived(set.keys);
+  const mix = (over: Partial<KeysMix>): KeysMix => ({ gmSound: keys.gmSound, volumeDb: keys.volumeDb, output: keys.output, ...over });
   const range = $derived(windowRange(octave));
 
   const KEYS: { n: number; black: boolean; left: number; white: number }[] = [];
@@ -53,7 +54,7 @@
   const whiteIdx = (n: number) => KEYS.filter((k) => !k.black && k.n < n).length;
   const winLeft = $derived((whiteIdx(range[0]) / 52) * 100);
   const winWidth = $derived(((whiteIdx(range[1]) + 1 - whiteIdx(range[0])) / 52) * 100);
-  const soundColor = $derived(ledToCss(SOUND_COLORS[keys.sound]));
+  const soundColor = $derived(ledToCss(SOUND_COLORS[keys.gmSound]));
 
   /** The pad a key is bound to (any device), with its colour; keys outside the 88 are never asked. */
   const bound = $derived.by(() => {
@@ -110,10 +111,10 @@
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
     menu = { x: r.left, y: r.bottom + 4, items };
   }
-  const soundMenu = (e: Event) => openMenu(e, SOUNDS.map((sound) => ({ label: SOUND_LABELS[sound], checked: sound === keys.sound, action: () => onsettings({ ...keys, sound }) })));
+  const soundMenu = (e: Event) => openMenu(e, SOUNDS.map((sound) => ({ label: SOUND_LABELS[sound], checked: sound === keys.gmSound, action: () => onsettings(mix({ gmSound: sound })) })));
   const outMenu = (e: Event) => openMenu(e, [
-    { label: 'MASTER', checked: keys.output === null, action: () => onsettings({ ...keys, output: null }) },
-    ...set.mixer.groups.map((g, i) => ({ label: groupLegend(i, g.name), checked: keys.output === i, action: () => onsettings({ ...keys, output: i }) })),
+    { label: 'MASTER', checked: keys.output === null, action: () => onsettings(mix({ output: null })) },
+    ...set.mixer.groups.map((g, i) => ({ label: groupLegend(i, g.name), checked: keys.output === i, action: () => onsettings(mix({ output: i })) })),
   ]);
   const activate = (open: (e: Event) => void) => (e: KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); open(e); }
@@ -141,10 +142,10 @@
       <div class="k-row">
         <span class="lamp" class:ok={devicePresent} title="{deviceName} {devicePresent ? 'connected' : 'not connected'}"></span>
         <span class="lcd screen target" role="button" tabindex="0" aria-haspopup="menu" style:color={soundColor}
-          title="Keys sound: {SOUND_LABELS[keys.sound]} — click to change. Notes learned to a pad play that pad."
-          onclick={soundMenu} onkeydown={activate(soundMenu)}>{SOUND_LABELS[keys.sound]}</span>
+          title="Keys sound: {SOUND_LABELS[keys.gmSound]} — click to change. Notes learned to a pad play that pad."
+          onclick={soundMenu} onkeydown={activate(soundMenu)}>{SOUND_LABELS[keys.gmSound]}</span>
         <NumLcd label="Keys volume (dB)" value={keys.volumeDb} min={-40} max={6} def={-6} fmt={fmtVol} learnId="keys.volume"
-          onchange={(v) => onsettings({ ...keys, volumeDb: v })} />
+          onchange={(v) => onsettings(mix({ volumeDb: v }))} />
         <button type="button" class="key small" aria-label="Fold keyboard" title="Fold (Ctrl+K)" onclick={() => onfold(true)}>▾</button>
       </div>
       <div class="k-row">

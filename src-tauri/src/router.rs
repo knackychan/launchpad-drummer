@@ -360,8 +360,8 @@ impl Router {
 
     /// The keys' sound, level and output from the set to the engine.
     pub fn send_keys(&mut self) {
-        let k = self.set.keys;
-        let _ = self.audio_tx.push(Command::KeysSound(k.sound));
+        let k = &self.set.keys;
+        let _ = self.audio_tx.push(Command::KeysSound(k.gm_sound));
         let _ = self.audio_tx.push(Command::KeysRoute {
             gain: db_to_gain(k.volume_db),
             group: k.output,
@@ -1615,7 +1615,7 @@ mod tests {
     #[test]
     fn keys_settings_reach_the_engine_and_a_new_instrument_starts_in_the_current_state() {
         let (mut r, mut rx) = router_with_pad(0.0, 0.0);
-        r.set_mut().keys.sound = lpd_core::instrument::KeysSound::Organ;
+        r.set_mut().keys.gm_sound = lpd_core::instrument::KeysSound::Organ;
         r.set_mut().keys.volume_db = -12.0;
         r.set_mut().keys.output = Some(3);
         r.send_keys();

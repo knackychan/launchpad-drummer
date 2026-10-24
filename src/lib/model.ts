@@ -1,4 +1,5 @@
-import type { KeysSettings } from './keys.ts';
+import type { KeysSettings } from './synth-types.ts';
+import { SYNTH_META } from './synth-meta.ts';
 export type PadMode = 'oneShot' | 'hold';
 
 export interface Pad {
@@ -216,9 +217,17 @@ export function groupLegend(index: number, name: string): string {
   return upper === `GROUP ${index + 1}` || !upper ? `GROUP ${index + 1}` : `${index + 1} ${upper}`;
 }
 
+export function defaultKeys(): KeysSettings {
+  const { name, category, params } = SYNTH_META.factory.find(p => p.id === 'ePiano')!;
+  return {
+    patch: { patchVersion: 1, name, category, params: structuredClone(params) },
+    patchSource: { factory: 'ePiano' }, modified: false, gmSound: 'ePiano', volumeDb: -6, output: null,
+  };
+}
+
 export function createEmptySet(): SetModel {
   return {
-    version: 1,
+    version: 2,
     banks: Array.from({ length: 8 }, (_, i) => ({
       name: `Bank ${i + 1}`,
       lights: { flash: true, playState: true, ripple: false },
@@ -233,7 +242,7 @@ export function createEmptySet(): SetModel {
     },
     learn: [],
     pattern: { lanes: [], length: 16, bpm: 100, swing: 50 },
-    keys: { sound: 'ePiano', volumeDb: -6, output: null },
+    keys: defaultKeys(),
   };
 }
 

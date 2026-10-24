@@ -10,6 +10,10 @@ pub use soundfont::SoundFontKeys;
 
 use crate::synth::monitor::SynthMonitor;
 use crate::synth::params::{ParamId, Route, SynthParams};
+use crate::synth::{
+    factory::factory,
+    patch::{Patch, PatchSource},
+};
 use serde::{Deserialize, Serialize};
 
 pub const KEYS_VOICES: usize = 16;
@@ -28,10 +32,13 @@ pub enum KeysSound {
 
 /// The keys settings stored in the set file. `output` is a mixer channel (0..8) or `None` for the
 /// master bus.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct KeysSettings {
-    pub sound: KeysSound,
+    pub patch: Patch,
+    pub patch_source: PatchSource,
+    pub modified: bool,
+    pub gm_sound: KeysSound,
     pub volume_db: f32,
     pub output: Option<u8>,
 }
@@ -39,10 +46,32 @@ pub struct KeysSettings {
 impl Default for KeysSettings {
     fn default() -> Self {
         KeysSettings {
-            sound: KeysSound::EPiano,
+            patch: factory("ePiano").expect("factory ePiano exists"),
+            patch_source: PatchSource::Factory("ePiano".into()),
+            modified: false,
+            gm_sound: KeysSound::EPiano,
             volume_db: -6.0,
             output: None,
         }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KeysMix {
+    pub gm_sound: KeysSound,
+    pub volume_db: f32,
+    pub output: Option<u8>,
+}
+
+pub fn factory_id(sound: KeysSound) -> &'static str {
+    match sound {
+        KeysSound::Piano => "piano",
+        KeysSound::EPiano => "ePiano",
+        KeysSound::Organ => "organ",
+        KeysSound::SynthPad => "synthPad",
+        KeysSound::SynthLead => "synthLead",
+        KeysSound::SynthBass => "synthBass",
     }
 }
 

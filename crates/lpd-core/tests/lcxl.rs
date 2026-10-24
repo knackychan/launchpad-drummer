@@ -150,3 +150,13 @@ fn knob_laws() {
     assert_eq!(knob_lowpass(0), 200.0);
     assert_eq!(knob_lowpass(127), 20000.0);
 }
+
+#[test]
+fn the_synth_knob_map_and_led_indices() {
+    use lpd_core::devices::lcxl::{knob_led_index, SYNTH_KNOBS};
+    use lpd_core::synth::params::ParamId;
+    assert_eq!(SYNTH_KNOBS[0][0], ParamId::OscAPos);
+    assert_eq!(SYNTH_KNOBS[1][7], ParamId::FxReverbMix);
+    assert_eq!(SYNTH_KNOBS[2][4], ParamId::Env2Attack);
+    assert_eq!((knob_led_index(0, 0), knob_led_index(2, 7)), (0, 23));
+}

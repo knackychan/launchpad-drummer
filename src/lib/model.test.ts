@@ -2,6 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDefaultPad, LAUNCHPAD_PALETTE, padAriaLabel, createEmptySet } from './model.ts';
 
+test('new sets carry independent version 2 factory patches', () => {
+  const first = createEmptySet(), second = createEmptySet();
+  assert.equal(first.version, 2);
+  assert.equal(first.keys.patch.name, 'E.PIANO');
+  assert.deepEqual(first.keys.patchSource, { factory: 'ePiano' });
+  first.keys.patch.params.filter.cutoff = 300;
+  assert.equal(second.keys.patch.params.filter.cutoff, 12000);
+});
+
 test('createDefaultPad initializes pad with coordinates and valid defaults', () => {
   const pad = createDefaultPad(3, 4);
   assert.equal(pad.x, 3);

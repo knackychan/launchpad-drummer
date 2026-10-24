@@ -561,3 +561,6 @@ impl Instrument for Synth {
         Some(self.monitor)
     }
 }
+pub mod export;
+pub mod factory;
+pub mod patch;

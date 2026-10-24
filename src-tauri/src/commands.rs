@@ -7,7 +7,7 @@ use crate::startup::{LoadStatus, Startup};
 use crate::state::{
     AppState, DropReport, HistoryState, InputMode, KeysStatus, MissingPad, OpenResult, SamplePeaks,
 };
-use lpd_core::instrument::KeysSettings;
+use lpd_core::instrument::KeysMix;
 use lpd_core::kit::{Group, LightModes, Pad, Set};
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -242,7 +242,7 @@ pub(crate) fn keys_mod(value: f32, state: State<'_, AppState>) {
 }
 
 #[tauri::command]
-pub(crate) fn set_keys(settings: KeysSettings, state: State<'_, AppState>) -> Set {
+pub(crate) fn set_keys(settings: KeysMix, state: State<'_, AppState>) -> Set {
     state.set_keys(settings)
 }
 

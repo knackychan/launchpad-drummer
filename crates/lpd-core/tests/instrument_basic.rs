@@ -209,23 +209,32 @@ fn gm_programs() {
 
 #[test]
 fn settings_default_and_json() {
+    use lpd_core::instrument::KeysMix;
+    use lpd_core::synth::patch::PatchSource;
     let s = KeysSettings::default();
     assert_eq!(
-        (s.sound, s.volume_db, s.output),
-        (KeysSound::EPiano, -6.0, None)
+        (s.gm_sound, s.volume_db, s.output, s.modified),
+        (KeysSound::EPiano, -6.0, None, false)
     );
-    let json = serde_json::to_value(KeysSettings {
-        sound: KeysSound::SynthBass,
-        volume_db: -3.0,
-        output: Some(7),
-    })
-    .unwrap();
-    assert_eq!(json["sound"], "synthBass");
-    assert_eq!(json["volumeDb"], -3.0);
-    assert_eq!(json["output"], 7);
-    assert_eq!(serde_json::to_value(KeysSound::EPiano).unwrap(), "ePiano");
-    let partial: KeysSettings = serde_json::from_str(r#"{"sound":"organ"}"#).unwrap();
-    assert_eq!((partial.sound, partial.volume_db), (KeysSound::Organ, -6.0));
+    assert_eq!(s.patch.name, "E.PIANO");
+    assert_eq!(s.patch_source, PatchSource::Factory("ePiano".into()));
+    let json = serde_json::to_value(&s).unwrap();
+    assert_eq!(json["gmSound"], "ePiano");
+    assert_eq!(
+        json["patchSource"],
+        serde_json::json!({ "factory": "ePiano" })
+    );
+    assert_eq!(json["patch"]["name"], "E.PIANO");
+    let mix: KeysMix =
+        serde_json::from_str(r#"{"gmSound":"organ","volumeDb":-3,"output":7}"#).unwrap();
+    assert_eq!(
+        mix,
+        KeysMix {
+            gm_sound: KeysSound::Organ,
+            volume_db: -3.0,
+            output: Some(7)
+        }
+    );
 }
 
 #[test]

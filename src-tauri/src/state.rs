@@ -21,7 +21,7 @@ use crate::store::{prepare_sample, KitManager, LoadedKit};
 use lpd_core::audio::{Command, Event, Sample, Taps};
 use lpd_core::devices::launchpad::LpEvent;
 use lpd_core::devices::lcxl::LcxlEvent;
-use lpd_core::instrument::{BasicKeys, Instrument, KeysSettings, SoundFontKeys};
+use lpd_core::instrument::{BasicKeys, Instrument, KeysMix, SoundFontKeys};
 use lpd_core::kit::learn;
 use lpd_core::kit::{self, History, Pad, Set};
 use rtrb::{Consumer, Producer};
@@ -1580,9 +1580,11 @@ impl AppState {
     }
 
     /// The keys settings are an undoable edit (a slider drag is one step); the engine follows.
-    pub fn set_keys(&self, settings: KeysSettings) -> Set {
+    pub fn set_keys(&self, mix: KeysMix) -> Set {
         let set = self.edit(Some("keys"), |set| {
-            set.keys = settings;
+            set.keys.gm_sound = mix.gm_sound;
+            set.keys.volume_db = mix.volume_db;
+            set.keys.output = mix.output;
             set.clone()
         });
         lock(&self.router).send_keys();
@@ -1822,6 +1824,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lpd_core::instrument::KeysSettings;
     use lpd_core::kit::Pad;
     use rtrb::RingBuffer;
 
@@ -2242,8 +2245,8 @@ mod tests {
         let (state, mut rx) = app();
         while rx.pop().is_ok() {}
         for volume in [-10.0, -12.0, -14.0] {
-            let set = state.set_keys(KeysSettings {
-                sound: lpd_core::instrument::KeysSound::Organ,
+            let set = state.set_keys(KeysMix {
+                gm_sound: lpd_core::instrument::KeysSound::Organ,
                 volume_db: volume,
                 output: Some(2),
             });

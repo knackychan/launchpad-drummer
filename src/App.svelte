@@ -23,7 +23,8 @@
   import { padForKey } from './lib/keymap.ts';
   import { pushEsc, runEsc } from './lib/esc.ts';
   import { bindingLabel, boundIds } from './lib/learn.ts';
-  import { SOUND_COLORS, SOUND_LABELS, type KeysSettings } from './lib/keys.ts';
+  import { SOUND_COLORS, SOUND_LABELS } from './lib/keys.ts';
+  import type { KeysMix } from './lib/synth-types.ts';
   import { LEARN, type LearnCtx } from './lib/learnable.ts';
   import { createLedFrame, ledToCss } from './lib/led.ts';
   import type { PadInput, Rgb } from './lib/led.ts';
@@ -166,10 +167,12 @@
     keysOctave = Math.min(2, Math.max(-1, octave));
     try { window.localStorage.setItem(KEYS_OCTAVE_KEY, String(keysOctave)); } catch { /* octave is a per-user convenience */ }
   }
-  function updateKeys(settings: KeysSettings) {
-    currentSet.keys = settings;
+  function updateKeys(mix: KeysMix) {
+    currentSet.keys.gmSound = mix.gmSound;
+    currentSet.keys.volumeDb = mix.volumeDb;
+    currentSet.keys.output = mix.output;
     const id = ++keysCall;
-    void invoke<SetModel>('set_keys', { settings })
+    void invoke<SetModel>('set_keys', { settings: mix })
       .then(set => { if (set && id === keysCall) currentSet = set; })
       .catch(e => { showToast(errorText(e)); void resyncSet(); });
   }
@@ -200,16 +203,16 @@
   // Mixer channel inputs (UI spec 6): which pads and whether the keys play through a channel.
   const channelInputs = $derived(currentSet.mixer.groups.map((_, i) => ({
     pads: currentSet.banks.reduce((n, b) => n + b.pads.filter(p => p.sample && p.mixGroup === i).length, 0),
-    keysColor: currentSet.keys.output === i ? ledToCss(SOUND_COLORS[currentSet.keys.sound]) : null,
-    keysLabel: SOUND_LABELS[currentSet.keys.sound],
+    keysColor: currentSet.keys.output === i ? ledToCss(SOUND_COLORS[currentSet.keys.gmSound]) : null,
+    keysLabel: SOUND_LABELS[currentSet.keys.gmSound],
   })));
   function channelMenu(i: number, x: number, y: number) {
     if (i < 0) { learnMenu = null; return; }
     const keys = currentSet.keys, here = keys.output === i;
-    const where = keys.output !== null && !here ? `Keys: on ${groupLegend(keys.output, currentSet.mixer.groups[keys.output].name)}` : `Keys: ${SOUND_LABELS[keys.sound]}`;
+    const where = keys.output !== null && !here ? `Keys: on ${groupLegend(keys.output, currentSet.mixer.groups[keys.output].name)}` : `Keys: ${SOUND_LABELS[keys.gmSound]}`;
     learnMenu = { x, y, items: [
       { label: `Pads: ${channelInputs[i].pads} in group ${i + 1} (pad editor › MIX GROUP)`, info: true },
-      { label: where, checked: here, action: () => updateKeys({ ...keys, output: here ? null : i }) },
+      { label: where, checked: here, action: () => updateKeys({ gmSound: keys.gmSound, volumeDb: keys.volumeDb, output: here ? null : i }) },
       { label: '', sep: true },
       { label: 'Rename…', shortcut: 'F2', action: () => { mixerRenaming = i; } },
     ] };

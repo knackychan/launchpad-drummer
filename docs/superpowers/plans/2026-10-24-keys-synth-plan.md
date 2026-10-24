@@ -5270,7 +5270,7 @@ pub fn all() -> Vec<Patch> {
 
 Note: `vibrato` overwrites the chosen LFO's settings — the recipes above never use that LFO for anything else (WOBBLE BASS uses LFO1, so its vibrato goes on LFO2; SYNTH PAD and VOWEL PAD use LFO2, so theirs stays on LFO1).
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
 
 `crates/lpd-core/tests/synth_patch.rs`:
 
@@ -5461,9 +5461,9 @@ fn the_synth_knob_map_and_led_indices() {
 }
 ```
 
-- [ ] **Step 2: Run** `cargo test -p lpd-core` — expected: FAIL to compile (patch / factory / export / new `KeysSettings` missing).
+- [x] **Step 2: Run** `cargo test -p lpd-core` — expected: FAIL to compile (patch / factory / export / new `KeysSettings` missing).
 
-- [ ] **Step 3: Implement** the Rust contracts above (patch.rs, factory.rs as given, export.rs, the migration, `SYNTH_KNOBS`). Then make the workspace compile again:
+- [x] **Step 3: Implement** the Rust contracts above (patch.rs, factory.rs as given, export.rs, the migration, `SYNTH_KNOBS`). Then make the workspace compile again:
   - `src-tauri/src/router.rs` `send_keys`: `let k = &self.set.keys;` and `Command::KeysSound(k.gm_sound)`; the router test `keys_settings_reach_the_engine_…` sets `keys.gm_sound`.
   - `src-tauri/src/state.rs` `set_keys(&self, mix: KeysMix) -> Set`: one `edit(Some("keys"), …)` that writes `gm_sound`, `volume_db` and `output` (the patch fields stay), then `send_keys()`.
   - `src-tauri/src/commands.rs` `set_keys(settings: KeysMix, …)`.
@@ -5547,12 +5547,14 @@ export interface SynthTelemetry {
 }
 ```
 
-- [ ] **Step 4: Run** the full verification (0.1). Expected: lpd-core gains 9 + 2 + 1 tests; `npm run check` 0 errors (the generated module type-checks against `SynthMeta`).
-- [ ] **Step 5: Commit** `feat(core): synth patches, factory patches and set v2` (include `src/lib/synth-meta.ts`).
+- [x] **Step 4: Run** the full verification (0.1). Expected: lpd-core gains 9 + 2 + 1 tests; `npm run check` 0 errors (the generated module type-checks against `SynthMeta`).
+- [x] **Step 5: Commit** `feat(core): synth patches, factory patches and set v2` (include `src/lib/synth-meta.ts`).
 
 **Do not:** edit `synth-meta.ts` by hand; change the synth's sound in this task (the engine still plays `BasicKeys`); remove the six GM sounds (`KeysSound`, `gm_program`).
 
-**Done when:** [ ] tests first → PASS; [ ] a v1 set opens and saves as v2; [ ] full verification; [ ] committed.
+**Done when:** [x] tests first → PASS; [x] a v1 set opens and saves as v2; [x] full verification; [x] committed.
+
+Task 9 verification (2026-10-24): Prescribed patch/meta/LCXL tests and updated settings/version tests written first; core run failed on missing patch/factory/export/KeysMix contracts. All new tests then passed; metadata test first generated synth-meta.ts and failed as specified, second run passed both tests. Added a small model regression test, observed failing on version 1, then passing with independent cloned version 2 default patches. Extended the migration check to open/save/reopen a temporary v1 set as v2 while retaining its v1 backup; focused disk check PASS. `cargo fmt --all -- --check` PASS; `cargo test --workspace` PASS (495 passed, 0 failed, 2 ignored); `npm test` PASS (128 passed); `npm run check` PASS (0 errors, 0 warnings). Two inline reviews checked patch validation/naming, every factory recipe and wheel vibrato, generated metadata shapes/units and 24-knob map, migration defaults and mixer preservation, camelCase KeysMix payloads and optimistic UI edits retaining patch state. BasicKeys still plays exactly as required; no SoundFont/GM removal. No design deviations; additional coverage is the existing model test file and migration disk assertions. No desktop/preview/listening/hardware checks in this data/schema task.
 
 ### Task 10: Engine integration
 
