@@ -208,8 +208,8 @@ fn the_stop_is_queued_before_any_trigger_for_the_new_set() {
 #[test]
 fn a_full_command_queue_refuses_the_switch_and_keeps_the_old_set() {
     let tmp = tempfile::tempdir().unwrap();
-    // 12 slots: the startup mixer commands leave 3 free, so no transition (10 commands) fits.
-    let mut r = rig(12);
+    // Startup leaves one slot free; a 14-command transition fits only after draining.
+    let mut r = rig(14);
     r.state.rename_bank(0, "Mine".into());
     let dir = tmp.path().join("new");
     let error = r.state.new_set(dir.to_str().unwrap()).unwrap_err();

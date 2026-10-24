@@ -3,7 +3,7 @@
 use crate::devices::MidiMsg;
 use crate::lights::PaintSnapshot;
 use crate::sequencer::{Fired, SeqState};
-use lpd_core::audio::{db_to_gain, fader_gain, Command, Event, Sample};
+use lpd_core::audio::{db_to_gain, fader_gain, Command, Event, Sample, Trash};
 use lpd_core::devices::launchpad::LpEvent;
 use lpd_core::devices::lcxl::{self, LcxlEvent};
 use lpd_core::instrument::Instrument;
@@ -125,6 +125,7 @@ pub struct Router {
     /// Last wheel positions of the keys inputs, so each `keys-wheel` event carries both.
     keys_pitch: f32,
     keys_mod: f32,
+    keys_sustain: bool,
     learn_armed: Option<LearnTarget>,
     /// `LearnIgnored` is sent once per arm.
     learn_ignored_sent: bool,
@@ -133,7 +134,7 @@ pub struct Router {
     /// The sequencer clock state, shared with the clock thread (a leaf below the router lock).
     seq: Arc<Mutex<SeqState>>,
     /// Replaced keys instruments coming back from the audio thread; dropped off it (see `drain_trash`).
-    trash: Option<Consumer<Box<dyn Instrument>>>,
+    trash: Option<Consumer<Trash>>,
 }
 
 impl Router {
@@ -157,6 +158,7 @@ impl Router {
             rng: time_seed(),
             keys_pitch: 0.0,
             keys_mod: 0.0,
+            keys_sustain: false,
             learn_armed: None,
             learn_ignored_sent: false,
             last_cc: Vec::new(),
@@ -164,6 +166,7 @@ impl Router {
             trash: None,
         };
         router.send_keys();
+        router.send_patch();
         router
     }
 
@@ -302,7 +305,7 @@ impl Router {
         set: Set,
         samples: HashMap<String, Arc<Sample>>,
     ) -> Result<(), Box<Rejected>> {
-        let needed = 1 + set.mixer.groups.len() + 1 + 2;
+        let needed = 1 + set.mixer.groups.len() + 1 + 3 + 1;
         if self.audio_tx.slots() < needed {
             return Err(Box::new(Rejected {
                 reason: "The audio engine is busy. Try again in a moment.".into(),
@@ -315,6 +318,7 @@ impl Router {
         self.held.clear();
         self.set = set;
         self.send_keys();
+        self.send_patch();
         let old = std::mem::replace(&mut self.samples, samples);
         self.retire(old.into_values());
         Ok(())
@@ -329,17 +333,18 @@ impl Router {
         self.forget_voices();
         self.send_mixer();
         self.send_keys();
+        self.send_patch();
         self.send_wheels();
     }
 
     /// The consumer of instruments the audio thread replaced (from the new stream's engine).
-    pub fn set_trash(&mut self, trash: Option<Consumer<Box<dyn Instrument>>>) {
+    pub fn set_trash(&mut self, trash: Option<Consumer<Trash>>) {
         self.trash = trash;
     }
 
     /// Replaced instruments, for the caller to drop once the router lock is released (a SoundFont
     /// synth is big).
-    pub fn drain_trash(&mut self) -> Vec<Box<dyn Instrument>> {
+    pub fn drain_trash(&mut self) -> Vec<Trash> {
         let mut out = Vec::new();
         if let Some(trash) = &mut self.trash {
             while let Ok(old) = trash.pop() {
@@ -355,6 +360,7 @@ impl Router {
         // A full queue hands the box back; it is dropped here, on the router thread.
         let _ = self.audio_tx.push(Command::SetInstrument(instrument));
         self.send_keys();
+        self.send_patch();
         self.send_wheels();
     }
 
@@ -366,13 +372,23 @@ impl Router {
             gain: db_to_gain(k.volume_db),
             group: k.output,
         });
+        self.send_tempo();
+    }
+
+    pub fn send_tempo(&mut self) {
+        let _ = self.audio_tx.push(Command::KeysTempo(self.set.pattern.bpm));
+    }
+
+    pub fn send_patch(&mut self) {
+        let _ = self
+            .audio_tx
+            .push(Command::SynthLoad(Box::new(self.set.keys.patch.params)));
     }
 
     fn send_wheels(&mut self) {
-        let _ = self
-            .audio_tx
-            .push(Command::KeysPitch(self.keys_pitch * 2.0));
+        let _ = self.audio_tx.push(Command::KeysPitch(self.keys_pitch));
         let _ = self.audio_tx.push(Command::KeysMod(self.keys_mod));
+        let _ = self.audio_tx.push(Command::KeysSustain(self.keys_sustain));
     }
 
     /// A key played on the screen.
@@ -388,7 +404,7 @@ impl Router {
     pub fn keys_pitch_value(&mut self, value: f32) {
         let _ = self
             .audio_tx
-            .push(Command::KeysPitch(value.clamp(-1.0, 1.0) * 2.0));
+            .push(Command::KeysPitch(value.clamp(-1.0, 1.0)));
     }
 
     /// The screen's mod wheel, 0..1.
@@ -436,8 +452,12 @@ impl Router {
     /// Replace the set but keep samples, holds and voice tracking (undo/redo). Undo/redo keep the
     /// current mixer values (`restore_keeping_mixer`), so nothing is sent to the engine.
     pub fn install_set(&mut self, set: Set) {
+        let changed = self.set.keys.patch.params != set.keys.patch.params;
         self.set = set;
         self.send_keys();
+        if changed {
+            self.send_patch();
+        }
     }
 
     /// Push every group and the master gain to the engine.
@@ -1596,7 +1616,7 @@ mod tests {
         key(&mut r, "keys", cc_msg(1, 127));
         let sent = drain(&mut rx);
         assert!(
-            matches!(sent[0], Command::KeysPitch(p) if (p - 1.0).abs() < 1e-6),
+            matches!(sent[0], Command::KeysPitch(p) if (p - 0.5).abs() < 1e-6),
             "{sent:?}"
         );
         assert!(
@@ -1627,13 +1647,32 @@ mod tests {
         assert!(
             matches!(sent[1], Command::KeysRoute { gain, group: Some(3) } if (gain - db_to_gain(-12.0)).abs() < 1e-6)
         );
-        r.set_instrument(Box::new(lpd_core::instrument::BasicKeys::new(48_000)));
+        r.set_instrument(Box::new(lpd_core::synth::Synth::new(48_000)));
         let sent = drain(&mut rx);
         assert!(matches!(sent[0], Command::SetInstrument(_)));
         assert!(matches!(sent[1], Command::KeysSound(_)));
         assert!(matches!(sent[2], Command::KeysRoute { .. }));
-        assert!(matches!(sent[3], Command::KeysPitch(_)));
-        assert!(matches!(sent[4], Command::KeysMod(_)));
+        assert!(matches!(sent[3], Command::KeysTempo(_)));
+        assert!(matches!(sent[4], Command::SynthLoad(_)));
+        assert!(matches!(sent[5], Command::KeysPitch(_)));
+        assert!(matches!(sent[6], Command::KeysMod(_)));
+        assert!(matches!(sent[7], Command::KeysSustain(_)));
+    }
+
+    #[test]
+    fn undo_resends_the_patch_only_when_it_changed() {
+        let (mut r, mut rx) = router_with_pad(0.0, 0.0);
+        let mut set = r.set().clone();
+        set.keys.patch.params.filter.cutoff = 300.0;
+        r.install_set(set.clone());
+        assert!(drain(&mut rx)
+            .iter()
+            .any(|c| matches!(c, Command::SynthLoad(p) if p.filter.cutoff == 300.0)));
+        set.keys.volume_db = -12.0;
+        r.install_set(set);
+        assert!(!drain(&mut rx)
+            .iter()
+            .any(|c| matches!(c, Command::SynthLoad(_))));
     }
 
     #[test]
@@ -1773,8 +1812,11 @@ mod tests {
                 [
                     Command::KeysSound(_),
                     Command::KeysRoute { .. },
+                    Command::KeysTempo(_),
+                    Command::SynthLoad(_),
                     Command::KeysPitch(_),
-                    Command::KeysMod(_)
+                    Command::KeysMod(_),
+                    Command::KeysSustain(_)
                 ]
             ),
             "{keys:?}"

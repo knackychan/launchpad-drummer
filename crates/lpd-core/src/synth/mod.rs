@@ -102,6 +102,7 @@ pub struct Synth {
 impl Synth {
     /// Allocates everything the audio thread will use. Call it off the audio thread.
     pub fn new(sample_rate: u32) -> Synth {
+        wavetable::registry();
         let rate = sample_rate.max(1) as f32;
         let params = SynthParams::default();
         let base = base_norms(&params);

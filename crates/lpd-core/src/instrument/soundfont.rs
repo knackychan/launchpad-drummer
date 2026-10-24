@@ -55,8 +55,8 @@ impl Instrument for SoundFontKeys {
         self.synth.note_off(CHANNEL, i32::from(note));
     }
 
-    fn pitch_bend(&mut self, semitones: f32) {
-        let value = (8192.0 + semitones.clamp(-2.0, 2.0) / 2.0 * 8191.0).round() as i32;
+    fn pitch_bend(&mut self, wheel: f32) {
+        let value = (8192.0 + wheel.clamp(-1.0, 1.0) * 8191.0).round() as i32;
         self.synth
             .process_midi_message(CHANNEL, 0xE0, value & 0x7F, value >> 7);
     }
@@ -64,6 +64,11 @@ impl Instrument for SoundFontKeys {
     fn modulation(&mut self, depth: f32) {
         let value = (depth.clamp(0.0, 1.0) * 127.0).round() as i32;
         self.synth.process_midi_message(CHANNEL, 0xB0, 1, value);
+    }
+
+    fn sustain(&mut self, down: bool) {
+        self.synth
+            .process_midi_message(CHANNEL, 0xB0, 64, if down { 127 } else { 0 });
     }
 
     fn set_sound(&mut self, sound: KeysSound) {

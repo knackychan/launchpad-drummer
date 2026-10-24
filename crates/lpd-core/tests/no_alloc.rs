@@ -68,7 +68,7 @@ fn tapped_engine_never_allocates_even_with_full_queues() {
     });
     // Nothing drained: both queues fill up and stay full while rendering goes on.
     assert_no_alloc(|| {
-        for _ in 0..40 {
+        for _ in 0..80 {
             engine.render(&mut out);
         }
     });
@@ -137,10 +137,29 @@ fn audio_callback_never_allocates() {
 
 #[test]
 fn keys_paths_never_allocate_or_free() {
-    use lpd_core::instrument::{BasicKeys, KeysSound};
+    use lpd_core::instrument::KeysSound;
+    use lpd_core::synth::{params::*, Synth};
     let (mut engine, _) = Engine::new(48_000);
     // Created before the guard, as the host does.
-    let replacement: Box<dyn lpd_core::instrument::Instrument> = Box::new(BasicKeys::new(48_000));
+    let replacement: Box<dyn lpd_core::instrument::Instrument> = Box::new(Synth::new(48_000));
+    let mut heavy = Box::new(SynthParams::default());
+    heavy.osc_a.unison = 7;
+    heavy.osc_b = OscParams {
+        on: true,
+        unison: 7,
+        ..OscParams::default()
+    };
+    heavy.fx.drive.on = true;
+    heavy.fx.chorus.on = true;
+    heavy.fx.delay.on = true;
+    heavy.fx.reverb.on = true;
+    heavy.routes.push(Route {
+        source: Source::Lfo1,
+        dest: Some(Dest::Cutoff),
+        amount: 0.25,
+        aux: None,
+        bypass: false,
+    });
     let mut out = [0.0; 2048];
     assert_no_alloc(|| {
         engine.handle(Command::KeysSound(KeysSound::SynthPad));
@@ -169,19 +188,50 @@ fn keys_paths_never_allocate_or_free() {
         engine.render(&mut out);
         engine.handle(Command::KeysAllOff);
         engine.handle(Command::SetInstrument(replacement));
+        engine.handle(Command::KeysSustain(true));
+        engine.handle(Command::KeysTempo(128.0));
+        engine.handle(Command::SynthParam(ParamId::FilterCutoff, 800.0));
+        engine.handle(Command::SynthRoute {
+            slot: 0,
+            route: Some(Route {
+                source: Source::Lfo1,
+                dest: Some(Dest::Cutoff),
+                amount: 0.25,
+                aux: None,
+                bypass: false,
+            }),
+        });
+        engine.handle(Command::SynthLoad(heavy));
+        for note in 48..64 {
+            engine.handle(Command::KeysNoteOn {
+                note,
+                velocity: 100,
+            });
+        }
+        for _ in 0..8 {
+            engine.render(&mut out);
+        }
+        engine.handle(Command::KeysSustain(false));
         engine.render(&mut out);
     });
 }
 
 #[test]
 fn a_full_trash_queue_leaks_instead_of_freeing() {
-    use lpd_core::instrument::{BasicKeys, Instrument};
+    use lpd_core::instrument::Instrument;
+    use lpd_core::synth::{params::SynthParams, Synth};
     let (mut engine, _) = Engine::new(48_000);
-    // Nobody collects: the queue (capacity 4) fills up; the fifth and later boxes are leaked.
-    let mut boxes: Vec<Option<Box<dyn Instrument>>> = (0..8)
-        .map(|_| Some(Box::new(BasicKeys::new(48_000)) as Box<dyn Instrument>))
+    // Nobody collects: the queue (capacity 8) fills up; later boxes are leaked.
+    let mut boxes: Vec<Option<Box<dyn Instrument>>> = (0..12)
+        .map(|_| Some(Box::new(Synth::new(48_000)) as Box<dyn Instrument>))
+        .collect();
+    let mut patches: Vec<_> = (0..12)
+        .map(|_| Some(Box::new(SynthParams::default())))
         .collect();
     assert_no_alloc(|| {
+        for slot in patches.iter_mut() {
+            engine.handle(Command::SynthLoad(slot.take().unwrap()));
+        }
         for slot in boxes.iter_mut() {
             engine.handle(Command::SetInstrument(slot.take().unwrap()));
         }

@@ -5606,7 +5606,7 @@ pub struct Taps { pub scope: Consumer<f32>, pub levels: Consumer<Levels>, pub ke
 - `AppState`: `KeysStatus::builtin()` becomes `KeysStatus::synth()` = `{ engine: "synth", name: "SYNTH", error: null }` (K7); `load_keys_instrument(None)` installs `Box::new(Synth::new(rate))`.
 - `src-tauri/src/lib.rs` `run()`: before the audio controller starts, `std::thread::spawn(|| { lpd_core::synth::wavetable::registry(); });` (the first stream start does not wait for the tables).
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   - `crates/lpd-core/tests/audio_engine.rs`: drop every `engine.handle(Command::KeysSound(…Organ))` line from the keys tests (the synth ignores GM sounds); `set_instrument_hands_the_old_one_to_the_trash` asserts `matches!(trash.pop(), Ok(Trash::Instrument(_)))` with the message "the replaced Synth came back"; the `Silent` test instrument compiles unchanged (new trait methods have defaults). Add:
 
 ```rust
@@ -5665,14 +5665,16 @@ fn keys_pitch_is_the_normalized_wheel() {
   - `crates/lpd-core/tests/no_alloc.rs`: `keys_paths_never_allocate_or_free` uses `lpd_core::synth::Synth::new(48_000)` as the replacement (built before the guard) and, inside the guard, also sends `KeysSustain(true)`, `KeysTempo(128.0)`, `SynthParam(ParamId::FilterCutoff, 800.0)`, `SynthRoute { slot: 0, route: Some(lfo route) }`, `SynthLoad(heavy)` where `heavy` (boxed before the guard) has all four FX on and both oscillators at unison 7, then 16 note-ons and 8 rendered blocks, then `KeysSustain(false)`. `a_full_trash_queue_leaks_instead_of_freeing` makes 12 `Synth` boxes (the queue holds 8).
   - `src-tauri/src/router.rs` tests: `the_wheels_reach_the_engine` expects `KeysPitch(p) if (p - 0.5).abs() < 1e-6` for a 4096 bend; `keys_settings_reach_the_engine_…` expects after `set_instrument(Box::new(Synth::new(48_000)))` the sequence `SetInstrument, KeysSound, KeysRoute, KeysTempo, SynthLoad, KeysPitch, KeysMod, KeysSustain`; the `replace_audio` test expects the keys part `[KeysSound, KeysRoute, KeysTempo, SynthLoad, KeysPitch, KeysMod, KeysSustain]`. Add `undo_resends_the_patch_only_when_it_changed` (install a set whose patch differs → a `SynthLoad` is sent; install one whose only difference is `volume_db` → no `SynthLoad`).
 
-- [ ] **Step 2: Run** `cargo test --workspace` — expected: compile errors / failures for the new variants and expectations.
-- [ ] **Step 3: Implement** the contracts and behaviour above. Delete `basic.rs` and its `mod`/`pub use`, and `KEYS_VOICES` if nothing uses it any more.
-- [ ] **Step 4: Run** the full verification. Expected: every engine and router test green; `no_alloc` green with the heavy patch.
-- [ ] **Step 5: Commit** `feat(core): the engine plays the synth`.
+- [x] **Step 2: Run** `cargo test --workspace` — expected: compile errors / failures for the new variants and expectations.
+- [x] **Step 3: Implement** the contracts and behaviour above. Delete `basic.rs` and its `mod`/`pub use`, and `KEYS_VOICES` if nothing uses it any more.
+- [x] **Step 4: Run** the full verification. Expected: every engine and router test green; `no_alloc` green with the heavy patch.
+- [x] **Step 5: Commit** `feat(core): the engine plays the synth`.
 
 **Do not:** keep `BasicKeys`; free a `SynthParams` box or an instrument on the audio thread; build wavetables on the audio thread; call `Instant::now()` more than twice per block.
 
-**Done when:** [ ] tests first → PASS; [ ] the desktop app starts and the keys play the set's patch (E.PIANO by default) — note it in the task paragraph if you could not run it; [ ] full verification; [ ] committed.
+**Done when:** [x] tests first → PASS; [x] the desktop app starts and the keys play the set's patch (E.PIANO by default) — note it in the task paragraph if you could not run it; [x] full verification; [x] committed.
+
+Task 10 verification (2026-10-24): New engine/monitor/load/pitch tests and changed router/no_alloc expectations were written first; workspace compilation failed on the missing command variants. Focused engine tests PASS (26), no_alloc PASS (5), including heavy 16-voice/unison-7/all-FX/modulated patch, full tap queues, and full trash queues for both parameter and instrument boxes. `cargo fmt --all -- --check` PASS; `cargo test --workspace` PASS (487 passed, 0 failed, 2 ignored); `npm test` PASS (128 passed); `npm run check` PASS (0 errors, 0 warnings). Count drops because twelve BasicKeys-only tests were removed; retained three SoundFont/settings tests in instrument_soundfont.rs. Full checks exposed stale status literals and two affected fixture assumptions; updated audio_controller.rs for seven keys commands and set_transition.rs for fourteen transition slots (additional affected test files, no behavior deviation). Inline reviews checked registry warm-up off audio thread, two clock reads per block, fixed-state render/command paths, trash ownership/full-queue leak behavior, stereo taps before keys volume, router resends and patch-only undo, normalized SoundFont pitch and CC64. Desktop `npm run tauri dev` started, restored Default Set, WASAPI Headphones (Realtek(R) Audio) at 48000 Hz running; stopped the launched dev session after the check. Could not verify playback by ear or hardware. Desktop emitted target-directory EBUSY watcher warnings and binding_property_non_reactive warnings in unchanged PadGrid.svelte; these did not prevent startup. No other deviations beyond rustfmt.
 
 ### Task 11: Router, state, commands, patch library and engine switch
 

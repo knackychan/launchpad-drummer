@@ -35,6 +35,9 @@ fn housekeeping(app: AppHandle, state: AppState) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    std::thread::spawn(|| {
+        lpd_core::synth::wavetable::registry();
+    });
     logfile::mark_process_start();
     // Placeholder queues: the audio owner thread installs the real ones once the stream is up.
     let (commands, _) = rtrb::RingBuffer::new(1024);

@@ -5,8 +5,7 @@ use crate::logfile;
 use crate::state::AppState;
 use anyhow::{bail, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use lpd_core::audio::{host, Command, Engine, Event, Taps};
-use lpd_core::instrument::Instrument;
+use lpd_core::audio::{host, Command, Engine, Event, Taps, Trash};
 use rtrb::{Consumer, Producer, RingBuffer};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -213,7 +212,7 @@ pub struct AudioSystem {
     pub taps: Taps,
     pub stats: Arc<AudioStats>,
     /// Instruments the engine replaced come back here, to be dropped off the audio thread.
-    pub trash: Option<Consumer<Box<dyn Instrument>>>,
+    pub trash: Option<Consumer<Trash>>,
 }
 
 fn is_asio(backend: &str) -> bool {

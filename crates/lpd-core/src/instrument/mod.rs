@@ -2,10 +2,8 @@
 //! the box, and an optional General MIDI SoundFont. Both implement `Instrument`; the audio engine
 //! owns one and renders it into the mix.
 
-mod basic;
 mod soundfont;
 
-pub use basic::BasicKeys;
 pub use soundfont::SoundFontKeys;
 
 use crate::synth::monitor::SynthMonitor;
@@ -15,8 +13,6 @@ use crate::synth::{
     patch::{Patch, PatchSource},
 };
 use serde::{Deserialize, Serialize};
-
-pub const KEYS_VOICES: usize = 16;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
@@ -101,8 +97,8 @@ pub trait Instrument: Send {
 
     fn note_on(&mut self, note: u8, velocity: u8);
     fn note_off(&mut self, note: u8);
-    /// −2..2 semitones; applies to held notes live.
-    fn pitch_bend(&mut self, semitones: f32);
+    /// `wheel` −1…1; the instrument applies its own range.
+    fn pitch_bend(&mut self, wheel: f32);
     /// 0..1: vibrato depth up to ±0.5 semitone at 5.5 Hz.
     fn modulation(&mut self, depth: f32);
     fn set_sound(&mut self, sound: KeysSound);

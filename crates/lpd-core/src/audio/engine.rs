@@ -1,6 +1,10 @@
 use super::taps::{self, TapSender};
 use super::{Levels, LowPass, PlayParams, Sample, Taps, Voice};
-use crate::instrument::{BasicKeys, Instrument, KeysSound};
+use crate::instrument::{Instrument, KeysSound};
+use crate::synth::{
+    params::{ParamId, Route, SynthParams},
+    Synth,
+};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::f32::consts::{FRAC_PI_4, SQRT_2};
 use std::sync::Arc;
@@ -74,8 +78,17 @@ pub enum Command {
     KeysNoteOff {
         note: u8,
     },
-    /// −2..2 semitones.
+    /// The pitch wheel −1…1; each instrument applies its own range.
     KeysPitch(f32),
+    KeysSustain(bool),
+    KeysTempo(f32),
+    SynthParam(ParamId, f32),
+    SynthRoute {
+        slot: u8,
+        route: Option<Route>,
+    },
+    /// A whole patch; the box goes back through the trash.
+    SynthLoad(Box<SynthParams>),
     /// 0..1.
     KeysMod(f32),
     KeysSound(KeysSound),
@@ -88,6 +101,13 @@ pub enum Command {
     },
     /// Swap the instrument. The old one goes back through the trash queue (never dropped here).
     SetInstrument(Box<dyn Instrument>),
+}
+
+/// Boxes the audio thread hands back, to be dropped off it.
+#[derive(Debug)]
+pub enum Trash {
+    Instrument(Box<dyn Instrument>),
+    Params(Box<SynthParams>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,8 +144,8 @@ pub struct Engine {
     keys_group: Option<usize>,
     keys_l: Vec<f32>,
     keys_r: Vec<f32>,
-    trash: rtrb::Producer<Box<dyn Instrument>>,
-    trash_rx: Option<Consumer<Box<dyn Instrument>>>,
+    trash: rtrb::Producer<Trash>,
+    trash_rx: Option<Consumer<Trash>>,
 }
 
 impl Engine {
@@ -151,7 +171,7 @@ impl Engine {
                 buf_r: vec![0.0; MAX_BLOCK],
             })
             .collect();
-        let (trash, trash_rx) = RingBuffer::new(4);
+        let (trash, trash_rx) = RingBuffer::new(8);
         let engine = Engine {
             rate: sample_rate as f32,
             voices: (0..SLOTS).map(|_| Voice::idle()).collect(),
@@ -165,7 +185,7 @@ impl Engine {
             audition_l: vec![0.0; MAX_BLOCK],
             audition_r: vec![0.0; MAX_BLOCK],
             taps,
-            instrument: Box::new(BasicKeys::new(sample_rate)),
+            instrument: Box::new(Synth::new(sample_rate)),
             keys_gain: super::db_to_gain(-6.0),
             keys_group: None,
             keys_l: vec![0.0; MAX_BLOCK],
@@ -178,7 +198,7 @@ impl Engine {
 
     /// The consumer of replaced instruments; the host takes it once and drops what arrives on its
     /// own thread. Without it a replaced instrument is leaked rather than freed on the audio thread.
-    pub fn take_trash(&mut self) -> Option<Consumer<Box<dyn Instrument>>> {
+    pub fn take_trash(&mut self) -> Option<Consumer<Trash>> {
         self.trash_rx.take()
     }
 
@@ -229,7 +249,17 @@ impl Engine {
             Command::SetMasterGain(gain) => self.master_gain = gain,
             Command::KeysNoteOn { note, velocity } => self.instrument.note_on(note, velocity),
             Command::KeysNoteOff { note } => self.instrument.note_off(note),
-            Command::KeysPitch(semitones) => self.instrument.pitch_bend(semitones),
+            Command::KeysPitch(wheel) => self.instrument.pitch_bend(wheel),
+            Command::KeysSustain(down) => self.instrument.sustain(down),
+            Command::KeysTempo(bpm) => self.instrument.set_tempo(bpm),
+            Command::SynthParam(id, value) => self.instrument.set_param(id, value),
+            Command::SynthRoute { slot, route } => self.instrument.set_route(slot as usize, route),
+            Command::SynthLoad(params) => {
+                self.instrument.load_params(&params);
+                if let Err(rtrb::PushError::Full(old)) = self.trash.push(Trash::Params(params)) {
+                    std::mem::forget(old);
+                }
+            }
             Command::KeysMod(depth) => self.instrument.modulation(depth),
             Command::KeysSound(sound) => self.instrument.set_sound(sound),
             Command::KeysAllOff => self.instrument.all_notes_off(),
@@ -240,7 +270,7 @@ impl Engine {
             Command::SetInstrument(new) => {
                 let mut old = std::mem::replace(&mut self.instrument, new);
                 old.all_notes_off();
-                if let Err(rtrb::PushError::Full(old)) = self.trash.push(old) {
+                if let Err(rtrb::PushError::Full(old)) = self.trash.push(Trash::Instrument(old)) {
                     // Nobody is collecting: leak it rather than free it on the audio thread.
                     std::mem::forget(old);
                 }
@@ -361,8 +391,25 @@ impl Engine {
         }
         self.keys_l[..n].fill(0.0);
         self.keys_r[..n].fill(0.0);
+        let started = std::time::Instant::now();
         self.instrument
             .render_add(&mut self.keys_l[..n], &mut self.keys_r[..n]);
+        let cpu = started.elapsed().as_secs_f32() / (n as f32 / self.rate);
+        if let Some(taps) = &mut self.taps {
+            for i in 0..n {
+                if taps
+                    .keys
+                    .push((self.keys_l[i] + self.keys_r[i]) * 0.5)
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            if let Some(mut monitor) = self.instrument.monitor() {
+                monitor.cpu = cpu;
+                let _ = taps.synth.push(monitor);
+            }
+        }
         if let Some(gi) = self.keys_group {
             // Through the channel: its low-pass, pan, gain, mute, solo and level tap apply.
             let g = &mut self.groups[gi];

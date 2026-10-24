@@ -21,7 +21,7 @@ use crate::store::{prepare_sample, KitManager, LoadedKit};
 use lpd_core::audio::{Command, Event, Sample, Taps};
 use lpd_core::devices::launchpad::LpEvent;
 use lpd_core::devices::lcxl::LcxlEvent;
-use lpd_core::instrument::{BasicKeys, Instrument, KeysMix, SoundFontKeys};
+use lpd_core::instrument::{KeysMix, SoundFontKeys};
 use lpd_core::kit::learn;
 use lpd_core::kit::{self, History, Pad, Set};
 use rtrb::{Consumer, Producer};
@@ -95,10 +95,10 @@ pub struct KeysStatus {
 }
 
 impl KeysStatus {
-    pub fn builtin() -> Self {
+    pub fn synth() -> Self {
         KeysStatus {
-            engine: "builtin".into(),
-            name: "BUILT-IN".into(),
+            engine: "synth".into(),
+            name: "SYNTH".into(),
             error: None,
         }
     }
@@ -260,7 +260,7 @@ impl AppState {
             wheel: Arc::default(),
             mixer_dirty: Arc::new(AtomicBool::new(false)),
             set_dirty: Arc::new(AtomicBool::new(false)),
-            keys_status: Arc::new(Mutex::new(KeysStatus::builtin())),
+            keys_status: Arc::new(Mutex::new(KeysStatus::synth())),
             keys_notifier: Arc::default(),
             seq,
             saver: Arc::new(Mutex::new(Saver::new())),
@@ -801,7 +801,7 @@ impl AppState {
     /// its sample rate, in the background.
     fn reload_soundfont(&self) {
         let Some(path) = self.get_config().soundfont else {
-            *lock(&self.keys_status) = KeysStatus::builtin();
+            *lock(&self.keys_status) = KeysStatus::synth();
             return;
         };
         let state = self.clone();
@@ -814,7 +814,7 @@ impl AppState {
     }
 
     /// The router takes the instrument-trash queue of the new engine.
-    pub fn install_trash(&self, trash: Option<Consumer<Box<dyn Instrument>>>) {
+    pub fn install_trash(&self, trash: Option<Consumer<lpd_core::audio::Trash>>) {
         lock(&self.router).set_trash(trash);
     }
 
@@ -835,11 +835,11 @@ impl AppState {
         let status = match path {
             None => {
                 if rate > 0 {
-                    lock(&self.router).set_instrument(Box::new(BasicKeys::new(rate)));
+                    lock(&self.router).set_instrument(Box::new(lpd_core::synth::Synth::new(rate)));
                 }
-                KeysStatus::builtin()
+                KeysStatus::synth()
             }
-            Some(_) if rate == 0 => KeysStatus::builtin(),
+            Some(_) if rate == 0 => KeysStatus::synth(),
             Some(p) => match SoundFontKeys::load(Path::new(p), rate) {
                 Ok(keys) => {
                     lock(&self.router).set_instrument(Box::new(keys));
@@ -2211,8 +2211,8 @@ mod tests {
         let status = state
             .set_soundfont(Some("does-not-exist.sf2".into()))
             .unwrap();
-        assert_eq!(status.engine, "builtin");
-        assert_eq!(status.name, "BUILT-IN");
+        assert_eq!(status.engine, "synth");
+        assert_eq!(status.name, "SYNTH");
         let error = status.error.clone().expect("an error line");
         assert!(
             error.starts_with("Couldn't load does-not-exist.sf2: "),
@@ -2227,12 +2227,12 @@ mod tests {
     }
 
     #[test]
-    fn clearing_the_soundfont_sends_a_fresh_builtin_instrument() {
+    fn clearing_the_soundfont_sends_a_fresh_synth_instrument() {
         let (state, mut rx) = app();
         with_audio_rate(&state, 48_000);
         while rx.pop().is_ok() {}
         let status = state.set_soundfont(None).unwrap();
-        assert_eq!(status, KeysStatus::builtin());
+        assert_eq!(status, KeysStatus::synth());
         let mut sent_instrument = false;
         while let Ok(c) = rx.pop() {
             sent_instrument |= matches!(c, Command::SetInstrument(_));
@@ -2300,7 +2300,7 @@ mod tests {
             }
         ));
         assert!(matches!(sent[1], Command::KeysNoteOff { note: 60 }));
-        assert!(matches!(sent[2], Command::KeysPitch(p) if (p - 1.0).abs() < 1e-6));
+        assert!(matches!(sent[2], Command::KeysPitch(p) if (p - 0.5).abs() < 1e-6));
         assert!(
             matches!(sent[3], Command::KeysMod(m) if m == 1.0),
             "clamped to 1"
