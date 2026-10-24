@@ -3023,7 +3023,7 @@ The `pitch_bend` doc comment changes to "`wheel` −1…1; the instrument applie
 - **Headroom:** the voice sum is multiplied by 0.25 before the FX (Task 8) and the volume.
 - **Monitor** (updated at the end of every `render_add`): from the active voice with the highest age; with none active, the sources hold only WHEEL, BEND and the FREE LFOs, `live` holds the smoothed knob positions (0.5 for pitch destinations), envelopes 0, cutoff / reso / drive the knob values.
 
-- [ ] **Step 1: Write the failing tests** — `crates/lpd-core/tests/synth_instrument.rs`:
+- [x] **Step 1: Write the failing tests** — `crates/lpd-core/tests/synth_instrument.rs`:
 
 ```rust
 use lpd_core::instrument::Instrument;
@@ -3270,9 +3270,9 @@ fn wheel_and_bend_reach_the_sources() {
 }
 ```
 
-- [ ] **Step 2: Run** `cargo test -p lpd-core --test synth_instrument` — expected: FAIL to compile.
+- [x] **Step 2: Run** `cargo test -p lpd-core --test synth_instrument` — expected: FAIL to compile.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
 `crates/lpd-core/src/instrument/mod.rs`: add the six trait methods of the Contracts block (with the two `use` lines). Nothing else changes in this task.
 
@@ -4234,12 +4234,14 @@ impl Instrument for Synth {
 
 Borrowing notes for the implementer: `render_chunk` builds `ctx` from `&self.params` / `&self.smooth` while mutating `self.voices`, `self.bus_*`, `self.fades` and `self.resets` — disjoint fields, which the borrow checker accepts inside one method. `mono_on` / `mono_off` split `(&self.params, &mut self.voices[0])` for the same reason. Keep these as field borrows (do not call `&self` methods while they are alive).
 
-- [ ] **Step 4: Run** `cargo test -p lpd-core --test synth_instrument` — expected: 17 passed. Run `cargo test -p lpd-core` (all lpd-core tests still pass; `BasicKeys` is untouched). Then the full verification.
-- [ ] **Step 5: Commit** `feat(core): synth voices and the Synth instrument`.
+- [x] **Step 4: Run** `cargo test -p lpd-core --test synth_instrument` — expected: 17 passed. Run `cargo test -p lpd-core` (all lpd-core tests still pass; `BasicKeys` is untouched). Then the full verification.
+- [x] **Step 5: Commit** `feat(core): synth voices and the Synth instrument`.
 
 **Do not:** allocate in `render_add`, `note_on`, `set_param`, `set_route`, `load_params` (the `deferred` and fade arrays are fixed); free anything there; change `BasicKeys` or the engine yet.
 
-**Done when:** [ ] tests first → PASS; [ ] full verification; [ ] committed.
+**Done when:** [x] tests first → PASS; [x] full verification; [x] committed.
+
+Task 7 verification (2026-10-24): Seventeen prescribed tests written first and failed on missing `Synth`; all 17 passed after the supplied implementation. `cargo test -p lpd-core` PASS; `cargo fmt --all -- --check` PASS; `cargo test --workspace` PASS (473 passed, 0 failed, 1 ignored); `npm test` PASS (127 passed); `npm run check` PASS (0 errors, 0 warnings). Two inline review passes checked voice modes and stealing, glide, sustain, deferred notes and patch fading, control-rate smoothing, routing, headroom, finite-output reset, monitor payloads and trait defaults; BasicKeys and engine wiring remain unchanged. Wavetable registry warm-up in Synth::new and engine no_alloc coverage remain explicitly scheduled for Task 10, before the new synth reaches the audio engine. No deviations beyond rustfmt. App/preview/listening/hardware checks are still pending integration.
 
 ### Task 8: FX chain
 

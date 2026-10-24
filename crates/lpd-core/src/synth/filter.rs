@@ -103,6 +103,16 @@ pub struct VoiceFilter {
 }
 
 impl VoiceFilter {
+    /// Tests only: make the next output non-finite.
+    #[doc(hidden)]
+    pub fn debug_poison(&mut self) {
+        self.ladder = [Ladder { s: [f32::NAN; 4] }; 2];
+        self.svf = [Svf {
+            s1: f32::NAN,
+            s2: f32::NAN,
+        }; 2];
+    }
+
     /// A new type starts from silence (the other topology's state means nothing to it).
     pub fn set_kind(&mut self, kind: FilterType) {
         if kind != self.kind {

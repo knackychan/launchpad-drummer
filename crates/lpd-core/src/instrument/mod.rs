@@ -8,6 +8,8 @@ mod soundfont;
 pub use basic::BasicKeys;
 pub use soundfont::SoundFontKeys;
 
+use crate::synth::monitor::SynthMonitor;
+use crate::synth::params::{ParamId, Route, SynthParams};
 use serde::{Deserialize, Serialize};
 
 pub const KEYS_VOICES: usize = 16;
@@ -58,6 +60,16 @@ pub fn gm_program(sound: KeysSound) -> u8 {
 
 /// Everything the engine asks of a keys sound. Called on the audio thread: no allocation, no locks.
 pub trait Instrument: Send {
+    fn set_param(&mut self, _id: ParamId, _value: f32) {}
+    fn set_route(&mut self, _slot: usize, _route: Option<Route>) {}
+    /// A whole patch (K12: the synth fades out, applies, then plays the notes held back).
+    fn load_params(&mut self, _params: &SynthParams) {}
+    fn sustain(&mut self, _down: bool) {}
+    fn set_tempo(&mut self, _bpm: f32) {}
+    fn monitor(&self) -> Option<SynthMonitor> {
+        None
+    }
+
     fn note_on(&mut self, note: u8, velocity: u8);
     fn note_off(&mut self, note: u8);
     /// −2..2 semitones; applies to held notes live.
