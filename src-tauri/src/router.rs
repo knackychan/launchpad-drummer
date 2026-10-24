@@ -100,6 +100,12 @@ pub struct MidiOutcome {
     pub set_param: Option<(String, ParamValue)>,
 }
 
+#[derive(Default, Debug, PartialEq)]
+pub struct LcxlOutcome {
+    pub mixer: bool,
+    pub synth: Option<(ParamId, f32)>,
+}
+
 /// A refused set replacement: nothing changed and the inputs are handed back.
 #[derive(Debug)]
 pub struct Rejected {
@@ -775,7 +781,10 @@ impl Router {
             } else {
                 s.start(Instant::now(), params);
             }
-        } else if id.starts_with("bank.") || matches!(id, "seq.bpm" | "seq.swing" | "keys.volume") {
+        } else if id.starts_with("bank.")
+            || id.starts_with("synth.")
+            || matches!(id, "seq.bpm" | "seq.swing" | "keys.volume")
+        {
             out.set_param = Some((id.to_string(), param));
         }
     }
@@ -848,37 +857,56 @@ impl Router {
         }
     }
 
-    /// A Launch Control XL control: faders, knobs and the two button rows drive mixer channel
-    /// `ch` directly (the value jumps to the hardware, no pickup). Mixer values are not undoable.
-    /// Returns whether the mixer changed (a release, or the same value again, changes nothing).
-    pub fn on_lcxl(&mut self, ev: LcxlEvent) -> bool {
+    /// Faders/buttons change the mixer directly; knobs return an undoable synth edit for AppState.
+    pub fn on_lcxl(&mut self, ev: LcxlEvent, synth_engine: bool) -> LcxlOutcome {
+        if let LcxlEvent::Knob { row, ch, value } = ev {
+            let synth = synth_engine
+                .then(|| {
+                    lcxl::SYNTH_KNOBS
+                        .get(row as usize)?
+                        .get(ch as usize)
+                        .copied()
+                })
+                .flatten()
+                .map(|id| {
+                    (
+                        id,
+                        id.meta().kind.from_norm(f32::from(value.min(127)) / 127.0),
+                    )
+                });
+            return LcxlOutcome {
+                mixer: false,
+                synth,
+            };
+        }
         let ch = match ev {
             LcxlEvent::Fader { ch, .. }
             | LcxlEvent::Knob { ch, .. }
             | LcxlEvent::Button { ch, .. } => ch as usize,
         };
         let Some(old) = self.set.mixer.groups.get(ch) else {
-            return false;
+            return LcxlOutcome::default();
         };
         let mut g = old.clone();
         match ev {
             LcxlEvent::Fader { value, .. } => g.volume_db = lcxl::fader_db(value),
-            LcxlEvent::Knob { row: 0, value, .. } => g.pan = lcxl::knob_pan(value),
-            LcxlEvent::Knob { row: 1, value, .. } => g.pitch_semitones = lcxl::knob_pitch(value),
-            LcxlEvent::Knob { value, .. } => g.lowpass_hz = lcxl::knob_lowpass(value),
+            LcxlEvent::Knob { .. } => return LcxlOutcome::default(),
             LcxlEvent::Button {
                 row: 0, on: true, ..
             } => g.mute = !g.mute,
             LcxlEvent::Button {
                 row: 1, on: true, ..
             } => g.solo = !g.solo,
-            LcxlEvent::Button { .. } => return false,
+            LcxlEvent::Button { .. } => return LcxlOutcome::default(),
         }
         if g == *old {
-            return false;
+            return LcxlOutcome::default();
         }
         self.update_group(ch, g);
-        true
+        LcxlOutcome {
+            mixer: true,
+            synth: None,
+        }
     }
 
     pub fn on_lp_event(&mut self, ev: LpEvent) {
@@ -998,40 +1026,41 @@ mod tests {
     }
 
     #[test]
-    fn lcxl_fader_sets_the_group_volume_and_pushes_one_set_group() {
+    fn lcxl_faders_still_drive_the_mixer() {
         let (mut r, mut rx) = router_with_pad(0.0, 0.0);
-        assert!(r.on_lcxl(LcxlEvent::Fader { ch: 2, value: 127 }));
+        assert!(
+            r.on_lcxl(LcxlEvent::Fader { ch: 2, value: 127 }, true)
+                .mixer
+        );
         assert_eq!(r.set().mixer.groups[2].volume_db, 6.0);
         let sent = set_group_commands(&mut rx);
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, 2);
         // The same value again changes nothing and sends nothing.
-        assert!(!r.on_lcxl(LcxlEvent::Fader { ch: 2, value: 127 }));
+        assert!(
+            !r.on_lcxl(LcxlEvent::Fader { ch: 2, value: 127 }, true)
+                .mixer
+        );
         assert!(set_group_commands(&mut rx).is_empty());
     }
 
     #[test]
-    fn lcxl_knobs_set_pan_pitch_and_lowpass() {
+    fn lcxl_knobs_drive_the_synth_only_with_the_synth_engine() {
         let (mut r, _rx) = router_with_pad(0.0, 0.0);
-        assert!(r.on_lcxl(LcxlEvent::Knob {
-            row: 0,
-            ch: 1,
-            value: 127
-        }));
-        assert!(r.on_lcxl(LcxlEvent::Knob {
+        let mixer = r.set().mixer.clone();
+        let knob = LcxlEvent::Knob {
             row: 1,
-            ch: 1,
-            value: 0
-        }));
-        assert!(r.on_lcxl(LcxlEvent::Knob {
-            row: 2,
-            ch: 1,
-            value: 0
-        }));
-        let g = &r.set().mixer.groups[1];
-        assert_eq!(g.pan, 1.0);
-        assert_eq!(g.pitch_semitones, -12.0);
-        assert_eq!(g.lowpass_hz, 200.0);
+            ch: 0,
+            value: 127,
+        };
+        assert_eq!(
+            r.on_lcxl(knob, true).synth,
+            Some((ParamId::FilterCutoff, 20000.0))
+        );
+        let off = r.on_lcxl(knob, false);
+        assert_eq!(off.synth, None);
+        assert!(!off.mixer);
+        assert_eq!(r.set().mixer, mixer);
     }
 
     #[test]
@@ -1047,15 +1076,15 @@ mod tests {
             ch: 3,
             on: false,
         };
-        assert!(r.on_lcxl(press(0)));
+        assert!(r.on_lcxl(press(0), true).mixer);
         assert!(r.set().mixer.groups[3].mute);
-        assert!(!r.on_lcxl(release(0)));
+        assert!(!r.on_lcxl(release(0), true).mixer);
         assert!(r.set().mixer.groups[3].mute);
-        assert!(r.on_lcxl(press(0)));
+        assert!(r.on_lcxl(press(0), true).mixer);
         assert!(!r.set().mixer.groups[3].mute);
-        assert!(r.on_lcxl(press(1)));
+        assert!(r.on_lcxl(press(1), true).mixer);
         assert!(r.set().mixer.groups[3].solo);
-        assert!(!r.on_lcxl(release(1)));
+        assert!(!r.on_lcxl(release(1), true).mixer);
         assert!(r.set().mixer.groups[3].solo);
     }
 

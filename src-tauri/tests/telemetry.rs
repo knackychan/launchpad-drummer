@@ -11,6 +11,39 @@ use std::time::{Duration, Instant};
 
 const SR: u32 = 48_000;
 
+#[test]
+fn the_synth_feed_follows_the_synth() {
+    let r = rig(16);
+    let (mut engine, _events, taps) = Engine::with_taps(SR);
+    r.state.set_taps(Some(taps));
+    r.state.set_telemetry(true);
+    engine.handle(Command::KeysNoteOn {
+        note: 60,
+        velocity: 100,
+    });
+    render(&mut engine, 8192);
+    let now = Instant::now();
+    let mut t = Telemetry::new();
+    let synth = t.tick_at(&r.state, now).synth.unwrap();
+    assert_eq!(
+        (
+            synth.scope.len(),
+            synth.spectrum.len(),
+            synth.curve.len(),
+            synth.live.len(),
+            synth.voices
+        ),
+        (256, 128, 128, 27, 1)
+    );
+    r.state.set_telemetry(false);
+    assert!(t.tick_at(&r.state, now).synth.is_none());
+    r.state.set_telemetry(true);
+    assert!(t
+        .tick_at(&r.state, now + Duration::from_millis(300))
+        .synth
+        .is_none());
+}
+
 fn play_dc(engine: &mut Engine, group: u8, value: f32) {
     let sample = Arc::new(Sample {
         rate: SR,

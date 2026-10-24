@@ -238,6 +238,8 @@ pub struct AppState {
     /// Which engine plays the keys, and the hook that tells the UI when a background reload changes it.
     keys_status: Arc<Mutex<KeysStatus>>,
     keys_notifier: Arc<Mutex<Option<KeysNotifier>>>,
+    synth_changes: Arc<Mutex<Vec<(String, f32)>>>,
+    keys_notice: Arc<Mutex<KeysNotice>>,
     /// The sequencer clock state (shared with the router's record hook and the clock thread).
     seq: Arc<Mutex<SeqState>>,
     saver: Arc<Mutex<Saver>>,
@@ -252,6 +254,12 @@ pub struct AppState {
     /// Last waveform envelope (a leaf lock) and how many full scans were made (tests).
     peaks_cache: Arc<Mutex<Option<PeaksEntry>>>,
     peak_scans: Arc<AtomicU64>,
+}
+
+#[derive(Default)]
+struct KeysNotice {
+    shown: bool,
+    text: Option<String>,
 }
 
 impl AppState {
@@ -292,6 +300,8 @@ impl AppState {
             set_dirty: Arc::new(AtomicBool::new(false)),
             keys_status: Arc::new(Mutex::new(KeysStatus::synth())),
             keys_notifier: Arc::default(),
+            synth_changes: Arc::default(),
+            keys_notice: Arc::default(),
             seq,
             saver: Arc::new(Mutex::new(Saver::new())),
             save_gate: Arc::new(Mutex::new(())),
@@ -589,8 +599,14 @@ impl AppState {
                 learn::apply_set_param(set, &id, value)
             });
             if changed {
-                self.set_dirty.store(true, Ordering::SeqCst);
                 touched = true;
+                if let Some(id) = learn::synth_param(&id) {
+                    let value = id.get(&r.set().keys.patch.params);
+                    r.send_synth_param(id, value);
+                    self.record_synth_change(id, value);
+                } else {
+                    self.set_dirty.store(true, Ordering::SeqCst);
+                }
                 if id.starts_with("keys.") {
                     r.send_keys();
                 }
@@ -688,16 +704,61 @@ impl AppState {
     /// dirty for autosave and the screen is told (throttled, see `take_mixer_change`). Returns
     /// the `learn-ignored` event when learning is armed (the LCXL is fixed in Part 1).
     pub fn on_lcxl(&self, ev: LcxlEvent) -> Option<UiEvent> {
+        let synth_engine = self.keys_status().engine == "synth";
+        if matches!(ev, LcxlEvent::Knob { .. }) && !synth_engine {
+            let mut notice = lock(&self.keys_notice);
+            if !notice.shown {
+                notice.shown = true;
+                notice.text = Some("LCXL knobs drive the synth — SoundFont active".into());
+            }
+        }
         let (changed, ignored) = {
             let mut r = lock(&self.router);
-            let changed = r.on_lcxl(ev);
+            let outcome = r.on_lcxl(ev, synth_engine);
+            if let Some((id, value)) = outcome.synth {
+                self.edit_in(
+                    &mut r,
+                    Some(&format!("synth.{}", id.meta().id)),
+                    Instant::now(),
+                    |set| {
+                        let before = id.get(&set.keys.patch.params);
+                        id.set(&mut set.keys.patch.params, value);
+                        if before != id.get(&set.keys.patch.params) {
+                            set.keys.modified = true;
+                        }
+                    },
+                );
+                let value = id.get(&r.set().keys.patch.params);
+                r.send_synth_param(id, value);
+                self.record_synth_change(id, value);
+            }
+            let changed = outcome.mixer || outcome.synth.is_some();
+            if outcome.mixer {
+                self.mixer_dirty.store(true, Ordering::SeqCst);
+            }
             (changed, r.learn_ignore("LCXL controls are fixed in Part 1"))
         };
         if changed {
-            self.mixer_dirty.store(true, Ordering::SeqCst);
             self.touch();
         }
         ignored
+    }
+
+    fn record_synth_change(&self, id: ParamId, value: f32) {
+        let mut changes = lock(&self.synth_changes);
+        if let Some((_, v)) = changes.iter_mut().find(|(name, _)| name == id.meta().id) {
+            *v = value;
+        } else {
+            changes.push((id.meta().id.into(), value));
+        }
+    }
+
+    pub fn take_synth_changes(&self) -> Vec<(String, f32)> {
+        std::mem::take(&mut *lock(&self.synth_changes))
+    }
+
+    pub fn take_keys_notice(&self) -> Option<String> {
+        lock(&self.keys_notice).text.take()
     }
 
     /// True once per hardware mixer change; the LCXL bridge emits `mixer-changed` for it.
@@ -843,7 +904,7 @@ impl AppState {
     fn reload_soundfont(&self) {
         let config = self.get_config();
         if config.engine() != "soundfont" {
-            *lock(&self.keys_status) = KeysStatus::synth();
+            self.set_keys_status(KeysStatus::synth());
             return;
         }
         let Some(path) = config.soundfont else { return };
@@ -867,6 +928,14 @@ impl AppState {
 
     pub fn keys_status(&self) -> KeysStatus {
         lock(&self.keys_status).clone()
+    }
+
+    fn set_keys_status(&self, status: KeysStatus) {
+        let mut previous = lock(&self.keys_status);
+        if previous.engine != status.engine {
+            *lock(&self.keys_notice) = KeysNotice::default();
+        }
+        *previous = status;
     }
 
     /// Build the keys instrument (the built-in synth, or the SoundFont at `path`) for the current
@@ -908,7 +977,7 @@ impl AppState {
                 }
             },
         };
-        *lock(&self.keys_status) = status.clone();
+        self.set_keys_status(status.clone());
         status
     }
 
@@ -2042,6 +2111,59 @@ mod tests {
     };
 
     #[test]
+    fn an_lcxl_synth_turn_is_undoable_and_reported() {
+        let (state, _) = app();
+        state.on_lcxl(LcxlEvent::Knob {
+            row: 1,
+            ch: 0,
+            value: 64,
+        });
+        state.on_lcxl(LcxlEvent::Knob {
+            row: 1,
+            ch: 0,
+            value: 127,
+        });
+        assert_eq!(
+            state.take_synth_changes(),
+            vec![("filter.cutoff".into(), 20000.0)]
+        );
+        assert!(state.take_synth_changes().is_empty());
+        assert_eq!(
+            state.undo().unwrap().keys.patch.params.filter.cutoff,
+            12000.0
+        );
+        assert!(!state.history_state().can_undo);
+    }
+
+    #[test]
+    fn a_knob_with_the_soundfont_queues_one_notice() {
+        let (state, _) = app();
+        let status = KeysStatus {
+            engine: "soundfont".into(),
+            name: "TEST".into(),
+            error: None,
+        };
+        state.set_keys_status(status.clone());
+        let knob = LcxlEvent::Knob {
+            row: 1,
+            ch: 0,
+            value: 127,
+        };
+        state.on_lcxl(knob);
+        assert_eq!(
+            state.take_keys_notice().as_deref(),
+            Some("LCXL knobs drive the synth — SoundFont active")
+        );
+        state.on_lcxl(knob);
+        assert_eq!(state.take_keys_notice(), None);
+        assert!(state.take_synth_changes().is_empty());
+        state.set_keys_status(KeysStatus::synth());
+        state.set_keys_status(status);
+        state.on_lcxl(knob);
+        assert!(state.take_keys_notice().is_some());
+    }
+
+    #[test]
     fn a_synth_param_drag_is_one_undo_step() {
         let (state, mut rx) = app();
         while rx.pop().is_ok() {}
@@ -2072,8 +2194,45 @@ mod tests {
         while rx.pop().is_ok() {}
         state.synth_param("filter.cutoff", 500.0).unwrap();
         assert!(state.get_current_set().keys.modified);
+        assert!(
+            state.take_synth_changes().is_empty(),
+            "screen edits are not mirrored back"
+        );
         assert!(std::iter::from_fn(|| rx.pop().ok())
             .any(|c| matches!(c, Command::SynthParam(ParamId::FilterCutoff, 500.0))));
+    }
+
+    #[test]
+    fn learned_synth_ccs_are_undoable_and_reported_without_a_whole_set_echo() {
+        let (state, mut rx) = app();
+        lock(&state.router).set_mut().learn.push(learn::Binding {
+            device: "K".into(),
+            kind: learn::LearnKind::Cc,
+            number: 9,
+            target: learn::Target::Param("synth.filter.cutoff".into()),
+        });
+        while rx.pop().is_ok() {}
+        state.on_midi(
+            "K",
+            "other",
+            MidiMsg::Cc {
+                ch: 0,
+                cc: 9,
+                value: 127,
+            },
+            false,
+        );
+        assert_eq!(
+            state.take_synth_changes(),
+            vec![("filter.cutoff".into(), 20000.0)]
+        );
+        assert!(!state.take_set_change());
+        assert!(std::iter::from_fn(|| rx.pop().ok())
+            .any(|c| matches!(c, Command::SynthParam(ParamId::FilterCutoff, 20000.0))));
+        assert_eq!(
+            state.undo().unwrap().keys.patch.params.filter.cutoff,
+            12000.0
+        );
     }
 
     #[test]

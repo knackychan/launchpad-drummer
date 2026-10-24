@@ -3,6 +3,7 @@
 
 use super::{Mixer, Set};
 use crate::devices::lcxl;
+use crate::synth::params::{Kind, ParamId as SynthParamId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -57,6 +58,7 @@ enum BankParam {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParamId {
+    Synth(SynthParamId),
     Group(usize, GroupParam),
     Master,
     Bank(usize, BankParam),
@@ -75,6 +77,9 @@ fn index(s: &str) -> Option<usize> {
 }
 
 fn parse_id(id: &str) -> Option<ParamId> {
+    if let Some(p) = synth_param(id) {
+        return Some(ParamId::Synth(p));
+    }
     let parts: Vec<&str> = id.split('.').collect();
     match parts.as_slice() {
         ["master"] => Some(ParamId::Master),
@@ -110,6 +115,11 @@ fn parse_id(id: &str) -> Option<ParamId> {
     }
 }
 
+pub fn synth_param(id: &str) -> Option<SynthParamId> {
+    let p = SynthParamId::from_id(id.strip_prefix("synth.")?)?;
+    (!matches!(p.meta().kind, Kind::Choice { .. })).then_some(p)
+}
+
 pub fn is_param(id: &str) -> bool {
     parse_id(id).is_some()
 }
@@ -128,6 +138,13 @@ pub fn param_value(id: &str, cc: u8) -> Option<ParamValue> {
     let unit = f32::from(cc) / 127.0;
     let continuous = ParamValue::Continuous;
     Some(match parse_id(id)? {
+        ParamId::Synth(p) => {
+            if p.meta().kind == Kind::Bool {
+                ParamValue::Toggle
+            } else {
+                continuous(p.meta().kind.from_norm(unit))
+            }
+        }
         ParamId::Group(_, GroupParam::Volume) | ParamId::Master => continuous(lcxl::fader_db(cc)),
         ParamId::Group(_, GroupParam::Pan) => continuous(lcxl::knob_pan(cc)),
         ParamId::Group(_, GroupParam::Pitch) => continuous(lcxl::knob_pitch(cc)),
@@ -234,6 +251,20 @@ pub fn apply_mixer_param(mixer: &mut Mixer, id: &str, value: ParamValue) -> bool
 /// value changed.
 pub fn apply_set_param(set: &mut Set, id: &str, value: ParamValue) -> bool {
     match (parse_id(id), value) {
+        (Some(ParamId::Synth(p)), value) => {
+            let before = p.get(&set.keys.patch.params);
+            let v = match value {
+                ParamValue::Continuous(v) => v,
+                ParamValue::Toggle if p.meta().kind == Kind::Bool => 1.0 - before,
+                _ => return false,
+            };
+            p.set(&mut set.keys.patch.params, v);
+            let changed = before != p.get(&set.keys.patch.params);
+            if changed {
+                set.keys.modified = true;
+            }
+            changed
+        }
         (Some(ParamId::SeqBpm), ParamValue::Continuous(v)) => {
             replace(&mut set.pattern.bpm, v.clamp(60.0, 200.0))
         }

@@ -5816,21 +5816,25 @@ impl Telemetry { pub fn tick_at(&mut self, state: &AppState, now: Instant) -> Ti
 - **Knob LEDs:** `LedState` gains the synth flag; `led_updates` sends the 24 knob LEDs (`lcxl::knob_led_index`, template 0) whenever the flag differs from what the device last got (or on first contact): row 0 `Amber`, row 1 `Red`, row 2 `Green` while the synth engine plays, `Off` otherwise.
 - **Telemetry:** the thread keeps a second 2048-sample ring for `taps.keys` and the newest `SynthMonitor` from `taps.synth` with its arrival time. When the feed is on and a monitor arrived within the last 250 ms, the tick builds `SynthTelemetry`: `scope` = 256 samples starting at `trigger_index` of the ordered ring; `spectrum` = `log_bands(fft(keys ring), rate, &freqs)` with `freqs = log_freqs(128, 20.0, 20_000.0)` (computed once); `curve` = `filter::response_db(monitor.filter, monitor.cutoff_hz, monitor.reso, monitor.drive, &freqs)`; the other fields copied from the monitor (`env`, `lfo` as `[f32; 2]` pairs). `run()` emits it as `synth-telemetry`.
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   - `kit_learn.rs`: `synth_ids_are_learnable_params` (`is_param("synth.filter.cutoff")`, not `"synth.nope"`; `param_value("synth.filter.cutoff", 127)` = `Continuous(20000.0)`; `param_value("synth.oscB.on", 127)` = `Toggle`; `apply_set_param` sets the cutoff, flips `oscB.on`, sets `modified`).
   - `audio_fft.rs`: `log_freqs_span_the_range` (`log_freqs(128, 20.0, 20_000.0)` starts at 20 and ends at 20 000 within 0.01, strictly increasing); `log_bands_find_a_sine` (a full-scale sine on bin 100 → the band whose centre is nearest 100 × 23.4375 Hz reads above −1 dBFS, a band two octaves away below −60).
   - `src-tauri/src/router.rs` tests: `lcxl_knobs_drive_the_synth_only_with_the_synth_engine` (row 1 ch 0 value 127 → `Some((FilterCutoff, 20000.0))`; with `false` → `None` and the mixer unchanged); `lcxl_faders_still_drive_the_mixer`.
   - `src-tauri/src/state.rs` tests: `an_lcxl_synth_turn_is_undoable_and_reported` (turn → `take_synth_changes()` = `[("filter.cutoff", 20000.0)]`, undo restores); `a_knob_with_the_soundfont_queues_one_notice`.
   - `src-tauri/src/lcxl.rs` tests: `knob_leds_follow_the_engine` (first update sends 24 knob messages amber/red/green; switching the flag sends 24 `Off`s; no change sends none).
   - `src-tauri/tests/telemetry.rs`: `the_synth_feed_follows_the_synth` (engine with taps, `KeysNoteOn`, render 8192 frames, `tick_at(now)` → `synth` is `Some` with `scope.len() == 256`, `spectrum.len() == 128`, `curve.len() == 128`, `live.len() == 27`, `voices == 1`; with the feed off → `None`; `tick_at(now + 300 ms)` without new monitors → `None`).
-- [ ] **Step 2: Run** `cargo test --workspace` — expected: failures.
-- [ ] **Step 3: Implement** the contracts and behaviour.
-- [ ] **Step 4: Run** the full verification.
-- [ ] **Step 5: Commit** `feat(app): LCXL synth knobs, learned synth CCs and the synth feed`.
+- [x] **Step 2: Run** `cargo test --workspace` — expected: failures.
+- [x] **Step 3: Implement** the contracts and behaviour.
+- [x] **Step 4: Run** the full verification.
+- [x] **Step 5: Commit** `feat(app): LCXL synth knobs, learned synth CCs and the synth feed`.
 
 **Do not:** let LCXL messages bind during learn; emit `synth-params` for edits that came from the screen (the UI already shows them); compute the FFT or the curve on the audio thread.
 
-**Done when:** [ ] tests first → PASS; [ ] full verification; [ ] committed.
+**Done when:** [x] tests first → PASS; [x] full verification; [x] committed.
+
+---
+
+**Task 12 verification (2026-10-24):** Tests written first and observed failing on the missing contracts. Full verification PASS: cargo fmt --all -- --check; cargo test --workspace (512 passed, 0 failed, 2 debug timing tests ignored); npm test (128 passed); npm run check (0 errors, 0 warnings). Inline compliance and quality reviews checked parameter ids and stored values, per-control undo coalescing, last-value batching, screen edits not echoed, once-per-engine notices, 40 LED initialization/deltas, log spectrum and stale-monitor suppression. Added a learned-CC integration assertion for commands, undo and no whole-set echo. The toggle test captures its initial state because the default factory ePiano already enables oscillator B. Reused the existing FFT workspace sequentially for the two feeds; all FFT/response work remains off the audio thread. Physical LCXL and audible checks remain for Task 19.
 
 ---
 
