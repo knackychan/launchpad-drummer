@@ -2080,7 +2080,7 @@ Task 3 verification (2026-10-24): All eight prescribed tests were written first 
 - DRIVE: pre-gain `dg = 10^(24·DRIVE/20)`. LP 24: the ladder gets `x·dg` (its own tanh saturates); the SVF types get `tanh(x·dg)` when DRIVE > 0 (no tanh at DRIVE 0). Both outputs × `1/√dg`.
 - `response_db`: the analog prototype `1/((1 + s)⁴ + k) · √(1 + k)` for LP 24; `1/(s² + s/Q + 1)` × (1, s², s/Q, s² + 1) for LP 12 / HP 12 / BP 12 / NOTCH, at `s = j·f/cutoff`; plus `12 × DRIVE` dB (24 dB pre-gain minus 12 dB makeup); floor −120 dB.
 
-- [ ] **Step 1: Write the failing tests** — `crates/lpd-core/tests/synth_filter.rs`:
+- [x] **Step 1: Write the failing tests** — `crates/lpd-core/tests/synth_filter.rs`:
 
 ```rust
 use lpd_core::synth::filter::*;
@@ -2181,9 +2181,9 @@ fn resonance_ranges() {
 }
 ```
 
-- [ ] **Step 2: Run** `cargo test -p lpd-core --test synth_filter` — expected: FAIL to compile.
+- [x] **Step 2: Run** `cargo test -p lpd-core --test synth_filter` — expected: FAIL to compile.
 
-- [ ] **Step 3: Implement** `crates/lpd-core/src/synth/filter.rs` (complete):
+- [x] **Step 3: Implement** `crates/lpd-core/src/synth/filter.rs` (complete):
 
 ```rust
 //! Voice filters (spec §3.5, plan K9): a Moog-style ladder for LP 24 and a topology-preserving
@@ -2362,12 +2362,14 @@ pub fn response_db(kind: FilterType, cutoff: f32, reso: f32, drive: f32, freqs: 
 
 `crates/lpd-core/src/synth/mod.rs` gains `pub mod filter;`.
 
-- [ ] **Step 4: Run** `cargo test -p lpd-core --test synth_filter` — expected: 5 passed. Then the full verification.
-- [ ] **Step 5: Commit** `feat(core): synth ladder and state-variable filters`.
+- [x] **Step 4: Run** `cargo test -p lpd-core --test synth_filter` — expected: 5 passed. Then the full verification.
+- [x] **Step 5: Commit** `feat(core): synth ladder and state-variable filters`.
 
 **Do not:** compute `tan` per sample (the voice interpolates `g` across a tick); let a filter type change keep the other topology's state; use `response_db` on the audio thread.
 
-**Done when:** [ ] tests first → PASS; [ ] full verification; [ ] committed.
+**Done when:** [x] tests first → PASS; [x] full verification; [x] committed.
+
+Task 4 verification (2026-10-24): Five prescribed tests written first and observed failing on the absent filter module; all 5 passed after copying the prescribed implementation. `cargo fmt --all -- --check` PASS; `cargo test --workspace` PASS (437 passed, 0 failed, 1 ignored); `npm test` PASS (127 passed); `npm run check` PASS (0 errors, 0 warnings). Spec-compliance and quality reviews checked the TPT ladder/SVF equations, resonance and drive laws, analytic response, stereo states, topology reset and fixed-size process state. Tests cover analytic-vs-measured response, self-oscillation and rapid modulation. No per-sample tan or heap work in process; allocating response helper remains unwired and intended for telemetry. No deviations beyond rustfmt. App/preview/listening/hardware checks deferred to integration.
 
 ### Task 5: Envelopes and LFOs
 
