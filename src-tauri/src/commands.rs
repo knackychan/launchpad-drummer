@@ -1,14 +1,20 @@
 use crate::audio::{self, AsioInfo, AudioController, AudioDevice, AudioStatus};
 use crate::config::{AppConfig, AudioPrefs};
 use crate::devices::MidiDevice;
+use crate::patches::{PatchList, PatchRef};
 use crate::router::LearnTarget;
 use crate::saver::SaveStatus;
 use crate::startup::{LoadStatus, Startup};
+use crate::state::PatchRequest;
 use crate::state::{
     AppState, DropReport, HistoryState, InputMode, KeysStatus, MissingPad, OpenResult, SamplePeaks,
 };
 use lpd_core::instrument::KeysMix;
 use lpd_core::kit::{Group, LightModes, Pad, Set};
+use lpd_core::synth::{
+    params::{Route, TableId},
+    wavetable,
+};
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -244,6 +250,130 @@ pub(crate) fn keys_mod(value: f32, state: State<'_, AppState>) {
 #[tauri::command]
 pub(crate) fn set_keys(settings: KeysMix, state: State<'_, AppState>) -> Set {
     state.set_keys(settings)
+}
+
+fn patches_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .document_dir()
+        .map(|p| p.join("Launchpad Drummer").join("Patches"))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn synth_param(
+    id: String,
+    value: f32,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.synth_param(&id, value)
+}
+
+#[tauri::command]
+pub(crate) fn synth_route(
+    slot: usize,
+    route: Option<Route>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.synth_route(slot, route)
+}
+
+#[tauri::command]
+pub(crate) async fn synth_patches(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<PatchList, String> {
+    let dir = patches_dir(&app)?;
+    worker(&state, move |s| Ok(s.synth_patches(&dir))).await
+}
+
+#[tauri::command]
+pub(crate) async fn synth_load_patch(
+    source: PatchRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Set, String> {
+    let dir = patches_dir(&app)?;
+    let set = worker(&state, move |s| s.load_patch(source, &dir)).await?;
+    let _ = app.emit("set-changed", &set);
+    Ok(set)
+}
+
+#[tauri::command]
+pub(crate) async fn synth_save_patch(
+    name: String,
+    overwrite: bool,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<PatchRef, String> {
+    let dir = patches_dir(&app)?;
+    worker(&state, move |s| s.save_patch(&name, overwrite, &dir)).await
+}
+
+#[tauri::command]
+pub(crate) async fn synth_rename_patch(
+    file: String,
+    name: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<PatchRef, String> {
+    let dir = patches_dir(&app)?;
+    worker(&state, move |s| s.rename_patch(&file, &name, &dir)).await
+}
+
+#[tauri::command]
+pub(crate) async fn synth_delete_patch(
+    file: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let dir = patches_dir(&app)?;
+    worker(&state, move |s| s.delete_patch(&file, &dir)).await
+}
+
+#[tauri::command]
+pub(crate) async fn synth_revert(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Set, String> {
+    let dir = patches_dir(&app)?;
+    let set = worker(&state, move |s| s.revert_patch(&dir)).await?;
+    let _ = app.emit("set-changed", &set);
+    Ok(set)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TableFrames {
+    frames: Vec<Vec<f32>>,
+}
+
+#[tauri::command]
+pub(crate) fn synth_table(table: TableId) -> TableFrames {
+    TableFrames {
+        frames: wavetable::table(table).display(128),
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn set_keys_engine(
+    engine: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<KeysStatus, String> {
+    let status = worker(&state, move |s| s.set_keys_engine(&engine)).await?;
+    let _ = app.emit("keys-status", &status);
+    Ok(status)
+}
+
+#[tauri::command]
+pub(crate) async fn patches_folder(app: AppHandle) -> Result<String, String> {
+    let dir = patches_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        Ok(dir.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

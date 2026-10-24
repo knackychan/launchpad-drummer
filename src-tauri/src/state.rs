@@ -13,6 +13,7 @@ use crate::config::{self, AppConfig, AudioPrefs};
 use crate::devices::{self, MidiDevice, MidiMsg};
 use crate::lights::LightPainter;
 use crate::logfile;
+use crate::patches::{self, PatchList, PatchRef};
 use crate::router::{LearnTarget, Router, UiEvent};
 use crate::saver::{SaveState, SaveStatus, Saver};
 use crate::sequencer::{Fired, Params, SeqState};
@@ -24,12 +25,41 @@ use lpd_core::devices::lcxl::LcxlEvent;
 use lpd_core::instrument::{KeysMix, SoundFontKeys};
 use lpd_core::kit::learn;
 use lpd_core::kit::{self, History, Pad, Set};
+use lpd_core::synth::{
+    factory::factory,
+    params::{ParamId, Route, ROUTES},
+    patch::{clean_name, Patch, PatchSource},
+};
 use rtrb::{Consumer, Producer};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Instant;
+
+#[derive(serde::Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum PatchRequest {
+    Factory(String),
+    User(String),
+    Init(bool),
+}
+
+fn requested_patch(request: PatchRequest, dir: &Path) -> Result<(Patch, PatchSource), String> {
+    match request {
+        PatchRequest::Factory(id) => {
+            let p = factory(&id).ok_or_else(|| format!("Unknown factory patch: {id}"))?;
+            Ok((p, PatchSource::Factory(id)))
+        }
+        PatchRequest::User(file) => Ok((patches::read(dir, &file)?, PatchSource::User(file))),
+        PatchRequest::Init(true) => Ok((Patch::init(), PatchSource::Init)),
+        PatchRequest::Init(false) => Err(<serde_json::Error as serde::de::Error>::invalid_value(
+            serde::de::Unexpected::Bool(false),
+            &"true",
+        )
+        .to_string()),
+    }
+}
 
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -458,10 +488,18 @@ impl AppState {
     ) -> Result<Set, String> {
         let mut pattern = pattern;
         lpd_core::seq::validate(&mut pattern)?;
-        Ok(self.edit(key, |set| {
+        let mut r = lock(&self.router);
+        let changed = r.set().pattern.bpm != pattern.bpm;
+        let set = self.edit_in(&mut r, key, Instant::now(), |set| {
             set.pattern = pattern;
             set.clone()
-        }))
+        });
+        if changed {
+            r.send_tempo();
+        }
+        drop(r);
+        self.touch();
+        Ok(set)
     }
 
     pub fn seq_add_lane(&self, bank: usize, x: u8, y: u8) -> Result<Set, String> {
@@ -555,6 +593,9 @@ impl AppState {
                 touched = true;
                 if id.starts_with("keys.") {
                     r.send_keys();
+                }
+                if id == "seq.bpm" {
+                    r.send_tempo();
                 }
             }
         }
@@ -800,10 +841,12 @@ impl AppState {
     /// The new engine starts with the built-in synth; a configured SoundFont is loaded again for
     /// its sample rate, in the background.
     fn reload_soundfont(&self) {
-        let Some(path) = self.get_config().soundfont else {
+        let config = self.get_config();
+        if config.engine() != "soundfont" {
             *lock(&self.keys_status) = KeysStatus::synth();
             return;
-        };
+        }
+        let Some(path) = config.soundfont else { return };
         let state = self.clone();
         std::thread::spawn(move || {
             let status = state.load_keys_instrument(Some(&path));
@@ -1556,8 +1599,176 @@ impl AppState {
     /// Remembers the `.sf2` file and loads it (slow: run it off the UI thread). `None` goes back
     /// to the built-in synth.
     pub fn set_soundfont(&self, path: Option<String>) -> Result<KeysStatus, String> {
-        self.update_config(|c| c.soundfont = path.clone())?;
+        self.update_config(|c| {
+            c.soundfont = path.clone();
+            c.keys_engine = Some(if path.is_some() { "soundfont" } else { "synth" }.into());
+        })?;
         Ok(self.load_keys_instrument(path.as_deref()))
+    }
+
+    pub fn set_keys_engine(&self, engine: &str) -> Result<KeysStatus, String> {
+        if !matches!(engine, "synth" | "soundfont") {
+            return Err(<serde_json::Error as serde::de::Error>::unknown_variant(
+                engine,
+                &["synth", "soundfont"],
+            )
+            .to_string());
+        }
+        let config = self.get_config();
+        if engine == "soundfont" && config.soundfont.is_none() {
+            return Err("Load a SoundFont first".into());
+        }
+        self.update_config(|c| c.keys_engine = Some(engine.into()))?;
+        Ok(self.load_keys_instrument(if engine == "soundfont" {
+            config.soundfont.as_deref()
+        } else {
+            None
+        }))
+    }
+
+    pub fn synth_param(&self, name: &str, value: f32) -> Result<(), String> {
+        let id = ParamId::from_id(name).ok_or_else(|| format!("Unknown synth control: {name}"))?;
+        let mut r = lock(&self.router);
+        self.edit_in(
+            &mut r,
+            Some(&format!("synth.{name}")),
+            Instant::now(),
+            |set| {
+                let before = id.get(&set.keys.patch.params);
+                id.set(&mut set.keys.patch.params, value);
+                if before != id.get(&set.keys.patch.params) {
+                    set.keys.modified = true;
+                }
+            },
+        );
+        let stored = id.get(&r.set().keys.patch.params);
+        r.send_synth_param(id, stored);
+        drop(r);
+        self.touch();
+        Ok(())
+    }
+
+    pub fn synth_route(&self, slot: usize, route: Option<Route>) -> Result<(), String> {
+        let mut r = lock(&self.router);
+        let len = r.set().keys.patch.params.routes.len();
+        if slot >= ROUTES {
+            return Err("Matrix full (16 routes)".into());
+        }
+        if slot > len || (route.is_none() && slot == len) {
+            return Err(format!("No route in slot {}", slot + 1));
+        }
+        let key = (slot < len && route.is_some()).then(|| format!("synth.route.{slot}"));
+        self.edit_in(&mut r, key.as_deref(), Instant::now(), |set| {
+            set.keys.patch.params.routes.set(slot, route);
+            set.keys.modified = true;
+        });
+        let stored = if route.is_some() {
+            r.set().keys.patch.params.routes.get(slot).copied()
+        } else {
+            None
+        };
+        r.send_route(slot, stored);
+        drop(r);
+        self.touch();
+        Ok(())
+    }
+
+    pub fn synth_patches(&self, dir: &Path) -> PatchList {
+        PatchList {
+            factory: patches::factory_list(),
+            user: patches::list(dir),
+        }
+    }
+
+    fn apply_patch(&self, patch: Patch, source: PatchSource) -> Set {
+        let mut r = lock(&self.router);
+        let set = self.edit_in(&mut r, None, Instant::now(), |set| {
+            set.keys.patch = patch;
+            set.keys.patch_source = source;
+            set.keys.modified = false;
+            set.clone()
+        });
+        r.send_patch();
+        drop(r);
+        self.touch();
+        set
+    }
+
+    pub fn load_patch(&self, request: PatchRequest, dir: &Path) -> Result<Set, String> {
+        let user = matches!(&request, PatchRequest::User(_));
+        let (patch, source) = requested_patch(request, dir).map_err(|e| {
+            if user {
+                format!("Patch not loaded — {e}")
+            } else {
+                e
+            }
+        })?;
+        Ok(self.apply_patch(patch, source))
+    }
+
+    pub fn save_patch(&self, name: &str, overwrite: bool, dir: &Path) -> Result<PatchRef, String> {
+        let (before, source) = {
+            let r = lock(&self.router);
+            (
+                r.set().keys.patch.clone(),
+                r.set().keys.patch_source.clone(),
+            )
+        };
+        let mut patch = before.clone();
+        patch.name = clean_name(name);
+        let file = patches::write(dir, &patch, overwrite)?;
+        {
+            let mut r = lock(&self.router);
+            // An edit or patch switch during I/O must keep its modified state.
+            if r.set().keys.patch == before && r.set().keys.patch_source == source {
+                let keys = &mut r.set_mut().keys;
+                keys.patch.name = patch.name.clone();
+                keys.patch_source = PatchSource::User(file.clone());
+                keys.modified = false;
+            }
+        }
+        self.touch();
+        Ok(PatchRef {
+            id: file,
+            name: patch.name,
+            category: patch.category,
+        })
+    }
+
+    pub fn rename_patch(&self, file: &str, name: &str, dir: &Path) -> Result<PatchRef, String> {
+        let renamed = patches::rename(dir, file, name)?;
+        {
+            let mut r = lock(&self.router);
+            if r.set().keys.patch_source == PatchSource::User(file.into()) {
+                r.set_mut().keys.patch.name = renamed.name.clone();
+                r.set_mut().keys.patch_source = PatchSource::User(renamed.id.clone());
+            }
+        }
+        self.touch();
+        Ok(renamed)
+    }
+
+    pub fn delete_patch(&self, file: &str, dir: &Path) -> Result<(), String> {
+        patches::delete(dir, file)?;
+        {
+            let mut r = lock(&self.router);
+            if r.set().keys.patch_source == PatchSource::User(file.into()) {
+                r.set_mut().keys.patch_source = PatchSource::Init;
+            }
+        }
+        self.touch();
+        Ok(())
+    }
+
+    pub fn revert_patch(&self, dir: &Path) -> Result<Set, String> {
+        let source = lock(&self.router).set().keys.patch_source.clone();
+        let request = match source {
+            PatchSource::Factory(id) => PatchRequest::Factory(id),
+            PatchSource::User(file) => PatchRequest::User(file),
+            PatchSource::Init => PatchRequest::Init(true),
+        };
+        let (patch, source) = requested_patch(request, dir)?;
+        Ok(self.apply_patch(patch, source))
     }
 
     /// A key played on the screen: the engine and the mirror (`keys-note`, for the caller to emit).
@@ -1825,6 +2036,137 @@ impl AppState {
 mod tests {
     use super::*;
     use lpd_core::instrument::KeysSettings;
+    use lpd_core::synth::{
+        params::{Dest, ParamId, Route, Source},
+        patch::PatchSource,
+    };
+
+    #[test]
+    fn a_synth_param_drag_is_one_undo_step() {
+        let (state, mut rx) = app();
+        while rx.pop().is_ok() {}
+        state.synth_param("filter.cutoff", 300.0).unwrap();
+        state.synth_param("filter.cutoff", 500.0).unwrap();
+        assert!(state.history_state().can_undo);
+        assert_eq!(
+            state.undo().unwrap().keys.patch.params.filter.cutoff,
+            12000.0
+        );
+        assert!(!state.history_state().can_undo);
+        assert!(std::iter::from_fn(|| rx.pop().ok()).any(|c| matches!(c, Command::SynthLoad(_))));
+    }
+
+    #[test]
+    fn an_unknown_synth_param_is_an_error() {
+        let (state, _) = app();
+        assert_eq!(
+            state.synth_param("nope", 1.0),
+            Err("Unknown synth control: nope".into())
+        );
+        assert!(!state.history_state().can_undo);
+    }
+
+    #[test]
+    fn a_synth_param_marks_the_patch_modified_and_reaches_the_engine() {
+        let (state, mut rx) = app();
+        while rx.pop().is_ok() {}
+        state.synth_param("filter.cutoff", 500.0).unwrap();
+        assert!(state.get_current_set().keys.modified);
+        assert!(std::iter::from_fn(|| rx.pop().ok())
+            .any(|c| matches!(c, Command::SynthParam(ParamId::FilterCutoff, 500.0))));
+    }
+
+    #[test]
+    fn routes_append_replace_delete_and_refuse_a_seventeenth() {
+        let (state, _) = app();
+        let route = Route {
+            source: Source::Env1,
+            dest: Some(Dest::Cutoff),
+            amount: 0.25,
+            aux: None,
+            bypass: false,
+        };
+        let start = state.get_current_set().keys.patch.params.routes.len();
+        for slot in start..16 {
+            state.synth_route(slot, Some(route)).unwrap();
+        }
+        assert_eq!(
+            state.synth_route(16, Some(route)),
+            Err("Matrix full (16 routes)".into())
+        );
+        state
+            .synth_route(
+                0,
+                Some(Route {
+                    amount: 0.5,
+                    ..route
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            state
+                .get_current_set()
+                .keys
+                .patch
+                .params
+                .routes
+                .get(0)
+                .unwrap()
+                .amount,
+            0.5
+        );
+        state.synth_route(0, None).unwrap();
+        assert_eq!(state.get_current_set().keys.patch.params.routes.len(), 15);
+        assert_eq!(
+            state.synth_route(15, None),
+            Err("No route in slot 16".into())
+        );
+    }
+
+    #[test]
+    fn loading_a_patch_is_one_step_and_clears_modified() {
+        let (state, _) = app();
+        let dir = tempfile::tempdir().unwrap();
+        state.synth_param("filter.cutoff", 500.0).unwrap();
+        let set = state
+            .load_patch(PatchRequest::Factory("moogBass".into()), dir.path())
+            .unwrap();
+        assert_eq!(set.keys.patch.name, "MOOG BASS");
+        assert!(!set.keys.modified);
+        assert_eq!(state.undo().unwrap().keys.patch.params.filter.cutoff, 500.0);
+    }
+
+    #[test]
+    fn save_rename_delete_and_revert_through_the_library() {
+        let (state, _) = app();
+        let dir = tempfile::tempdir().unwrap();
+        state.synth_param("filter.cutoff", 300.0).unwrap();
+        let saved = state.save_patch("MY PATCH", false, dir.path()).unwrap();
+        state.synth_param("filter.cutoff", 700.0).unwrap();
+        let reverted = state.revert_patch(dir.path()).unwrap();
+        assert_eq!(reverted.keys.patch.params.filter.cutoff, 300.0);
+        assert!(!reverted.keys.modified);
+        let renamed = state
+            .rename_patch(&saved.id, "NEW NAME", dir.path())
+            .unwrap();
+        assert_eq!(
+            state.get_current_set().keys.patch_source,
+            PatchSource::User(renamed.id.clone())
+        );
+        state.delete_patch(&renamed.id, dir.path()).unwrap();
+        let set = state.get_current_set();
+        assert_eq!(set.keys.patch_source, PatchSource::Init);
+        assert_eq!(set.keys.patch.params.filter.cutoff, 300.0);
+    }
+
+    #[test]
+    fn the_engine_switch_needs_a_soundfont() {
+        let (state, _) = app();
+        assert_eq!(
+            state.set_keys_engine("soundfont"),
+            Err("Load a SoundFont first".into())
+        );
+    }
     use lpd_core::kit::Pad;
     use rtrb::RingBuffer;
 

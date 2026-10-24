@@ -10,9 +10,21 @@ pub struct AppConfig {
     pub last_set: Option<String>,
     pub library_dir: Option<String>,
     pub soundfont: Option<String>,
+    pub keys_engine: Option<String>,
     pub audio: AudioPrefs,
     /// Port name → "keys" | "other".
     pub midi_roles: BTreeMap<String, String>,
+}
+
+impl AppConfig {
+    pub fn engine(&self) -> &'static str {
+        if self.soundfont.is_some() && self.keys_engine.as_deref().is_none_or(|e| e == "soundfont")
+        {
+            "soundfont"
+        } else {
+            "synth"
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -58,6 +70,20 @@ pub fn save(path: &Path, c: &AppConfig) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_engine_defaults_follow_the_soundfont() {
+        let mut c = AppConfig {
+            soundfont: Some("keys.sf2".into()),
+            ..Default::default()
+        };
+        assert_eq!(c.engine(), "soundfont");
+        c.keys_engine = Some("synth".into());
+        assert_eq!(c.engine(), "synth");
+        c.keys_engine = Some("soundfont".into());
+        c.soundfont = None;
+        assert_eq!(c.engine(), "synth");
+    }
 
     #[test]
     fn missing_file_gives_defaults() {

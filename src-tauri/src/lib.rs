@@ -6,6 +6,7 @@ mod launchpad;
 pub mod lcxl;
 pub mod lights;
 pub mod logfile;
+pub mod patches;
 pub mod router;
 pub mod saver;
 pub mod sequencer;
@@ -186,6 +187,17 @@ pub fn run() {
             commands::keys_pitch,
             commands::keys_mod,
             commands::set_keys,
+            commands::synth_param,
+            commands::synth_route,
+            commands::synth_patches,
+            commands::synth_load_patch,
+            commands::synth_save_patch,
+            commands::synth_rename_patch,
+            commands::synth_delete_patch,
+            commands::synth_revert,
+            commands::synth_table,
+            commands::set_keys_engine,
+            commands::patches_folder,
             commands::trigger_pad_in,
             commands::release_pad_in
         ])

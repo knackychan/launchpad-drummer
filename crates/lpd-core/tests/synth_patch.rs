@@ -54,6 +54,7 @@ fn file_names_are_safe_on_windows() {
     assert_eq!(file_name(""), "UNTITLED.lbpatch");
     assert_eq!(file_name("dots..."), "DOTS.lbpatch");
     assert_eq!(file_name("Moog Bass 2"), "MOOG BASS 2.lbpatch");
+    assert_eq!(file_name("A..B"), "A__B.lbpatch");
 }
 
 #[test]

@@ -145,7 +145,7 @@ pub fn file_name(name: &str) -> String {
             }
         })
         .collect();
-    let mut name = name.trim_end_matches(['.', ' ']).to_owned();
+    let mut name = name.trim_end_matches(['.', ' ']).replace("..", "__");
     if name.is_empty() {
         name = "UNTITLED".into();
     }

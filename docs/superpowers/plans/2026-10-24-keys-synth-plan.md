@@ -76,6 +76,7 @@
 | K21 | User decision (2026-10-24): keep `#[cfg_attr(debug_assertions, ignore)]`; run release timing tests by name or without `--ignored`, because release builds do not ignore these tests. Applies to Task 2, Task 8 and Task 19 and overrides the original prompt release commands. |
 | K22 | User decision (2026-10-24): FX idle detection must also check pending sound in delay buffers and filter/FIR states, so silent gaps before echoes do not freeze the effect. Delay lines track samples at or above `1e-6` in constant time on write; enabled units sleep only when input/previous output are quiet and no pending state remains. Overrides Task 8 original idle rule and code. |
 | K23 | Task 8 numerical test correction under prompt rule 2: the second ping-pong impulse is `0.5 * (1 - exp(-2π*6000/48000)) = 0.272031`, so its assertion uses that value rather than `> 0.3`. The specified 6 kHz tone, 0.5 feedback and DSP remain unchanged. |
+| K24 | User decision (2026-10-24): preserve Task 11 strict rejection of any filename containing `..`; file_name replaces double dots with underscores (`A..B` → `A__B.lbpatch`) while preserving the displayed patch name. Task 11 also updates patch.rs and its filename test. |
 
 ### 0.4 Shared name registry
 
@@ -5751,19 +5752,21 @@ fn patches_dir(app: &AppHandle) -> Result<PathBuf, String>;   // <Documents>\Lau
 - **Sustain pedal:** `keys_event` handles `Cc { cc: 64, value }` → `keys_sustain(value >= 64)` (no UI event). `reset_keys_wheels` also lifts the pedal (sends `KeysSustain(false)` when it was down).
 - **Tempo (K4):** `seq_update` and a learned `seq.bpm` call `send_tempo()` when `pattern.bpm` changed (same router lock as the edit).
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   - `patches.rs` unit tests (tempdir): `write_then_list_and_read` (a written patch lists with its name and category and reads back equal); `writing_an_existing_name_needs_overwrite` (`Err("exists")`, then `Ok` with `overwrite`); `rename_moves_the_file` (old file gone, new listed); `delete_removes_it`; `unsafe_file_names_are_refused` (`read(dir, "..\\x.lbpatch")` → `Err("Not a patch file name")`); `unreadable_files_are_skipped_in_the_list`.
   - `state.rs` tests: `a_synth_param_drag_is_one_undo_step` (two `synth_param("filter.cutoff", …)` within 1 s → `history_state().can_undo` and one `undo()` restores 12 000 and queues a `SynthLoad`); `an_unknown_synth_param_is_an_error`; `a_synth_param_marks_the_patch_modified_and_reaches_the_engine` (queue holds `SynthParam(FilterCutoff, 500.0)`); `routes_append_replace_delete_and_refuse_a_seventeenth`; `loading_a_patch_is_one_step_and_clears_modified`; `save_rename_delete_and_revert_through_the_library` (tempdir); `the_engine_switch_needs_a_soundfont` (`set_keys_engine("soundfont")` without a path → `Err("Load a SoundFont first")`).
   - `config.rs` test: `keys_engine_defaults_follow_the_soundfont` (`None` + soundfont → `"soundfont"`; `Some("synth")` + soundfont → `"synth"`; `Some("soundfont")` without soundfont → `"synth"`).
   - `router.rs` tests: `the_sustain_pedal_reaches_the_engine` (CC 64 = 127 → `KeysSustain(true)`, 0 → `KeysSustain(false)`); `a_closed_keys_input_lifts_the_pedal`; `a_bpm_change_sends_the_tempo` (via `AppState::seq_update` with a new bpm → `KeysTempo(bpm)` queued).
-- [ ] **Step 2: Run** `cargo test --workspace` — expected: compile failures.
-- [ ] **Step 3: Implement** the contracts and behaviour. In `lib.rs` add `pub mod patches;` and register the eleven commands of the registry (0.4) after `commands::set_keys`.
-- [ ] **Step 4: Run** the full verification.
-- [ ] **Step 5: Commit** `feat(app): synth commands, patch library and engine switch`.
+- [x] **Step 2: Run** `cargo test --workspace` — expected: compile failures.
+- [x] **Step 3: Implement** the contracts and behaviour. In `lib.rs` add `pub mod patches;` and register the eleven commands of the registry (0.4) after `commands::set_keys`.
+- [x] **Step 4: Run** the full verification.
+- [x] **Step 5: Commit** `feat(app): synth commands, patch library and engine switch`.
 
 **Do not:** hold the router lock across file I/O; emit while holding the router; make patch saves undoable; accept file names with path separators.
 
-**Done when:** [ ] tests first → PASS; [ ] full verification; [ ] committed.
+**Done when:** [x] tests first → PASS; [x] full verification; [x] committed.
+
+Task 11 verification (2026-10-24): Seventeen prescribed app tests written first; workspace compilation failed on missing library/state/config contracts. K24 filename assertion separately failed with A..B.lbpatch, then passed after double-dot normalization. App unit suite PASS (140); `cargo fmt --all -- --check` PASS; `cargo test --workspace` PASS (504 passed, 0 failed, 2 ignored); `npm test` PASS (128 passed); `npm run check` PASS (0 errors, 0 warnings). Inline compliance and quality reviews checked all eleven handlers and camelCase arguments, exact normal error strings, history keys and metadata exceptions, path rejection, IO outside router locks, source retention, sustain/reset, learned and screen tempo forwarding, engine preferences and reloads. Saves use unique temporary files, sync and rename for overwrite; new saves use an exclusive atomic hard-link commit to preserve Err(exists) under concurrent creation, followed by temporary-file cleanup (implementation detail differing from literal tmp+rename for a new file; public behavior unchanged, tested on this Windows filesystem). Save metadata is only updated when the captured patch/source still match, preserving intervening edits. No new crates. Other changes beyond task file list are patch.rs and its existing filename test, authorized by K24. Native command UI, an actual SoundFont load and concurrent I/O interleavings were not exercised; the public methods and Tauri registrations compile and their specified tests pass.
 
 ### Task 12: LCXL knob map and LEDs, learned synth CCs, `synth-params`, `keys-notice` and `synth-telemetry`
 

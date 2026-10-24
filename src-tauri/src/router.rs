@@ -10,6 +10,7 @@ use lpd_core::instrument::Instrument;
 use lpd_core::kit::learn::{self, Binding, LearnKind, ParamValue, Target};
 use lpd_core::kit::{self, Set};
 use lpd_core::seq::VEL_ACCENT;
+use lpd_core::synth::params::{ParamId, Route};
 use rtrb::{Consumer, Producer};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -385,6 +386,22 @@ impl Router {
             .push(Command::SynthLoad(Box::new(self.set.keys.patch.params)));
     }
 
+    pub fn send_synth_param(&mut self, id: ParamId, value: f32) {
+        let _ = self.audio_tx.push(Command::SynthParam(id, value));
+    }
+
+    pub fn send_route(&mut self, slot: usize, route: Option<Route>) {
+        let _ = self.audio_tx.push(Command::SynthRoute {
+            slot: slot as u8,
+            route,
+        });
+    }
+
+    pub fn keys_sustain(&mut self, down: bool) {
+        self.keys_sustain = down;
+        let _ = self.audio_tx.push(Command::KeysSustain(down));
+    }
+
     fn send_wheels(&mut self) {
         let _ = self.audio_tx.push(Command::KeysPitch(self.keys_pitch));
         let _ = self.audio_tx.push(Command::KeysMod(self.keys_mod));
@@ -666,6 +683,10 @@ impl Router {
                 self.keys_mod_value(self.keys_mod);
                 Some(self.wheel_event())
             }
+            MidiMsg::Cc { cc: 64, value, .. } => {
+                self.keys_sustain(value >= 64);
+                None
+            }
             MidiMsg::Cc { .. } => None,
         }
     }
@@ -808,10 +829,14 @@ impl Router {
     /// A keys input went away: both wheels return to rest. `None` when they already were.
     pub fn reset_keys_wheels(&mut self) -> Option<UiEvent> {
         if self.keys_pitch == 0.0 && self.keys_mod == 0.0 {
+            if self.keys_sustain {
+                self.keys_sustain(false);
+            }
             return None;
         }
         self.keys_pitch = 0.0;
         self.keys_mod = 0.0;
+        self.keys_sustain = false;
         self.send_wheels();
         Some(self.wheel_event())
     }
@@ -1607,6 +1632,43 @@ mod tests {
             !sent.iter().any(|c| matches!(c, Command::KeysNoteOn { .. })),
             "{sent:?}"
         );
+    }
+
+    #[test]
+    fn the_sustain_pedal_reaches_the_engine() {
+        let (mut r, mut rx) = router_with_pad(0.0, 0.0);
+        key(&mut r, "keys", cc_msg(64, 127));
+        key(&mut r, "keys", cc_msg(64, 0));
+        assert!(matches!(
+            drain(&mut rx).as_slice(),
+            [Command::KeysSustain(true), Command::KeysSustain(false)]
+        ));
+    }
+
+    #[test]
+    fn a_closed_keys_input_lifts_the_pedal() {
+        let (mut r, mut rx) = router_with_pad(0.0, 0.0);
+        key(&mut r, "keys", cc_msg(64, 127));
+        drain(&mut rx);
+        r.reset_keys_wheels();
+        assert!(matches!(
+            drain(&mut rx).as_slice(),
+            [Command::KeysSustain(false)]
+        ));
+    }
+
+    #[test]
+    fn a_bpm_change_sends_the_tempo() {
+        let (tx, mut rx) = RingBuffer::new(1024);
+        let (_, events) = RingBuffer::new(16);
+        let state = crate::state::AppState::new(Set::new(), tx, events);
+        drain(&mut rx);
+        let mut pattern = state.get_current_set().pattern;
+        pattern.bpm = 128.0;
+        state.seq_update(pattern, None).unwrap();
+        assert!(drain(&mut rx)
+            .iter()
+            .any(|c| matches!(c, Command::KeysTempo(128.0))));
     }
 
     #[test]
