@@ -33,9 +33,7 @@
 - After each task: re-read the task text and check every contract, string, test and "Do not" item against the code (spec-compliance pass), then review the diff for correctness, audio-thread safety, lock order and test quality (code-quality pass). Fix what you find before committing. Append a short "Task N verification (date): …" paragraph under the task in this file, as plan 1C did, in the same commit.
 - Browser preview: `npm run dev` serves `http://127.0.0.1:1420`; without `window.__TAURI__` the app shows `createPreviewSet()`. Every feature must render and not throw there: commands resolve `undefined` unless the task names a preview fallback in `src/lib/api.ts`.
 
-**Baseline verification (2026-10-24):** Initial rustfmt check failed on pre-existing formatting in six Rust files. The user approved a formatting-only baseline fix before implementation. After cargo fmt --all: cargo fmt --all -- --check PASS; cargo test --workspace PASS (409 passed, 0 failed); 
-pm test PASS (127 passed, 0 failed); 
-pm run check PASS (0 errors, 0 warnings). No synth implementation or UI/hardware checks at baseline.
+**Baseline verification (2026-10-24):** Initial rustfmt check failed on pre-existing formatting in six Rust files. The user approved a formatting-only baseline fix before implementation. After `cargo fmt --all`: `cargo fmt --all -- --check` PASS; `cargo test --workspace` PASS (409 passed, 0 failed); `npm test` PASS (127 passed, 0 failed); `npm run check` PASS (0 errors, 0 warnings). No synth implementation or UI/hardware checks at baseline.
 
 ### 0.2 Invariants (never break)
 
@@ -158,7 +156,7 @@ Phase A builds the synth as a self-contained module. Nothing in the app uses it 
 - Create: `crates/lpd-core/src/synth/mod.rs`, `crates/lpd-core/src/synth/params.rs`, `crates/lpd-core/tests/synth_params.rs`
 - Modify: `crates/lpd-core/src/lib.rs` (add `pub mod synth;`)
 
-- [ ] **Step 1: Write the failing tests** — `crates/lpd-core/tests/synth_params.rs`:
+- [x] **Step 1: Write the failing tests** — `crates/lpd-core/tests/synth_params.rs`:
 
 ```rust
 use lpd_core::synth::params::*;
@@ -316,9 +314,9 @@ fn destinations_and_sources_are_complete() {
 }
 ```
 
-- [ ] **Step 2: Run** `cargo test -p lpd-core --test synth_params` — expected: FAIL to compile (`lpd_core::synth` does not exist).
+- [x] **Step 2: Run** `cargo test -p lpd-core --test synth_params` — expected: FAIL to compile (`lpd_core::synth` does not exist).
 
-- [ ] **Step 3: Implement.** `crates/lpd-core/src/lib.rs` gains `pub mod synth;` after `pub mod seq;`. `crates/lpd-core/src/synth/mod.rs`:
+- [x] **Step 3: Implement.** `crates/lpd-core/src/lib.rs` gains `pub mod synth;` after `pub mod seq;`. `crates/lpd-core/src/synth/mod.rs`:
 
 ```rust
 //! The keys synthesizer (keys synth spec): a semi-modular wavetable synth behind `Instrument`.
@@ -1194,12 +1192,14 @@ params! {
 
 Notes: the macro emits `p.osc_a.on`, `p.env[0].attack`, `p.fx.drive.kind` from the bracketed token trees. `ParamId` variants that share a name with a type (`SubShape`, `NoiseColor`, `FilterType`, `VoiceMode`) are fine: inside `pick::<…>()` the name resolves to the type. If rustfmt reflows the `choice!` invocations, keep its output.
 
-- [ ] **Step 4: Run** `cargo test -p lpd-core --test synth_params` — expected: 8 passed. Then the full verification (0.1).
-- [ ] **Step 5: Commit** `feat(core): synth parameter model`.
+- [x] **Step 4: Run** `cargo test -p lpd-core --test synth_params` — expected: 8 passed. Then the full verification (0.1).
+- [x] **Step 5: Commit** `feat(core): synth parameter model`.
 
 **Do not:** add parameters, ids or ranges that the spec tables do not have; store knob positions instead of units; give `SynthParams` any heap field (it must stay `Copy`).
 
-**Done when:** [ ] tests first → PASS; [ ] full verification green; [ ] committed.
+**Done when:** [x] tests first → PASS; [x] full verification green; [x] committed.
+
+Task 1 verification (2026-10-24): Copied the eight prescribed tests first; `cargo test -p lpd-core --test synth_params` failed because `lpd_core::synth` did not exist, then passed all 8 after implementing the prescribed code. `cargo fmt --all -- --check` PASS; `cargo test --workspace` PASS (417 passed, 0 failed); `npm test` PASS (127 passed); `npm run check` PASS (0 errors, 0 warnings). Spec-compliance and code-quality reviews checked all 109 ids, default/serde shapes, tapers, clamping, dense route semantics, and Copy-only patch fields against the task. No app callers changed, no audio path added, no deviations beyond rustfmt. Corrected Markdown escaping in the baseline note. Preview, listening and hardware checks do not apply to this unwired data model.
 
 ### Task 2: Band-limited wavetables
 
