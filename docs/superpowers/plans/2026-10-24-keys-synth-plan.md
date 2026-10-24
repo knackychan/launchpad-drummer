@@ -1633,7 +1633,7 @@ Task 2 verification (2026-10-24): Eight prescribed tests written first; compile 
 - Warp: SYNC reads at `frac(p × 16^amt)` and the band-limit level uses the frequency × that ratio; BEND reads at `p^(1 + 4·amt)`; PWM reads at `p / w` for `p < w` (w = 1 − 0.98·amt) and outputs 0 for the rest of the cycle; FM adds `amt × 8 / 2π × m` cycles to the phase (m = the other oscillator's centre copy, −1…1, i.e. index 0–8 rad); RM outputs `v + (v·m − v)·amt`.
 - Phases: on a fresh note every copy starts at `PHASE RAND × random(0…1)`.
 
-- [ ] **Step 1: Write the failing tests** — `crates/lpd-core/tests/synth_osc.rs`:
+- [x] **Step 1: Write the failing tests** — `crates/lpd-core/tests/synth_osc.rs`:
 
 ```rust
 use lpd_core::audio::fft::fft_complex;
@@ -1759,9 +1759,9 @@ fn white_noise_is_bounded_and_centred() {
 }
 ```
 
-- [ ] **Step 2: Run** `cargo test -p lpd-core --test synth_osc` — expected: FAIL to compile.
+- [x] **Step 2: Run** `cargo test -p lpd-core --test synth_osc` — expected: FAIL to compile.
 
-- [ ] **Step 3: Implement** `crates/lpd-core/src/synth/osc.rs` (complete):
+- [x] **Step 3: Implement** `crates/lpd-core/src/synth/osc.rs` (complete):
 
 ```rust
 //! Wavetable oscillator with unison and warp, the sub oscillator and noise (spec §3.2, §3.4).
@@ -2056,12 +2056,14 @@ impl NoiseState {
 
 `crates/lpd-core/src/synth/mod.rs` gains `pub mod osc;`.
 
-- [ ] **Step 4: Run** `cargo test -p lpd-core --test synth_osc` — expected: 8 passed. Then the full verification.
-- [ ] **Step 5: Commit** `feat(core): synth oscillators, sub and noise`.
+- [x] **Step 4: Run** `cargo test -p lpd-core --test synth_osc` — expected: 8 passed. Then the full verification.
+- [x] **Step 5: Commit** `feat(core): synth oscillators, sub and noise`.
 
 **Do not:** allocate in `sample`; compute `powf` per copy per sample for SYNC (the ratio lives in `WarpShape`); add warp modes beyond the six.
 
-**Done when:** [ ] tests first → PASS; [ ] full verification; [ ] committed.
+**Done when:** [x] tests first → PASS; [x] full verification; [x] committed.
+
+Task 3 verification (2026-10-24): All eight prescribed tests were written first and failed compilation because `synth::osc` was absent, then all 8 passed with the prescribed implementation. `cargo fmt --all -- --check` PASS; `cargo test --workspace` PASS (432 passed, 0 failed, 1 ignored); `npm test` PASS (127 passed); `npm run check` PASS (0 errors, 0 warnings). Spec-compliance review checked unison spacing/power/pan, six warp equations, random phase, sub waveforms and noise filters; code-quality review checked fixed arrays and no allocation/locks/I/O in sample paths, precomputed SYNC ratio, and nonzero seeded RNG. Only deviations are rustfmt; no engine paths or app callers changed. Listening, preview and hardware checks remain for integration tasks.
 
 ### Task 4: Filters
 
