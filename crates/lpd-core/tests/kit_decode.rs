@@ -71,7 +71,10 @@ fn progress_counts_each_unique_path_once_in_first_reference_order() {
     set.banks[0].set_pad(Pad::new(0, 0, "samples/b.wav", [0, 0, 0]));
     set.banks[0].set_pad(Pad::new(1, 0, "samples/a.wav", [0, 0, 0]));
     set.banks[1].set_pad(Pad::new(0, 0, "samples/b.wav", [0, 0, 0]));
-    assert_eq!(unique_sample_paths(&set), ["samples/b.wav", "samples/a.wav"]);
+    assert_eq!(
+        unique_sample_paths(&set),
+        ["samples/b.wav", "samples/a.wav"]
+    );
     let seen = std::cell::RefCell::new(Vec::new());
     let (ok, failed) = load_samples_with_progress(dir.path(), &set, |c, t, f| {
         seen.borrow_mut().push((c, t, f))

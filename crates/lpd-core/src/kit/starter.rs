@@ -603,10 +603,15 @@ mod progress_tests {
         fs::create_dir_all(tmp.path().join("samples")).unwrap();
         fs::write(tmp.path().join("samples/kick_808.wav"), b"mine").unwrap();
         let seen = RefCell::new(Vec::new());
-        write_starter_samples_with_progress(tmp.path(), &set, |c, t| seen.borrow_mut().push((c, t)))
-            .unwrap();
+        write_starter_samples_with_progress(tmp.path(), &set, |c, t| {
+            seen.borrow_mut().push((c, t))
+        })
+        .unwrap();
         assert_eq!(*seen.borrow(), [(0, 2), (1, 2), (2, 2)]);
-        assert_eq!(fs::read(tmp.path().join("samples/kick_808.wav")).unwrap(), b"mine");
+        assert_eq!(
+            fs::read(tmp.path().join("samples/kick_808.wav")).unwrap(),
+            b"mine"
+        );
         assert!(tmp.path().join("samples/snare_808.wav").exists());
     }
 

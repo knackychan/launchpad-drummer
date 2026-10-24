@@ -190,5 +190,8 @@ fn the_default_set_is_made_once_and_then_reopened_as_edited() {
     edited.banks[0].name = "MINE".into();
     kit::save(&dir, &edited).unwrap();
     let again = r.state.open_default_set(&dir).unwrap();
-    assert_eq!(again.set.banks[0].name, "MINE", "an existing default set is opened, not rebuilt");
+    assert_eq!(
+        again.set.banks[0].name, "MINE",
+        "an existing default set is opened, not rebuilt"
+    );
 }

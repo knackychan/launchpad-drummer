@@ -135,8 +135,14 @@ struct TopEvent {
 
 fn decode_top(msg: &[u8]) -> Option<TopEvent> {
     match lp::decode(msg) {
-        Some(LpEvent::TopDown(index)) => Some(TopEvent { index, pressed: true }),
-        Some(LpEvent::TopUp(index)) => Some(TopEvent { index, pressed: false }),
+        Some(LpEvent::TopDown(index)) => Some(TopEvent {
+            index,
+            pressed: true,
+        }),
+        Some(LpEvent::TopUp(index)) => Some(TopEvent {
+            index,
+            pressed: false,
+        }),
         _ => None,
     }
 }
@@ -159,17 +165,23 @@ fn rgb_message(frame: &[[u8; 3]]) -> Result<Vec<u8>, String> {
 /// all 80 of them through this, since it cannot open the MIDI port itself.
 fn leds_message(leds: &[(u8, [u8; 3])]) -> Result<Vec<u8>, String> {
     let valid = |led: u8| {
-        ((1..=8).contains(&(led / 10)) && (1..=9).contains(&(led % 10))) || (104..=111).contains(&led)
+        ((1..=8).contains(&(led / 10)) && (1..=9).contains(&(led % 10)))
+            || (104..=111).contains(&led)
     };
     if leds.is_empty()
         || leds.len() > lp::MAX_LEDS_PER_MESSAGE
-        || leds.iter().any(|(led, rgb)| !valid(*led) || rgb.iter().any(|value| *value > 63))
+        || leds
+            .iter()
+            .any(|(led, rgb)| !valid(*led) || rgb.iter().any(|value| *value > 63))
     {
         return Err(
             "LED list needs 1..=80 valid Launchpad LEDs with RGB channels from 0 to 63".to_string(),
         );
     }
-    Ok(lp::rgb_messages(leds).into_iter().next().expect("exactly one message"))
+    Ok(lp::rgb_messages(leds)
+        .into_iter()
+        .next()
+        .expect("exactly one message"))
 }
 
 /// Like `send_led_frame`, for a game that also lights the side and top buttons.
@@ -530,16 +542,38 @@ mod tests {
 
     #[test]
     fn decodes_top_row_buttons_only() {
-        assert_eq!(decode_top(&[0xB0, 104, 127]), Some(TopEvent { index: 0, pressed: true }));
-        assert_eq!(decode_top(&[0xB0, 111, 0]), Some(TopEvent { index: 7, pressed: false }));
-        for bytes in [&[0xB0, 103, 127][..], &[0xB0, 112, 127], &[0x90, 11, 127], &[0xB0, 104]] {
+        assert_eq!(
+            decode_top(&[0xB0, 104, 127]),
+            Some(TopEvent {
+                index: 0,
+                pressed: true
+            })
+        );
+        assert_eq!(
+            decode_top(&[0xB0, 111, 0]),
+            Some(TopEvent {
+                index: 7,
+                pressed: false
+            })
+        );
+        for bytes in [
+            &[0xB0, 103, 127][..],
+            &[0xB0, 112, 127],
+            &[0x90, 11, 127],
+            &[0xB0, 104],
+        ] {
             assert_eq!(decode_top(bytes), None);
         }
     }
 
     #[test]
     fn encodes_grid_side_and_top_leds_and_rejects_bad_input() {
-        let leds = [(11, [1, 2, 3]), (89, [4, 5, 6]), (104, [63, 0, 0]), (111, [0, 63, 0])];
+        let leds = [
+            (11, [1, 2, 3]),
+            (89, [4, 5, 6]),
+            (104, [63, 0, 0]),
+            (111, [0, 63, 0]),
+        ];
         let message = leds_message(&leds).unwrap();
         assert_eq!(&message[..7], &[0xF0, 0, 0x20, 0x29, 2, 0x18, 0x0B]);
         assert_eq!(&message[7..11], &[11, 1, 2, 3]);

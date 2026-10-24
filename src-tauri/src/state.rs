@@ -1124,7 +1124,10 @@ impl AppState {
         let buckets = buckets.clamp(16, 2048);
         let sample = lock(&self.kit_manager).samples.get(path)?.clone();
         if let Some(entry) = lock(&self.peaks_cache).as_ref() {
-            let same = entry.sample.upgrade().is_some_and(|s| Arc::ptr_eq(&s, &sample));
+            let same = entry
+                .sample
+                .upgrade()
+                .is_some_and(|s| Arc::ptr_eq(&s, &sample));
             if same && entry.path == path && entry.buckets == buckets {
                 return Some(entry.peaks.clone());
             }
@@ -1344,9 +1347,8 @@ impl AppState {
         let progress = |done, total, failed| {
             self.report_samples(ticket, LoadPhase::LoadingSamples, done, total, failed)
         };
-        let (decision, kit) = startup::decide_startup(last.as_deref().map(Path::new), |dir| {
-            load(dir, &progress)
-        });
+        let (decision, kit) =
+            startup::decide_startup(last.as_deref().map(Path::new), |dir| load(dir, &progress));
         let outcome = match (decision, kit) {
             (Startup::Loaded { path, name, .. }, Some(kit)) => {
                 match self.finish_open(ticket, kit) {
