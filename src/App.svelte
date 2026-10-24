@@ -2,7 +2,9 @@
   import { onMount, setContext, type Component } from 'svelte';
   import Plate from './components/Plate.svelte';
   import LaunchpadPanel from './components/LaunchpadPanel.svelte';
-  import MixerStrip from './components/MixerStrip.svelte';
+  import MixerSlim from './components/MixerSlim.svelte';
+  import ChannelPopover from './components/ChannelPopover.svelte';
+  import SynthPlate from './components/SynthPlate.svelte';
   import PadEditor from './components/PadEditor.svelte';
   import Telemetry from './components/Telemetry.svelte';
   import KeysPlate from './components/KeysPlate.svelte';
@@ -93,7 +95,10 @@
   let dismissed = $state<Set<string>>(new Set());
   let backup = $state<NoticeInputs['backup']>(null);
   let renaming = $state<number | null>(null);
-  let mixerRenaming = $state<number | null>(null);
+  let chanPop = $state<{ index: number; x: number; y: number; rename: boolean } | null>(null);
+  let mixPop = $state<{ x: number; y: number } | null>(null);
+  let mixPanel = $state<HTMLDivElement>();
+  $effect(() => { if (mixPop) return pushEsc(() => { mixPop = null; }); });
   let historyTimer = 0;
   const confirmationTimers = new Set<number>();
   let peaksNonce = $state(0);
@@ -206,16 +211,12 @@
     keysColor: currentSet.keys.output === i ? ledToCss(SOUND_COLORS[currentSet.keys.gmSound]) : null,
     keysLabel: SOUND_LABELS[currentSet.keys.gmSound],
   })));
-  function channelMenu(i: number, x: number, y: number) {
-    if (i < 0) { learnMenu = null; return; }
-    const keys = currentSet.keys, here = keys.output === i;
-    const where = keys.output !== null && !here ? `Keys: on ${groupLegend(keys.output, currentSet.mixer.groups[keys.output].name)}` : `Keys: ${SOUND_LABELS[keys.gmSound]}`;
-    learnMenu = { x, y, items: [
-      { label: `Pads: ${channelInputs[i].pads} in group ${i + 1} (pad editor › MIX GROUP)`, info: true },
-      { label: where, checked: here, action: () => updateKeys({ gmSound: keys.gmSound, volumeDb: keys.volumeDb, output: here ? null : i }) },
-      { label: '', sep: true },
-      { label: 'Rename…', shortcut: 'F2', action: () => { mixerRenaming = i; } },
-    ] };
+  function channelMenu(i: number, x: number, y: number, rename = false) {
+    chanPop = { index: i, x, y, rename };
+  }
+  async function useSynth() {
+    try { const status = await invoke<KeysStatus>('set_keys_engine', { engine: 'synth' }); if (status) keysStatus = status; }
+    catch (e) { showToast(errorText(e)); }
   }
 
   // MIDI learn (plan 1C Task 12): the control being learned, and the one shared menu of learnable controls.
@@ -962,8 +963,8 @@
       if (event.altKey && /^[1-8]$/.test(key)) chooseBank(Number(key) - 1);
       else if (key === 'pageup' || key === 'pagedown') chooseBank(Math.max(0, Math.min(7, activeBank + (key === 'pageup' ? -1 : 1))));
       else if (key === 'f2') {
-        const channel = target.closest<HTMLElement>('.mx-col[data-group]');
-        if (channel) mixerRenaming = Number(channel.dataset.group); else renaming = activeBank;
+        const channel = target.closest<HTMLElement>('.ms-col[data-group]');
+        if (channel) { const r = channel.getBoundingClientRect(); channelMenu(Number(channel.dataset.group), r.left, r.bottom, true); } else renaming = activeBank;
       } else if (key === 'delete' && selXY) { if (selectedPad?.sample) clearPad(selXY.x, selXY.y); }
       else if (gridFocused && ['arrowleft', 'arrowright', 'arrowup', 'arrowdown'].includes(key)) {
         const xy = selXY ?? { x: 0, y: 0 };
@@ -984,11 +985,25 @@
   }
 </script>
 
-<svelte:window onkeydown={keydown} onkeyup={keyup} onblur={() => { releaseKeyboard(); cancelDrag(); }}
+<svelte:window onpointerdown={(e) => { if (mixPop && !chanPop && !mixPanel?.contains(e.target as Node)) mixPop = null; }} onkeydown={keydown} onkeyup={keyup} onblur={() => { releaseKeyboard(); cancelDrag(); }}
   onpointermove={e => { if (drag && !drag.external) updateDrag(e.clientX, e.clientY, e.ctrlKey); }}
   onpointerup={e => { if (drag && !drag.external) { drag.ctrl = e.ctrlKey; void finishDrop(); } }} onpointercancel={cancelDrag} />
 
 {#if drag?.active}<DragGhost x={drag.x} y={drag.y} color={drag.color} label={drag.label} />{/if}
+{#if mixPop}
+  <div class="mix-pop" bind:this={mixPanel} style:position="fixed" style:z-index="40" style:left="{Math.max(4, Math.min(mixPop.x, innerWidth - 304))}px" style:top="{Math.max(4, Math.min(mixPop.y, innerHeight - 364))}px">
+    <MixerSlim groups={currentSet.mixer.groups} masterDb={currentSet.mixer.masterDb} height={360} mode="slim" inputs={channelInputs} onupdategroup={updateGroup} onupdatemaster={updateMaster} onchannel={channelMenu} />
+  </div>
+{/if}
+{#if chanPop}
+  {@const i = chanPop.index}
+  {@const keys = currentSet.keys}
+  {@const here = keys.output === i}
+  <ChannelPopover index={i} group={currentSet.mixer.groups[i]} inputs={channelInputs[i]} keysHere={here}
+    keysWhere={keys.output !== null && !here ? `Keys: on ${groupLegend(keys.output, currentSet.mixer.groups[keys.output].name)}` : `Keys: ${SOUND_LABELS[keys.gmSound]}`}
+    x={chanPop.x} y={chanPop.y} rename={chanPop.rename} onupdategroup={updateGroup}
+    onkeys={() => updateKeys({ gmSound: keys.gmSound, volumeDb: keys.volumeDb, output: here ? null : i })} onclose={() => { chanPop = null; }} />
+{/if}
 {#if learnMenu}<ContextMenu x={learnMenu.x} y={learnMenu.y} items={learnMenu.items} onclose={() => { learnMenu = null; }} />{/if}
 {#if padMenu}<ContextMenu x={padMenu.at.x} y={padMenu.at.y} items={padMenuItems} onclose={() => { padMenu = null; }} />{/if}
 
@@ -1028,6 +1043,7 @@
         <section
           class="play-screen"
           class:docked={layout.docked}
+          style:--rowh="{layout.rowH}px"
           style:--pad="{layout.pad}px"
           style:--kh="{layout.kh}px"
           style:--sq="{layout.sq}px"
@@ -1055,16 +1071,17 @@
                     onhumanize={setHumanize}
                     onstop={stopAll}
                   />
-                  <MixerStrip
-                    bind:renaming={mixerRenaming}
+                  <MixerSlim
+                    height={layout.rowH} mode={layout.mixMode}
                     groups={currentSet.mixer.groups}
                     masterDb={currentSet.mixer.masterDb}
-                    dims={layout.mix}
                     onupdategroup={updateGroup}
                     onupdatemaster={updateMaster}
                     inputs={channelInputs}
-                    onchannelmenu={channelMenu}
+                    onchannel={channelMenu}
+                    onexpand={(x, y) => { mixPop = { x, y }; }}
                   />
+                  <SynthPlate set={currentSet} width={layout.synthW} height={layout.rowH} engine={keysStatus.engine} onusesynth={() => void useSynth()} />
                 </div>
                 <KeysPlate
                   short={layout.kh < 68} folded={keysFolded} set={currentSet} octave={keysOctave} deviceName={keysDeviceName} devicePresent={tauri ? keysPresent : true}

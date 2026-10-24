@@ -78,6 +78,8 @@
 | K23 | Task 8 numerical test correction under prompt rule 2: the second ping-pong impulse is `0.5 * (1 - exp(-2π*6000/48000)) = 0.272031`, so its assertion uses that value rather than `> 0.3`. The specified 6 kHz tone, 0.5 feedback and DSP remain unchanged. |
 | K24 | User decision (2026-10-24): preserve Task 11 strict rejection of any filename containing `..`; file_name replaces double dots with underscores (`A..B` → `A__B.lbpatch`) while preserving the displayed patch name. Task 11 also updates patch.rs and its filename test. |
 
+| K25 | User decision (2026-10-24): keep Task 13 supplied solver and its passing size tests. Accept the resulting keybed and sequencer geometry changes, overriding the task instruction to preserve their place and size. At 1920×1080 the row grows 64 px, keybed grows 7 px and sequencer shrinks 71 px. |
+
 ### 0.4 Shared name registry
 
 Every name below is created by the task in the "Task" column and used unchanged by later tasks.
@@ -6054,6 +6056,8 @@ let { set, width, height, engine, onusesynth }: {
 **Do not:** move or resize the keys plate or the sequencer; change mixer behaviour (values stay non-undoable, LCXL still drives volume / mute / solo); keep `MixerStrip.svelte`.
 
 **Done when:** [ ] tests first → PASS; [ ] preview checked at three sizes; [ ] full verification + build; [ ] committed.
+
+**Task 13 checkpoint verification (2026-10-24, IN PROGRESS):** Stopped at the user's explicit request and saved a WIP checkpoint, not task completion. The 11 prescribed layout tests were written first and failed on missing solver exports; the plan solver now passes all 11. Implemented MixerSlim, ChannelPopover, SynthPlate shell and App wiring; removed MixerStrip. K25 records the user's decision to accept the solver's keybed/sequencer geometry changes. Checkpoint verification PASS: cargo fmt --all -- --check; cargo test --workspace (512 passed, 0 failed, 2 debug timing tests ignored); npm test (131 passed); npm run build including npm run check (0 errors, 0 warnings). Headless Edge rendered 2560×1440, 1920×1080 and 1280×720 without page errors; screenshots and geometry logs are under ignored .verification/keys-synth-task13-*. The actual 2560×1440 browser bay measured 2456×1348 versus the plan's example 2455×1296. Before/after geometry confirms K25; the 720p mixer is a 40 px strip and synth 561×418. After screenshots still need visual inspection; interactive mixer/popover/rename/routing/page-storage checks, SoundFont overlay, and both final inline reviews remain pending. Existing PadGrid runtime binding warnings and Vite target-file EBUSY watcher messages remain unchanged. The owned preview server was stopped. Resume from `2026-10-24-keys-synth-resume-prompt.md`; do not mark this task done or start Task 14 before its remaining checks finish.
 
 ### Task 14: Synth model helpers and controls
 
