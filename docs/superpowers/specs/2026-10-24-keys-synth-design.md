@@ -58,7 +58,8 @@ Changes elsewhere:
 - `kit/model.rs`: `SET_VERSION` becomes 2 and `KeysSettings` changes (section 8.2).
 - `kit/learn.rs`: parameter targets `synth.<id>` (section 10.3).
 - `devices/lcxl.rs`: the knob → synth map and knob LED indices (section 10.2). The knob laws for pan, pitch
-  and low-pass (`knob_pan`, `knob_pitch`, `knob_lowpass`) are removed.
+  and low-pass (`knob_pan`, `knob_pitch`, `knob_lowpass`) stay: MIDI learn still uses them for `group.*` CCs;
+  the LCXL no longer calls them.
 
 ### 2.2 One edit, end to end
 
@@ -98,7 +99,7 @@ as today). `KeysMod` carries the mod wheel (0…1) and becomes the synth's WHEEL
   `telemetry` event) drains the tap, runs the 2048-point FFT on the synth samples, computes the filter
   response at 128 frequencies from the live filter values, and emits `synth-telemetry`.
 - Wavetable display frames are fetched once per table with `synth_table`.
-- Rust is the single source of truth for parameter metadata. A cargo test writes `src/lib/synth-params.json`
+- Rust is the single source of truth for parameter metadata. A cargo test writes `src/lib/synth-meta.ts` (a generated TypeScript module)
   (ids, labels, ranges, tapers, defaults, units, flags, the destination order, the LCXL map) and fails if the
   committed file differs. The UI and the browser preview read that file, so they cannot drift from the engine.
 
@@ -131,7 +132,7 @@ kit_manager → saver.
 `PatchRef` is `{ id: string, name: string, category: Category }`: `id` is the factory id or the user file name.
 `synth_param` values are in the control's units, as stored in the patch (Hz, seconds, dB, semitones, 0–1
 positions); keys send 0 or 1; selectors send the index of the value in the control's value list
-(`synth-params.json` lists them).
+(`synth-meta.ts` lists them).
 
 ```ts
 // synth-telemetry, every 16 ms while the feed is on
@@ -479,10 +480,10 @@ Expected results (to be pinned by solver tests):
 
 | Window | Drawer | Pads | Synth |
 |---|---|---|---|
-| 2560×1440 | floating | 94 px (as today) | ≈ 840 px, single page |
-| 2560×1440 | docked | ≈ 65 px | ≈ 760 px, single page |
-| 1920×1080 | floating | 56 px | ≈ 590 px, two pages |
-| 1280×720 | floating | 36 px; telemetry and mixer collapsed | ≈ 550 px |
+| 2560×1440 | floating | 94 px (as today) | ≈ 854 px, single page |
+| 2560×1440 | docked | ≈ 77 px (telemetry 220 px) | ≈ 760 px, single page |
+| 1920×1080 | either (a docked drawer floats) | 56 px | ≈ 599 px, two pages |
+| 1280×720 | floating | 37 px; telemetry and mixer collapsed | ≈ 561 px |
 
 ### 6.2 Slim mixer (replaces `MixerStrip` on PLAY)
 
@@ -767,7 +768,7 @@ are not learnable in v1. Bindings live in the set, as today, and appear in SETUP
 - Patches: serde round trip; defaults for missing fields; clamping; a newer `patchVersion` refused; set v1 → v2
   migration; every factory patch renders a C major chord that is non-silent, finite and below 1.0 peak.
 - `no_alloc`: note on and off, sustain, param and route changes, patch loads, all FX on, full taps.
-- `synth-params.json` is up to date (section 2.4).
+- `synth-meta.ts` is up to date (section 2.4).
 - Performance (release only, `#[ignore]` by default): the CPU budget of section 11.
 
 **src-tauri**
@@ -780,7 +781,7 @@ are not learnable in v1. Bindings live in the set, as today, and appear in SETUP
 **TypeScript (node:test, as today)**
 
 - Layout solver: the four rows of 6.1, the collapse order of rule 2, keybed and sequencer heights unchanged.
-- Patch menu model; arc and ring maths; unit formatters; the LCXL tag map read from `synth-params.json`.
+- Patch menu model; arc and ring maths; unit formatters; the LCXL tag map read from `synth-meta.ts`.
 
 **Browser preview**: it has no engine, so the synth plate shows a demo patch and its displays stay in STANDBY;
 it is used to check layout at the three window sizes.
@@ -811,7 +812,7 @@ favourites; randomize; per-voice FX.
 1. DSP core: wavetables, oscillator, filter, envelopes, LFOs, matrix, voice, `Synth` with `no_alloc` and the
    performance test.
 2. FX chain.
-3. Parameters, patches, factory patches, set v2 migration, `synth-params.json`.
+3. Parameters, patches, factory patches, set v2 migration, `synth-meta.ts`.
 4. Router, commands, events, telemetry feed, LCXL map and LEDs, keyboard sustain, engine switch, undo.
 5. Layout solver and slim mixer.
 6. Synth plate: header, pages, sections, drag-and-drop and matrix.
