@@ -2379,7 +2379,7 @@ Task 4 verification (2026-10-24): Five prescribed tests written first and observ
 - Create: `crates/lpd-core/src/synth/env.rs`, `crates/lpd-core/src/synth/lfo.rs`, `crates/lpd-core/tests/synth_env_lfo.rs`
 - Modify: `crates/lpd-core/src/synth/mod.rs` (`pub mod env; pub mod lfo;`)
 
-- [ ] **Step 1: Write the failing tests** — `crates/lpd-core/tests/synth_env_lfo.rs`:
+- [x] **Step 1: Write the failing tests** — `crates/lpd-core/tests/synth_env_lfo.rs`:
 
 ```rust
 use lpd_core::synth::env::{Env, Stage, TICK};
@@ -2553,9 +2553,9 @@ fn unipolar_stays_positive_and_shapes_are_in_range() {
 }
 ```
 
-- [ ] **Step 2: Run** `cargo test -p lpd-core --test synth_env_lfo` — expected: FAIL to compile.
+- [x] **Step 2: Run** `cargo test -p lpd-core --test synth_env_lfo` — expected: FAIL to compile.
 
-- [ ] **Step 3: Implement.** `crates/lpd-core/src/synth/env.rs` (complete):
+- [x] **Step 3: Implement.** `crates/lpd-core/src/synth/env.rs` (complete):
 
 ```rust
 //! ADSR envelope at control rate (spec §3.7). The attack is convex (it aims at 1.3 and stops at
@@ -2766,12 +2766,14 @@ impl Lfo {
 
 `crates/lpd-core/src/synth/mod.rs` gains `pub mod env;` and `pub mod lfo;`.
 
-- [ ] **Step 4: Run** `cargo test -p lpd-core --test synth_env_lfo` — expected: 12 passed. Then the full verification.
-- [ ] **Step 5: Commit** `feat(core): synth envelopes and LFOs`.
+- [x] **Step 4: Run** `cargo test -p lpd-core --test synth_env_lfo` — expected: 12 passed. Then the full verification.
+- [x] **Step 5: Commit** `feat(core): synth envelopes and LFOs`.
 
 **Do not:** run envelopes per sample (control rate is the design); reset the level on retrigger; let a FREE LFO use DELAY or restart on notes.
 
-**Done when:** [ ] tests first → PASS; [ ] full verification; [ ] committed.
+**Done when:** [x] tests first → PASS; [x] full verification; [x] committed.
+
+Task 5 verification (2026-10-24): Twelve prescribed tests written first, observed failing on missing env/lfo modules, then all 12 passed after implementing the supplied code. `cargo fmt --all -- --check` PASS; `cargo test --workspace` PASS (449 passed, 0 failed, 1 ignored); `npm test` PASS (127 passed); `npm run check` PASS (0 errors, 0 warnings). Spec-compliance and quality reviews checked control-rate ADSR equations, timing thresholds, retrigger from current level, fast release, LFO shapes, modes, sync, phase, fade and polarity; all state is fixed-size, no allocation/locks/I/O. FREE LFO dispatch remains the responsibility of Task 7. No deviations beyond rustfmt; no app/audio wiring or preview/listening/hardware checks yet.
 
 ### Task 6: Modulation matrix
 
