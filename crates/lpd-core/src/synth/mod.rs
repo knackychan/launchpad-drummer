@@ -3,6 +3,7 @@
 pub mod env;
 pub mod filter;
 pub mod lfo;
+pub mod matrix;
 pub mod osc;
 pub mod params;
 pub mod wavetable;

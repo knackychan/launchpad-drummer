@@ -2783,7 +2783,7 @@ Task 5 verification (2026-10-24): Twelve prescribed tests written first, observe
 - Create: `crates/lpd-core/src/synth/matrix.rs`, `crates/lpd-core/tests/synth_matrix.rs`
 - Modify: `crates/lpd-core/src/synth/mod.rs` (`pub mod matrix;`)
 
-- [ ] **Step 1: Write the failing tests** — `crates/lpd-core/tests/synth_matrix.rs`:
+- [x] **Step 1: Write the failing tests** — `crates/lpd-core/tests/synth_matrix.rs`:
 
 ```rust
 use lpd_core::synth::matrix::*;
@@ -2879,9 +2879,9 @@ fn base_norms_follow_the_knobs() {
 }
 ```
 
-- [ ] **Step 2: Run** `cargo test -p lpd-core --test synth_matrix` — expected: FAIL to compile.
+- [x] **Step 2: Run** `cargo test -p lpd-core --test synth_matrix` — expected: FAIL to compile.
 
-- [ ] **Step 3: Implement** `crates/lpd-core/src/synth/matrix.rs` (complete):
+- [x] **Step 3: Implement** `crates/lpd-core/src/synth/matrix.rs` (complete):
 
 ```rust
 //! Modulation matrix maths (spec §4.3, §4.4).
@@ -2970,12 +2970,14 @@ pub fn base_norms(p: &SynthParams) -> [f32; DESTS] {
 
 `crates/lpd-core/src/synth/mod.rs` gains `pub mod matrix;`.
 
-- [ ] **Step 4: Run** `cargo test -p lpd-core --test synth_matrix` — expected: 7 passed. Then the full verification.
-- [ ] **Step 5: Commit** `feat(core): synth modulation matrix`.
+- [x] **Step 4: Run** `cargo test -p lpd-core --test synth_matrix` — expected: 7 passed. Then the full verification.
+- [x] **Step 5: Commit** `feat(core): synth modulation matrix`.
 
 **Do not:** let per-voice sources reach a FREE LFO's rate; apply modulation in unit space (it is knob space, then the taper).
 
-**Done when:** [ ] tests first → PASS; [ ] full verification; [ ] committed.
+**Done when:** [x] tests first → PASS; [x] full verification; [x] committed.
+
+Task 6 verification (2026-10-24): Seven prescribed tests written first, failed compilation because the matrix module was missing, then all 7 passed after the prescribed implementation. `cargo fmt --all -- --check` PASS; `cargo test --workspace` PASS (456 passed, 0 failed, 1 ignored); `npm test` PASS (127 passed); `npm run check` PASS (0 errors, 0 warnings). Compliance and quality reviews checked contribution multiplication, bypass/empty routes, knob-space clamping, pitch scaling, global source and aux restrictions, SYNC skips and destination order. All accumulation uses fixed arrays and iterators with no heap/lock/I/O; no existing callers changed. No deviations beyond rustfmt. Preview/listening/hardware checks remain for integration.
 
 ### Task 7: Voices and the `Synth` instrument
 
