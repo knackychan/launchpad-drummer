@@ -129,3 +129,49 @@ pub fn to_dbfs(x: f32) -> f32 {
         (20.0 * x.log10()).max(FLOOR_DB)
     }
 }
+
+/// In-place radix-2 FFT of `re + i·im` (same power-of-two length). `inverse` uses e^{+i} and
+/// divides by n. Allocation-free; for building tables at startup, not for the audio thread.
+pub fn fft_complex(re: &mut [f32], im: &mut [f32], inverse: bool) {
+    let n = re.len();
+    assert!(
+        n.is_power_of_two() && im.len() == n,
+        "fft_complex needs equal power-of-two lengths"
+    );
+    if n < 2 {
+        return;
+    }
+    let bits = n.trailing_zeros();
+    for i in 0..n {
+        let j = i.reverse_bits() >> (usize::BITS - bits);
+        if j > i {
+            re.swap(i, j);
+            im.swap(i, j);
+        }
+    }
+    let sign = if inverse { 1.0 } else { -1.0 };
+    let mut len = 2;
+    while len <= n {
+        let (ws, wc) = (sign * std::f64::consts::TAU / len as f64).sin_cos();
+        for start in (0..n).step_by(len) {
+            let (mut wr, mut wi) = (1.0f64, 0.0f64);
+            for k in 0..len / 2 {
+                let (a, b) = (start + k, start + k + len / 2);
+                let tr = f64::from(re[b]) * wr - f64::from(im[b]) * wi;
+                let ti = f64::from(re[b]) * wi + f64::from(im[b]) * wr;
+                re[b] = (f64::from(re[a]) - tr) as f32;
+                im[b] = (f64::from(im[a]) - ti) as f32;
+                re[a] = (f64::from(re[a]) + tr) as f32;
+                im[a] = (f64::from(im[a]) + ti) as f32;
+                let next = wr * wc - wi * ws;
+                wi = wr * ws + wi * wc;
+                wr = next;
+            }
+        }
+        len *= 2;
+    }
+    if inverse {
+        let s = 1.0 / n as f32;
+        re.iter_mut().chain(im.iter_mut()).for_each(|v| *v *= s);
+    }
+}

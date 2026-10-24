@@ -29,7 +29,7 @@
   ```
   UI tasks (13–18) also run `npm run build`.
 - One commit per task (fix-up commits are fine). Message: conventional type + scope, then a blank line, then `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
-- TDD: write the listed tests first, run them, see them fail for the expected reason, implement, see them pass. Release-only tests are marked `#[cfg_attr(debug_assertions, ignore)]`; run them with `cargo test --release -p lpd-core -- --ignored` when the task says so.
+- TDD: write the listed tests first, run them, see them fail for the expected reason, implement, see them pass. Release-only tests are marked `#[cfg_attr(debug_assertions, ignore)]`; run them with `cargo test --release -p lpd-core` when the task says so.
 - After each task: re-read the task text and check every contract, string, test and "Do not" item against the code (spec-compliance pass), then review the diff for correctness, audio-thread safety, lock order and test quality (code-quality pass). Fix what you find before committing. Append a short "Task N verification (date): …" paragraph under the task in this file, as plan 1C did, in the same commit.
 - Browser preview: `npm run dev` serves `http://127.0.0.1:1420`; without `window.__TAURI__` the app shows `createPreviewSet()`. Every feature must render and not throw there: commands resolve `undefined` unless the task names a preview fallback in `src/lib/api.ts`.
 
@@ -73,6 +73,8 @@
 | K18 | Backend notices about the keys travel as the new event `keys-notice` `{ text }`; the UI shows them as a toast. |
 | K19 | FX MIX knobs are dry/wet crossfades (`out = (1 − mix)·dry + mix·wet`); DRIVE MIX 1 is fully driven. The DRIVE unit's wet signal is scaled by `1/√(pre-gain)`. |
 | K20 | The engine feeds the keys scope tap from whatever instrument plays (`(l + r) / 2` before the keys volume). `SynthMonitor` comes from `Instrument::monitor()`, which only the synth implements; `synth-telemetry` is emitted only while a monitor arrived in the last 250 ms. |
+
+| K21 | User decision (2026-10-24): keep `#[cfg_attr(debug_assertions, ignore)]`; run release timing tests by name or without `--ignored`, because release builds do not ignore these tests. Applies to Task 2, Task 8 and Task 19 and overrides the original prompt release commands. |
 
 ### 0.4 Shared name registry
 
@@ -1209,7 +1211,7 @@ Task 1 verification (2026-10-24): Copied the eight prescribed tests first; `carg
 - Create: `crates/lpd-core/src/synth/wavetable.rs`, `crates/lpd-core/tests/synth_wavetable.rs`
 - Modify: `crates/lpd-core/src/audio/fft.rs` (add `fft_complex`), `crates/lpd-core/src/synth/mod.rs` (`pub mod wavetable;`)
 
-- [ ] **Step 1: Write the failing tests** — `crates/lpd-core/tests/synth_wavetable.rs`:
+- [x] **Step 1: Write the failing tests** — `crates/lpd-core/tests/synth_wavetable.rs`:
 
 ```rust
 use lpd_core::audio::fft::fft_complex;
@@ -1319,9 +1321,9 @@ fn the_tables_build_within_200_ms() {
 }
 ```
 
-- [ ] **Step 2: Run** `cargo test -p lpd-core --test synth_wavetable` — expected: FAIL to compile (`fft_complex`, `wavetable` missing).
+- [x] **Step 2: Run** `cargo test -p lpd-core --test synth_wavetable` — expected: FAIL to compile (`fft_complex`, `wavetable` missing).
 
-- [ ] **Step 3: Implement.** Append to `crates/lpd-core/src/audio/fft.rs`:
+- [x] **Step 3: Implement.** Append to `crates/lpd-core/src/audio/fft.rs`:
 
 ```rust
 /// In-place radix-2 FFT of `re + i·im` (same power-of-two length). `inverse` uses e^{+i} and
@@ -1609,12 +1611,14 @@ pub fn table(id: TableId) -> &'static Wavetable {
 
 `crates/lpd-core/src/synth/mod.rs` gains `pub mod wavetable;`.
 
-- [ ] **Step 4: Run** `cargo test -p lpd-core --test synth_wavetable` — expected: 7 passed, 1 ignored (debug). Run `cargo test --release -p lpd-core --test synth_wavetable -- --ignored` — expected: 1 passed. Then the full verification.
-- [ ] **Step 5: Commit** `feat(core): band-limited wavetables`.
+- [x] **Step 4: Run** `cargo test -p lpd-core --test synth_wavetable` — expected: 7 passed, 1 ignored (debug). Run `cargo test --release -p lpd-core --test synth_wavetable the_tables_build_within_200_ms -- --exact` — expected: 1 passed. Then the full verification.
+- [x] **Step 5: Commit** `feat(core): band-limited wavetables`.
 
 **Do not:** read tables through anything that allocates; build tables on the audio thread (Task 10 warms the registry before the stream starts); add WAV import (spec 13).
 
-**Done when:** [ ] tests first → PASS (including the release timing test); [ ] full verification; [ ] committed.
+**Done when:** [x] tests first → PASS (including the release timing test); [x] full verification; [x] committed.
+
+Task 2 verification (2026-10-24): Eight prescribed tests written first; compile failed on missing `fft_complex` and `synth::wavetable`, then 7 debug tests passed with 1 timing test ignored. Per user decision K21, the named release timing test actually ran and passed (1 passed, 7 filtered out; test duration 0.02 s, table build under 200 ms). `cargo fmt --all -- --check` PASS; `cargo test --workspace` PASS (424 passed, 0 failed, 1 ignored); `npm test` PASS (127 passed); `npm run check` PASS (0 errors, 0 warnings). Spec-compliance and code-quality reviews checked all eight generators, K15 levels, normalization, interpolation, FFT validation and unchanged existing telemetry. Only deviation is the corrected release command (K21), plus rustfmt. No app/audio paths wired yet; preview and hardware checks do not apply.
 
 ### Task 3: Oscillators, sub and noise
 
@@ -4949,7 +4953,7 @@ fn the_synth_meets_its_cpu_budget() {
 
 If it fails, stop and report the number to the user (spec 14: the fallback — fewer unison copies at high polyphony — is the user's decision).
 
-- [ ] **Step 4: Run** `cargo test -p lpd-core --test synth_fx` — expected: 10 passed; `cargo test -p lpd-core` all green; `cargo test --release -p lpd-core --test synth_perf -- --ignored` — expected: 1 passed (write the printed time into the task paragraph). Then the full verification.
+- [ ] **Step 4: Run** `cargo test -p lpd-core --test synth_fx` — expected: 10 passed; `cargo test -p lpd-core` all green; `cargo test --release -p lpd-core --test synth_perf -- --nocapture` — expected: 1 passed (write the printed time into the task paragraph). Then the full verification.
 - [ ] **Step 5: Commit** `feat(core): synth FX chain`.
 
 **Do not:** allocate or free in `process`/`clear`; make FX controls modulation destinations (spec 5); reorder the chain.
@@ -6645,7 +6649,7 @@ export function neighbour(lists: { factory: PatchRef[]; user: PatchRef[] }, curr
 
 **Purpose.** Spec 8.3 ("the user approves the final sounds"), 11 (CPU budget), 12 (hardware checks), 14 (risks).
 
-- [ ] **Step 1: Performance.** Run `cargo test --release -p lpd-core -- --ignored` (wavetable build time, CPU budget). Record both numbers in this task's paragraph.
+- [ ] **Step 1: Performance.** Run `cargo test --release -p lpd-core` (wavetable build time, CPU budget). Record both numbers in this task's paragraph.
 - [ ] **Step 2: Listening pass with the user.** Ask the user to play each of the 16 factory patches in the desktop app (keyboard and screen keys) and to say which ones need changes. Apply each requested change in `factory.rs`, rerun `synth_patch` and `synth_meta` (the generated module changes; commit it with the recipes). Stop and wait for the user's answers; do not tune by guess.
 - [ ] **Step 3: Whole-diff review** of `main..HEAD` (inline, per 0.1): audio-thread safety (no allocation, lock or free on every engine path; `no_alloc.rs` covers them), lock order, Tauri argument names, undo scope, preview renders and throws nothing, every K decision honoured, no restyled existing parts. Fix what you find.
 - [ ] **Step 4: Spec status.** Add "### 14.1 Status after the keys synth plan (date)" to the spec: what shipped, the measured CPU and build times, the deviations (K1–K20 and any new ones), what is left for the user.
