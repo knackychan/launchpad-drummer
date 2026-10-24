@@ -73,8 +73,9 @@
 | K18 | Backend notices about the keys travel as the new event `keys-notice` `{ text }`; the UI shows them as a toast. |
 | K19 | FX MIX knobs are dry/wet crossfades (`out = (1 − mix)·dry + mix·wet`); DRIVE MIX 1 is fully driven. The DRIVE unit's wet signal is scaled by `1/√(pre-gain)`. |
 | K20 | The engine feeds the keys scope tap from whatever instrument plays (`(l + r) / 2` before the keys volume). `SynthMonitor` comes from `Instrument::monitor()`, which only the synth implements; `synth-telemetry` is emitted only while a monitor arrived in the last 250 ms. |
-
 | K21 | User decision (2026-10-24): keep `#[cfg_attr(debug_assertions, ignore)]`; run release timing tests by name or without `--ignored`, because release builds do not ignore these tests. Applies to Task 2, Task 8 and Task 19 and overrides the original prompt release commands. |
+| K22 | User decision (2026-10-24): FX idle detection must also check pending sound in delay buffers and filter/FIR states, so silent gaps before echoes do not freeze the effect. Delay lines track samples at or above `1e-6` in constant time on write; enabled units sleep only when input/previous output are quiet and no pending state remains. Overrides Task 8 original idle rule and code. |
+| K23 | Task 8 numerical test correction under prompt rule 2: the second ping-pong impulse is `0.5 * (1 - exp(-2π*6000/48000)) = 0.272031`, so its assertion uses that value rather than `> 0.3`. The specified 6 kHz tone, 0.5 feedback and DSP remain unchanged. |
 
 ### 0.4 Shared name registry
 
@@ -4260,7 +4261,7 @@ Task 7 verification (2026-10-24): Seventeen prescribed tests written first and f
 - **Chain:** order DRIVE → CHORUS → DELAY → REVERB; a unit that is off is skipped. A unit that is on is skipped for a block when its input block peaks under 1e-6 and its previous output block peaked under 1e-5 (−100 dB); `idle()` reports which units were skipped in the last block. A unit that turns on is cleared first. `clear()` empties every buffer and filter state.
 - All buffers are allocated in `FxChain::new(rate)` from the given rate (K10).
 
-- [ ] **Step 1: Write the failing tests** — `crates/lpd-core/tests/synth_fx.rs`:
+- [x] **Step 1: Write the failing tests** — `crates/lpd-core/tests/synth_fx.rs`:
 
 ```rust
 use lpd_core::audio::fft::fft_complex;
@@ -4337,7 +4338,7 @@ fn ping_pong_alternates_sides() {
     let (mut l, mut r) = impulse(0.25);
     run(&mut chain, &p, &mut l, &mut r);
     assert!(l[4800] > 0.9 && r[4800].abs() < 1e-3, "first echo left");
-    assert!(r[9600] > 0.3 && l[9600].abs() < 1e-3, "second echo right");
+    assert!((r[9600] - 0.272_031).abs() < 1e-5 && l[9600].abs() < 1e-3, "second echo right");
 }
 
 #[test]
@@ -4453,9 +4454,9 @@ fn the_synth_runs_its_fx_chain() {
 }
 ```
 
-- [ ] **Step 2: Run** `cargo test -p lpd-core --test synth_fx` — expected: FAIL to compile.
+- [x] **Step 2: Run** `cargo test -p lpd-core --test synth_fx` — expected: FAIL to compile.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
 `crates/lpd-core/src/synth/fx/line.rs` (complete):
 
@@ -4963,16 +4964,18 @@ fn the_synth_meets_its_cpu_budget() {
 
 If it fails, stop and report the number to the user (spec 14: the fallback — fewer unison copies at high polyphony — is the user's decision).
 
-- [ ] **Step 4: Run** `cargo test -p lpd-core --test synth_fx` — expected: 10 passed; `cargo test -p lpd-core` all green; `cargo test --release -p lpd-core --test synth_perf -- --nocapture` — expected: 1 passed (write the printed time into the task paragraph). Then the full verification.
-- [ ] **Step 5: Commit** `feat(core): synth FX chain`.
+- [x] **Step 4: Run** `cargo test -p lpd-core --test synth_fx` — expected: 10 passed; `cargo test -p lpd-core` all green; `cargo test --release -p lpd-core --test synth_perf -- --nocapture` — expected: 1 passed (write the printed time into the task paragraph). Then the full verification.
+- [x] **Step 5: Commit** `feat(core): synth FX chain`.
 
 **Do not:** allocate or free in `process`/`clear`; make FX controls modulation destinations (spec 5); reorder the chain.
 
-**Done when:** [ ] tests first → PASS; [ ] full verification; [ ] committed.
+**Done when:** [x] tests first → PASS; [x] full verification; [x] committed.
 
 ---
 
 ## Phase B — Integration
+
+Task 8 verification (2026-10-24): Prescribed tests written first; synth_fx failed to compile on the absent fx module. Supplied DSP then exposed three failures: silent gaps froze echo/reverb buffers. User decision K22 added constant-time pending-sample tracking and checks of FIR/feedback states before sleeping. Nine tests then passed; the remaining ping-pong threshold contradicted the prescribed feedback low-pass (actual/analytic 0.272031), corrected under prompt rule 2 and recorded in K23. All 10 synth_fx tests now PASS. `cargo test -p lpd-core` PASS; `cargo fmt --all -- --check` PASS; `cargo test --workspace` PASS (483 passed, 0 failed, 2 ignored); `npm test` PASS (127 passed); `npm run check` PASS (0 errors, 0 warnings). Named release CPU test PASS: 10 s of worst-case synth audio rendered in 1.315 s (13.15% of real time, budget <2.5 s), per K21 release-command correction. Two inline reviews checked stereo DSP/order, wet/dry mixes, buffer sizing, feedback, clearing and fixed-state updates without allocation/free/lock/I/O. Existing echo, decay, idle/wake and clear tests cover K22; engine allocation enforcement remains Task 10. Other deviations: rustfmt only. No app/preview/listening/hardware checks yet.
 
 ### Task 9: Patches, factory patches, set v2 and the generated metadata
 

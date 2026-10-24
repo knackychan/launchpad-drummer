@@ -2,6 +2,7 @@
 
 pub mod env;
 pub mod filter;
+pub mod fx;
 pub mod lfo;
 pub mod matrix;
 pub mod monitor;
@@ -93,6 +94,7 @@ pub struct Synth {
     volume: f32,
     vol_k: f32,
     monitor: SynthMonitor,
+    fx: fx::FxChain,
     next_age: u64,
     resets: u32,
 }
@@ -130,6 +132,7 @@ impl Synth {
             volume: fader_gain(params.voice.volume_db),
             vol_k: 1.0 - (-1.0 / (SMOOTH_S * rate)).exp(),
             monitor: SynthMonitor::default(),
+            fx: fx::FxChain::new(rate),
             next_age: 0,
             resets: 0,
         }
@@ -358,6 +361,7 @@ impl Synth {
         for (_, g) in &mut self.fades {
             *g = 0.0;
         }
+        self.fx.clear();
         self.stack.clear();
         self.lfo = [Lfo::new(11), Lfo::new(23)];
         self.free_lfo = [0.0; LFOS];
@@ -490,7 +494,12 @@ impl Instrument for Synth {
             self.bus_l[i] *= HEADROOM;
             self.bus_r[i] *= HEADROOM;
         }
-        // Task 8: the FX chain processes bus_l / bus_r here.
+        self.fx.process(
+            &mut self.bus_l[..n],
+            &mut self.bus_r[..n],
+            &self.params.fx,
+            self.tempo,
+        );
         let target = fader_gain(self.params.voice.volume_db);
         let fading = self.pending.is_some();
         for i in 0..n {
