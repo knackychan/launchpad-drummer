@@ -183,3 +183,12 @@ legend { padding: 0 0 10px; }
 .learning { animation: learnblink .5s steps(1) infinite; outline-offset: 2px; }
 @keyframes learnblink { 50% { outline: 2px solid var(--warn); } }
 @media (prefers-reduced-motion: reduce) { .learning { animation: none; outline: 2px solid var(--warn); } }
+
+/* Synth plate sections (keys synth plan, Task 15) */
+.syn-row { display: grid; gap: 6px; min-height: 0; }
+.syn-sec { display: flex; flex-direction: column; gap: 4px; min-width: 0; min-height: 0; padding: 6px; border-radius: 3px; box-shadow: inset 0 0 0 1px var(--line); }
+.syn-title { display: flex; align-items: center; gap: 6px; height: 18px; flex: none; }
+.syn-title .silk { color: var(--vec); }
+.syn-disp { position: relative; flex: 1 1 36%; min-height: 36px; }
+.syn-disp canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.syn-ctl { display: flex; flex-wrap: wrap; gap: 4px 6px; align-content: flex-start; align-items: flex-start; }

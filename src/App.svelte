@@ -27,6 +27,7 @@
   import { bindingLabel, boundIds } from './lib/learn.ts';
   import { SOUND_COLORS, SOUND_LABELS } from './lib/keys.ts';
   import type { KeysMix } from './lib/synth-types.ts';
+  import { setParam } from './lib/synth.ts';
   import { LEARN, type LearnCtx } from './lib/learnable.ts';
   import { createLedFrame, ledToCss } from './lib/led.ts';
   import type { PadInput, Rgb } from './lib/led.ts';
@@ -46,7 +47,7 @@
   const tauri = isTauri;
   /** The desktop app, or the browser preview playing a scripted startup: the UI waits for the backend's load status. */
   const staged = isStaged;
-  const editCommands = new Set(['update_pad', 'clear_pad', 'move_pad', 'drop_files', 'locate_sample', 'update_group', 'rename_bank', 'update_bank_lights', 'update_bank_humanize', 'unbind', 'seq_update', 'seq_add_lane', 'set_keys']);
+  const editCommands = new Set(['update_pad', 'clear_pad', 'move_pad', 'drop_files', 'locate_sample', 'update_group', 'rename_bank', 'update_bank_lights', 'update_bank_humanize', 'unbind', 'seq_update', 'seq_add_lane', 'set_keys', 'synth_param', 'synth_route', 'synth_load_patch', 'synth_revert']);
   async function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     const result = await call<T>(cmd, args);
     if (editCommands.has(cmd)) refreshHistory();
@@ -217,6 +218,12 @@
   async function useSynth() {
     try { const status = await invoke<KeysStatus>('set_keys_engine', { engine: 'synth' }); if (status) keysStatus = status; }
     catch (e) { showToast(errorText(e)); }
+  }
+  // Synth edits are optimistic: the set shows the value now, the backend stores it (spec 2.2).
+  function synthParam(id: string, value: number) {
+    const stored = setParam(currentSet.keys.patch.params, id, value);
+    currentSet.keys.modified = true;
+    void invoke('synth_param', { id, value: stored }).catch((e) => { showToast(errorText(e)); void resyncSet(); });
   }
 
   // MIDI learn (plan 1C Task 12): the control being learned, and the one shared menu of learnable controls.
@@ -664,6 +671,10 @@
       });
       subscribe<{ pitch: number; mod: number }>('keys-wheel', (event) => { keysWheel = event; });
       subscribe<KeysStatus>('keys-status', (event) => { keysStatus = event; });
+      subscribe<{ values: [string, number][] }>('synth-params', (event) => {
+        for (const [id, v] of event.values) setParam(currentSet.keys.patch.params, id, v);
+        currentSet.keys.modified = true;
+      });
       subscribe<SeqPosition>('seq-position', (event) => { seqPos = event; seqAt = performance.now(); seqRec = event.rec; });
       subscribe<{ bank: number; x: number; y: number }>('pad-hit', (event) => padHit(event.bank, event.x, event.y));
       subscribe<SetModel>('set-changed', (event) => { currentSet = event; });
@@ -1081,7 +1092,7 @@
                     onchannel={channelMenu}
                     onexpand={(x, y) => { mixPop = { x, y }; }}
                   />
-                  <SynthPlate set={currentSet} width={layout.synthW} height={layout.rowH} engine={keysStatus.engine} onusesynth={() => void useSynth()} />
+                  <SynthPlate set={currentSet} width={layout.synthW} height={layout.rowH} engine={keysStatus.engine} onusesynth={() => void useSynth()} onparam={synthParam} />
                 </div>
                 <KeysPlate
                   short={layout.kh < 68} folded={keysFolded} set={currentSet} octave={keysOctave} deviceName={keysDeviceName} devicePresent={tauri ? keysPresent : true}

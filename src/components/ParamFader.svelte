@@ -1,6 +1,6 @@
 <script lang="ts">
   import { getContext } from 'svelte';
-  import { meta, getParam, toNorm, fromNorm, fmtParam } from '../lib/synth.ts';
+  import { meta, getParam, toNorm, fromNorm, fmtParam, lcxlTag } from '../lib/synth.ts';
   import { LEARN, learnable, isLearning, isLearned, type LearnCtx } from '../lib/learnable.ts';
   import type { SynthParams } from '../lib/synth-types.ts';
   let { id, params, height, label, onparam }: { id: string; params: SynthParams; height: number; label?: string; onparam: (id: string, value: number) => void } = $props();
@@ -9,6 +9,7 @@
   const value = $derived(getParam(params, id));
   const pos = $derived(toNorm(m, value));
   const learnId = $derived(`synth.${id}`);
+  const tagTitle = $derived(lcxlTag(id));
   const apply = (n: number) => onparam(id, fromNorm(m, n));
   function down(e: PointerEvent) {
     if (e.button !== 0) return;
@@ -26,13 +27,15 @@
 </script>
 <div class="param-fader">
   <span class="silk">{label ?? m.label}</span>
+  {#if tagTitle}<span class="xl-tag" title={tagTitle}>XL</span>{/if}
   <div class="fader" class:learning={isLearning(learn, learnId)} class:learned={isLearned(learn, learnId)} data-learn={learnId} use:learnable={{ ctx: learn, id: learnId, reset: () => onparam(id, m.default) }} role="slider" tabindex="0" aria-label="{m.section} {m.label}" aria-valuemin={0} aria-valuemax={1} aria-valuenow={pos} aria-valuetext={fmtParam(id, value)} style:height="{height}px" onpointerdown={down} onkeydown={key} onwheel={(e) => { e.preventDefault(); apply(pos + (e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 0.001 : 0.01)); }} ondblclick={() => onparam(id, m.default)}>
     <div class="f-slot"></div><div class="f-cap" style:top="{(1 - pos) * (height - 22)}px"></div>
   </div>
   <span class="lcd">{fmtParam(id, value)}</span>
 </div>
 <style>
-  .param-fader { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 48px; }
+  .param-fader { position: relative; display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 48px; }
+  .xl-tag { position: absolute; right: 0; top: 0; font: 600 8px var(--f-silk); color: var(--vec); }
   .param-fader > .lcd { font-size: 11px; color: var(--lcd-dim); white-space: nowrap; }
   .fader { position: relative; width: 20px; cursor: ns-resize; touch-action: none; border-radius: 5px; background: linear-gradient(#1d1a18, #121010); box-shadow: inset 0 0 0 2px #070606, inset 0 3px 6px rgba(0,0,0,.7), 0 1px 0 rgba(255,255,255,.08); }
   .f-slot { position: absolute; left: calc(50% - 2px); top: 10px; bottom: 10px; width: 4px; border-radius: 2px; background: linear-gradient(90deg, #9e978b, #d8d2c6 50%, #9e978b); box-shadow: 0 0 0 1px #070606; }
