@@ -78,6 +78,12 @@ pub fn parse(bytes: &[u8]) -> Option<MidiMsg> {
     }
 }
 
+/// Ports whose controller messages (CC, pitch bend) are dropped before the router sees them:
+/// the Graphite 49 sends a nonstop stream of both. Its notes still play.
+pub fn drops_controllers(port: &str) -> bool {
+    port.to_ascii_lowercase().contains("graphite")
+}
+
 #[derive(Default)]
 pub struct Registry {
     devices: Vec<MidiDevice>,
@@ -336,6 +342,7 @@ fn connect(
     let held = Arc::new(Held::default());
     let callback_held = held.clone();
     let mut throttle = LogThrottle::new();
+    let drop_controllers = drops_controllers(name);
     let connection = input
         .connect(
             &port,
@@ -344,6 +351,10 @@ fn connect(
                 let Some(msg) = parse(bytes) else {
                     return;
                 };
+                if drop_controllers && matches!(msg, MidiMsg::Cc { .. } | MidiMsg::PitchBend { .. })
+                {
+                    return;
+                }
                 if role == "keys" {
                     match msg {
                         MidiMsg::NoteOn { note, .. } => callback_held.set(note, true),
@@ -395,6 +406,13 @@ mod tests {
         assert_eq!(classify("Keystation 49 MK3", &none()), "keys");
         assert_eq!(classify("keystation 61", &none()), "keys");
         assert_eq!(classify("Some Synth", &none()), "other");
+    }
+
+    #[test]
+    fn graphite_controllers_are_dropped() {
+        assert!(drops_controllers("Graphite 49"));
+        assert!(drops_controllers("2- GRAPHITE 49 MIDI"));
+        assert!(!drops_controllers("Keystation 49 MK3"));
     }
 
     #[test]

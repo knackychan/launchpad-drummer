@@ -1,6 +1,7 @@
 <script lang="ts">
   import RackUnit from './RackUnit.svelte';
   import { fixedRole, NO_DEVICES, statusLamp, STATUS_TEXT } from '../lib/midi.ts';
+  import { invoke } from '../lib/api.ts';
   import type { MidiDevice } from '../lib/model.ts';
   let { devices, events, onrole }: {
     devices: MidiDevice[]; events: { time: string; text: string }[];
@@ -9,6 +10,7 @@
 </script>
 
 <RackUnit title="MIDI DEVICES">
+  <div class="reset"><button class="key small" title="Close and reopen the Launchpad ports" onclick={() => void invoke('reset_launchpad').catch(() => {})}>RESET LAUNCHPAD</button></div>
   {#if devices.length === 0}
     <div class="screen empty"><span class="lcd lcd-dim">{NO_DEVICES}</span></div>
   {:else}
@@ -44,6 +46,7 @@
 </RackUnit>
 
 <style>
+  .reset { margin-bottom: 10px; }
   .empty { padding: 12px; }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .tbl { width: 100%; border-collapse: collapse; font-size: 12px; }

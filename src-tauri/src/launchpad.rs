@@ -3,11 +3,24 @@
 use lpd_core::devices::launchpad::{self as lp, LpEvent};
 use midir::{MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 const RECHECK: Duration = Duration::from_secs(2);
+/// Game LED frames go out at most this often: the MK2 chokes on a 60 Hz stream of full SysEx.
+const GAME_FRAME_INTERVAL: Duration = Duration::from_millis(40);
+/// Set by `reset_launchpad`; the Launchpad thread drops both ports and reopens them.
+static RESET_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Close and reopen the Launchpad's input and output ports (for a connection that shows
+/// connected but no longer delivers pad presses).
+#[tauri::command]
+pub fn reset_launchpad() {
+    crate::logfile::log("Launchpad: connection reset requested");
+    RESET_REQUESTED.store(true, Ordering::SeqCst);
+}
 /// The Launchpad's row in the shared MIDI device registry (SETUP › MIDI DEVICES).
 const REGISTRY_PORT: &str = "Launchpad MK2";
 
@@ -193,8 +206,14 @@ fn run(app: AppHandle, state: AppState, game_frames: FrameSender) {
     let mut next_check = Instant::now();
     let mut tick_counter: u32 = 0;
     let tick_interval = Duration::from_millis(16);
+    let mut last_game_send: Option<Instant> = None;
     loop {
         let now = Instant::now();
+        if RESET_REQUESTED.swap(false, Ordering::SeqCst) {
+            drop_device(&mut connection, &mut led, &state);
+            report_status(&app, &mut status, DeviceStatus::Disconnected);
+            next_check = now;
+        }
         if now >= next_check {
             check_connection(&app, &state, &mut connection, &mut led, &mut status);
             next_check = now + RECHECK;
@@ -203,10 +222,19 @@ fn run(app: AppHandle, state: AppState, game_frames: FrameSender) {
         state.maintain();
 
         let sent = match state.input_mode() {
-            InputMode::Game => match game_frames.take() {
-                Some(frame) => led.send_game(&state.painter, frame),
-                None => Ok(()),
-            },
+            InputMode::Game => {
+                if last_game_send.is_some_and(|t| now.duration_since(t) < GAME_FRAME_INTERVAL) {
+                    Ok(()) // the newest frame stays in the slot for the next window
+                } else {
+                    match game_frames.take() {
+                        Some(frame) => {
+                            last_game_send = Some(now);
+                            led.send_game(&state.painter, frame)
+                        }
+                        None => Ok(()),
+                    }
+                }
+            }
             InputMode::Sampler => {
                 led.clear_game();
                 game_frames.take();
