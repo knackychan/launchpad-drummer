@@ -26,7 +26,8 @@
   import { pushEsc, runEsc } from './lib/esc.ts';
   import { bindingLabel, boundIds } from './lib/learn.ts';
   import { SOUND_COLORS, SOUND_LABELS } from './lib/keys.ts';
-  import type { KeysMix, Route, SourceId } from './lib/synth-types.ts';
+  import type { KeysMix, Route, SourceId, SynthTelemetry } from './lib/synth-types.ts';
+  import { pushSynthFrame } from './lib/synthFeed.ts';
   import { setParam, throttle, withoutRoute } from './lib/synth.ts';
   import { LEARN, type LearnCtx } from './lib/learnable.ts';
   import { createLedFrame, ledToCss } from './lib/led.ts';
@@ -228,6 +229,8 @@
     void invoke('synth_param', { id, value: stored }).catch((e) => { showToast(errorText(e)); void resyncSet(); });
   }
   let selectedRoute = $state<Record<string, number>>({});
+  let synthResetNoticed = false;
+  let synthResets = 0;
   const routes = () => currentSet.keys.patch.params.routes;
   function sendRoute(slot: number, route: Route | null) {
     currentSet.keys.modified = true;
@@ -715,6 +718,11 @@
       subscribe<{ values: [string, number][] }>('synth-params', (event) => {
         for (const [id, v] of event.values) setParam(currentSet.keys.patch.params, id, v);
         currentSet.keys.modified = true;
+      });
+      subscribe<SynthTelemetry>('synth-telemetry', event => {
+        pushSynthFrame(event);
+        if(event.resets>synthResets&&!synthResetNoticed){synthResetNoticed=true;showToast('Synth voice reset (unstable settings)');}
+        synthResets=event.resets;
       });
       subscribe<SeqPosition>('seq-position', (event) => { seqPos = event; seqAt = performance.now(); seqRec = event.rec; });
       subscribe<{ bank: number; x: number; y: number }>('pad-hit', (event) => padHit(event.bank, event.x, event.y));

@@ -4,13 +4,17 @@
   import ParamKey from './ParamKey.svelte';
   import ChoiceLcd from './ChoiceLcd.svelte';
   import { SYNTH_META } from '../lib/synth-meta.ts';
+  import { display } from '../lib/synthDisplay.ts';
+  import { drawLfo } from '../lib/synthDraw.ts';
+  import { synthFeed, synthLive } from '../lib/synthFeed.ts';
+  import { sourceColor } from '../lib/synth.ts';
   import type { SynthParams, SourceId } from '../lib/synth-types.ts';
   let { n, params, live, knob, onparam, mod, onstart }: { n: 1 | 2; params: SynthParams; live: number[] | null; knob: number; onparam: (id: string, value: number) => void; mod?: ComponentProps<typeof ParamKnob>['mod']; onstart: (source: SourceId, e: PointerEvent) => void } = $props();
   const prefix = $derived(`lfo${n}`);
 </script>
 <section class="syn-sec" aria-label="LFO{n}">
   <header class="syn-title"><button class="silk" onpointerdown={(e) => onstart(`lfo${n}` as SourceId, e)}>LFO{n}</button></header>
-  <div class="syn-disp screen" aria-hidden="true"><canvas></canvas></div>
+  <div class="syn-disp screen" aria-hidden="true"><canvas use:display={{ draw: (g,w,h) => drawLfo(g,w,h,params.lfo[n-1],synthLive()?synthFeed.frame?.lfo[n-1]?.[1]??null:null,sourceColor(`lfo${n}` as SourceId)), key: JSON.stringify(params.lfo[n-1]) }}></canvas></div>
   <div class="syn-ctl">
     <ChoiceLcd id="{prefix}.shape" {params} {onparam}/>
     <ParamKnob {mod} id="{prefix}.{params.lfo[n-1].sync ? 'syncDiv' : 'rate'}" label="RATE" {params} {onparam} size={knob} live={params.lfo[n-1].sync ? null : live?.[SYNTH_META.dests.findIndex(d => d.id === `${prefix}.rate`)] ?? null}/>
