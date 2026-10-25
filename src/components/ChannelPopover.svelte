@@ -1,9 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { pushEsc } from '../lib/esc.ts';
-  import Knob from './Knob.svelte';
   import { groupLegend, type Group } from '../lib/model.ts';
-  import { fmtLp, fmtPan, fmtSemis, knobToLp, lpToKnob } from '../lib/mix.ts';
   let { index, group, inputs, keysHere, keysWhere, x, y, rename = false, onupdategroup, onkeys, onclose }: {
     index: number; group: Group; inputs: { pads: number; keysColor: string | null; keysLabel: string };
     keysHere: boolean; keysWhere: string; x: number; y: number; rename?: boolean;
@@ -34,11 +32,6 @@
     {:else}<button class="lcd" onclick={() => { renaming = true; }}>{groupLegend(index, group.name)}</button>{/if}
     <button class="key small" aria-label="Close" onclick={onclose}>✕</button>
   </div>
-  <div class="cp-knobs">
-    <Knob label="PAN" ariaLabel="{group.name} pan" value={group.pan} min={-1} max={1} def={0} step={0.02} fine={0.01} size={36} fmt={fmtPan} learnId="group.{index}.pan" onchange={(pan) => onupdategroup(index, { ...group, pan })} />
-    <Knob label="PITCH" ariaLabel="{group.name} pitch" value={group.pitchSemitones} min={-12} max={12} def={0} step={1} fine={0.1} size={36} fmt={fmtSemis} learnId="group.{index}.pitch" onchange={(pitchSemitones) => onupdategroup(index, { ...group, pitchSemitones })} />
-    <Knob label="LOW-PASS" ariaLabel="{group.name} low-pass" value={lpToKnob(group.lowpassHz)} min={0} max={1} def={1} step={0.01} fine={0.002} size={36} fmt={fmtLp} learnId="group.{index}.lowpass" onchange={(t) => onupdategroup(index, { ...group, lowpassHz: t >= 0.999 ? 20000 : knobToLp(t) })} />
-  </div>
   <div class="cp-rows">
     <div class="lcd-dim cp-info">Pads: {inputs.pads} in group {index + 1} (pad editor › MIX GROUP)</div>
     <button class="cp-row" role="menuitemcheckbox" aria-checked={keysHere} onclick={onkeys}>{keysHere ? '✓ ' : ''}{keysWhere}</button>
@@ -50,8 +43,7 @@
   .cp-head > .lcd { background: none; border: 0; color: var(--lcd); font: 400 12px var(--f-lcd); }
   .cp-head button.lcd { cursor: pointer; }
   .cp-head input { width: 160px; }
-  .cp-knobs { display: flex; justify-content: space-around; gap: 16px; padding: 12px 0; }
-  .cp-rows { display: flex; flex-direction: column; gap: 6px; }
+  .cp-rows { display: flex; flex-direction: column; gap: 6px; padding-top: 12px; }
   .cp-info, .cp-row { font: 400 12px var(--f-lcd); }
   .cp-row { background: none; border: 0; color: var(--lcd); text-align: left; padding: 6px 0; cursor: pointer; }
 </style>
