@@ -18,12 +18,16 @@
   import { onSynthFeed, synthFeed, synthLive } from '../lib/synthFeed.ts';
   import { display } from '../lib/synthDisplay.ts';
   import { drawScope } from '../lib/synthDraw.ts';
-  let { set, width, height, engine, onusesynth, onparam, selectedRoute, onaddroute, onupdateroute, onremoveroute, onroutedepth, onselectroute, onblankroute }: {
+  import { patchLabel } from '../lib/patchMenu.ts';
+  import { categoryColor } from '../lib/synth.ts';
+  import { ledToCss } from '../lib/led.ts';
+  let { set, width, height, engine, onusesynth, onparam, selectedRoute, onaddroute, onupdateroute, onremoveroute, onroutedepth, onselectroute, onblankroute, onpatchmenu, onpatchstep, onsavepatch }: {
     set: SetModel; width: number; height: number; engine: string; onusesynth: () => void;
     onparam: (id: string, value: number) => void;
     selectedRoute: Record<string, number>; onaddroute: (source: SourceId, dest: string) => void;
     onupdateroute: (slot: number, route: Route) => void; onremoveroute: (slot: number) => void;
     onroutedepth: (dest: string, delta: number) => void; onselectroute: (dest: string, slot: number) => void; onblankroute: () => void;
+    onpatchmenu: (e: Event) => void; onpatchstep: (step: 1 | -1) => void; onsavepatch: (e: Event) => void;
   } = $props();
   const pageSet = $derived(synthPageSet(width, height));
   let frame = $state<SynthTelemetry | null>(null);
@@ -97,12 +101,14 @@
 <section class="synth plate" data-label="SYNTH" aria-label="Synth" style:width="{width}px" style:height="{height}px" style:--kn="{knob}px">
   <header class="syn-head">
     <div class="syn-head-row">
-      <div class="lcd screen syn-patch">{set.keys.patch.name}{set.keys.modified ? ' *' : ''}</div>
+      <button class="lcd screen syn-patch" style:color={ledToCss(categoryColor(set.keys.patch.category))} aria-haspopup="menu" onclick={onpatchmenu}>{patchLabel(set.keys)}</button>
+      <button class="key small" aria-label="Previous patch" onclick={()=>onpatchstep(-1)}>◀</button><button class="key small" aria-label="Next patch" onclick={()=>onpatchstep(1)}>▶</button><button class="key small" onclick={onsavepatch}>SAVE</button><button class="key small" aria-label="Patch menu" aria-haspopup="menu" onclick={onpatchmenu}>▾</button>
       <div class="switch" role="tablist" aria-label="Synth pages">
         {#each SYNTH_PAGES[pageSet] as name}<button class="key small" class:on={name === page} role="tab" aria-selected={name === page} onclick={() => choose(name)}>{name}</button>{/each}
       </div>
+      <span class="lcd-dim syn-stats">VOICES {frame?`${frame.voices}/16`:'—'}<br/>CPU {frame?`${Math.round(frame.cpu*100)} %`:'—'}</span><span class="lamp" class:ok={engine==='synth'} title={engine==='soundfont'?'SOUNDFONT':'SYNTH'}></span>
     </div>
-    <div class="syn-head-row"><ModSourceStrip meters={frame?.sources??null} onstart={startMod}/><canvas class="screen syn-scope" aria-hidden="true" use:display={{ draw: (g,w,h) => drawScope(g,w,h,synthLive()?synthFeed.frame?.scope??null:null) }}></canvas><span class="lcd-dim syn-stats">VOICES {frame?`${frame.voices}/16`:'—'}<br/>CPU {frame?`${Math.round(frame.cpu*100)} %`:'—'}</span><span class="lamp" class:ok={engine==='synth'} title={engine==='soundfont'?'SOUNDFONT':'SYNTH'}></span></div>
+    <div class="syn-head-row"><ModSourceStrip meters={frame?.sources??null} onstart={startMod}/><canvas class="screen syn-scope" aria-hidden="true" use:display={{ draw: (g,w,h) => drawScope(g,w,h,synthLive()?synthFeed.frame?.scope??null:null) }}></canvas></div>
   </header>
   <div class="syn-body" role="tabpanel" aria-label={page} inert={engine === 'soundfont'}>
     {#if page === 'MAIN'}
@@ -148,7 +154,7 @@
   .syn-head-row:nth-child(2) { height: auto; min-height: 26px; }
   .syn-scope { width: 120px; height: 24px; flex: none; }
   .syn-stats { font-size: 10px; white-space: nowrap; flex: none; }
-  .syn-patch { min-width: 120px; max-width: 260px; flex: 1; height: 24px; line-height: 24px; padding: 0 8px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+  .syn-patch { border: 0; text-align: left; min-width: 120px; max-width: 260px; flex: 1; height: 24px; line-height: 24px; padding: 0 8px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
   .syn-body { flex: 1; min-height: 0; position: relative; }
   .syn-dim { position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center; gap: 12px; background: rgba(0,0,0,.66); }
 </style>

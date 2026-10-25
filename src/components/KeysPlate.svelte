@@ -12,16 +12,19 @@
     isBlackKey, KEY_HI, KEY_LO, noteName, outputLabel, rangeLabel, SOUNDS, SOUND_COLORS, SOUND_LABELS, velocityFromY, windowRange,
   } from '../lib/keys.ts';
   import type { KeysMix } from '../lib/synth-types.ts';
+  import { patchLabel } from '../lib/patchMenu.ts';
+  import { categoryColor } from '../lib/synth.ts';
 
   let {
     short = false, folded = false, set, octave, deviceName = 'KEYSTATION 49', devicePresent = false, remoteDown = new Set<number>(),
     last = $bindable<{ note: number; velocity: number } | null>(null), wheel = { pitch: 0, mod: 0 },
-    onsettings, onnote, onpad, onpitch, onmod, onoctave, onfold,
+    onsettings, onnote, onpad, onpitch, onmod, onoctave, onfold, engine, onpatchmenu,
   }: {
     /** Keybed under 68 px: the third control row is dropped. */
     short?: boolean;
     folded?: boolean;
     set: SetModel;
+    engine: string; onpatchmenu: (e: Event) => void;
     octave: number;
     deviceName?: string;
     devicePresent?: boolean;
@@ -54,7 +57,7 @@
   const whiteIdx = (n: number) => KEYS.filter((k) => !k.black && k.n < n).length;
   const winLeft = $derived((whiteIdx(range[0]) / 52) * 100);
   const winWidth = $derived(((whiteIdx(range[1]) + 1 - whiteIdx(range[0])) / 52) * 100);
-  const soundColor = $derived(ledToCss(SOUND_COLORS[keys.gmSound]));
+  const soundColor = $derived(ledToCss(engine==='synth'?categoryColor(keys.patch.category):SOUND_COLORS[keys.gmSound]));
 
   /** The pad a key is bound to (any device), with its colour; keys outside the 88 are never asked. */
   const bound = $derived.by(() => {
@@ -142,8 +145,8 @@
       <div class="k-row">
         <span class="lamp" class:ok={devicePresent} title="{deviceName} {devicePresent ? 'connected' : 'not connected'}"></span>
         <span class="lcd screen target" role="button" tabindex="0" aria-haspopup="menu" style:color={soundColor}
-          title="Keys sound: {SOUND_LABELS[keys.gmSound]} — click to change. Notes learned to a pad play that pad."
-          onclick={soundMenu} onkeydown={activate(soundMenu)}>{SOUND_LABELS[keys.gmSound]}</span>
+          title={engine==='synth'?`Keys patch: ${keys.patch.name} — click to change. Notes learned to a pad play that pad.`:`Keys sound: ${SOUND_LABELS[keys.gmSound]} — click to change. Notes learned to a pad play that pad.`}
+          onclick={engine==='synth'?onpatchmenu:soundMenu} onkeydown={activate(engine==='synth'?onpatchmenu:soundMenu)}>{engine==='synth'?patchLabel(keys):SOUND_LABELS[keys.gmSound]}</span>
         <NumLcd label="Keys volume (dB)" value={keys.volumeDb} min={-40} max={6} def={-6} fmt={fmtVol} learnId="keys.volume"
           onchange={(v) => onsettings(mix({ volumeDb: v }))} />
         <button type="button" class="key small" aria-label="Fold keyboard" title="Fold (Ctrl+K)" onclick={() => onfold(true)}>▾</button>

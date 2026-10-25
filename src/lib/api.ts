@@ -1,4 +1,6 @@
 import { createPreviewSet } from './model.ts';
+import { SYNTH_META } from './synth-meta.ts';
+import type { PatchRequest } from './patchMenu.ts';
 import { PREVIEW_MIDI } from './midi.ts';
 import type { AudioDevice, AudioPrefs, AudioStatus, LoadStatus, Startup } from './model.ts';
 const tauri = typeof window !== 'undefined' ? window.__TAURI__ : undefined;
@@ -86,7 +88,20 @@ const PREVIEW: Record<string, (args?: Record<string, unknown>) => unknown> = {
   set_audio: (args) => previewStatus(args?.prefs as AudioPrefs),
   audio_reconnect: () => previewStatus(),
   midi_devices: () => PREVIEW_MIDI,
-  get_config: () => ({ lastSet: null, libraryDir: null, soundfont: null,
+  synth_patches: () => ({ factory: SYNTH_META.factory.map(({id,name,category})=>({id,name,category})), user: [] }),
+  synth_load_patch: args => {
+    const source=args?.source as PatchRequest;
+    const set=createPreviewSet();
+    const factory='factory' in source?SYNTH_META.factory.find(p=>p.id===source.factory):undefined;
+    if(factory){set.keys.patch={patchVersion:1,name:factory.name,category:factory.category,params:structuredClone(factory.params)};set.keys.patchSource={factory:factory.id};}
+    else {set.keys.patch={patchVersion:1,name:'INIT',category:'keys',params:structuredClone(SYNTH_META.init)};set.keys.patchSource='init';}
+    set.keys.modified=false;return set;
+  },
+  synth_revert: () => createPreviewSet(),
+  keys_status: () => ({engine:'synth',name:'SYNTH',error:null}),
+  patches_folder: () => 'PREVIEW/Patches',
+  synth_table: () => undefined,
+  get_config: () => ({ lastSet: null, libraryDir: null, soundfont: null, keysEngine: null,
     audio: { backend: 'wasapi', device: null, bufferFrames: null }, midiRoles: {} }),
 };
 export function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {

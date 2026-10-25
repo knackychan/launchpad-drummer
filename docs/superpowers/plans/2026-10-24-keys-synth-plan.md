@@ -6674,16 +6674,18 @@ export function neighbour(lists: { factory: PatchRef[]; user: PatchRef[] }, curr
 
 **Preview (`api.ts`):** `synth_patches` → `{ factory: SYNTH_META.factory.map(({ id, name, category }) => ({ id, name, category })), user: [] }`; `synth_load_patch` → `createPreviewSet()` with `keys.patch` = that factory patch (or INIT) and `patchSource` set; `synth_revert` → `createPreviewSet()`; `keys_status` → `{ engine: 'synth', name: 'SYNTH', error: null }`; `patches_folder` → `'PREVIEW/Patches'`; `get_config` adds `keysEngine: null`; `synth_table` → `undefined` (displays stay in STANDBY). `model.ts` `AppConfig` gains `keysEngine: string | null`.
 
-- [ ] **Step 1: Write** `patchMenu.test.ts` → **Step 2:** `npm test` FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Verify:** `npm test`, `npm run check`, `npm run build`, full verification. Preview: the keys plate LCD and the synth header show `E.PIANO` in orange; the menu opens; FACTORY ▸ lists 16 patches under 8 headings; picking SUPERSAW changes both LCDs; ◀ ▶ step through the list; SAVE AS prompts; SETUP › KEYS shows the ENGINE switch with SOUNDFONT disabled. Desktop app (if you can run it): save, rename, delete and revert a user patch in `<Documents>\Launchpad Drummer\Patches`; switching to SOUNDFONT dims the synth and the LCXL knobs show the notice once.
-- [ ] **Step 5: Commit** `feat(ui): patch menu, keys plate patch LCD and engine switch`.
+- [x] **Step 1: Write** `patchMenu.test.ts` → **Step 2:** `npm test` FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Verify:** `npm test`, `npm run check`, `npm run build`, full verification. Preview: the keys plate LCD and the synth header show `E.PIANO` in orange; the menu opens; FACTORY ▸ lists 16 patches under 8 headings; picking SUPERSAW changes both LCDs; ◀ ▶ step through the list; SAVE AS prompts; SETUP › KEYS shows the ENGINE switch with SOUNDFONT disabled. Desktop app (if you can run it): save, rename, delete and revert a user patch in `<Documents>\Launchpad Drummer\Patches`; switching to SOUNDFONT dims the synth and the LCXL knobs show the notice once.
+- [x] **Step 5: Commit** `feat(ui): patch menu, keys plate patch LCD and engine switch`.
 
 **Do not:** write patch files from the UI side; use native dialogs or `alert`; leave the GM sound list active for the synth engine.
 
-**Done when:** [ ] tests first → PASS; [ ] preview checked; [ ] full verification + build; [ ] committed.
+**Done when:** [x] tests first → PASS; [x] preview checked; [x] full verification + build; [x] committed.
 
 ---
+
+**Task 18 verification (2026-10-25):** Five menu tests were written first and failed on missing patchMenu.ts; supplied helpers then exposed the anticipated category mismatch (7, not 8). Per the resume prompt and original rule 2, corrected only the test to the seven populated headings PIANO/KEYS/ORGAN/PAD/LEAD/BASS/PLUCK, retaining all 16 prescribed recipes and the helper's skip-empty-category behavior. All five tests pass. Added shared patch actions, LCD/menu/previous/next/SAVE controls, uppercase focused name prompt, same-name-only overwrite retry, user rename/delete/revert/folder commands, category-coloured keys and mixer input labels, SETUP engine/folder rows, keys-notice toast and prescribed preview fallbacks. K26 flush now includes save/rename/delete before file operations. Twelve Edge preview checks pass across all three sizes: header bounds, factory menu count/selection, both LCDs, neighbours, prompt selection/Enter/Escape/CANCEL and disabled SoundFont switch/folder display. All 13 page/size bounds checks and 24 mapping tags pass; screenshots inspected at 720p. An App bridge fixture passes SAVE AS uppercase arguments, exists → overwrite false/true retry, rename filename/new-name arguments, delete/refetch and disabled user actions, revert-file error, loaded-SF2 engine switch and USE SYNTH. Route-ordering regressions and live/static/reduced-motion display checks still pass. Inline compliance/quality review checked no UI file writes/native dialogs, escaped names, 24-character input and Rust validation, command argument keys, caller props, source preservation and queued route flush boundaries. ContextMenu long-list scrolling was already completed and verified in Task 16. Fresh checks: cargo fmt --all -- --check PASS; cargo test --workspace PASS (512 passed, 0 failed, 2 debug timing tests ignored); npm test PASS (154 passed); npm run build including npm run check PASS (0 errors, 0 warnings). Actual native patch-file lifecycle, real SoundFont load, LCXL notice/hardware and listening remain unverified; bridge simulation is not native-file verification. No dependencies or additional factory patches. Logs/screenshots/harnesses remain under ignored .verification.
 
 ## Phase D — Finish
 

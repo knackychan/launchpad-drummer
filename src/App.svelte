@@ -5,6 +5,7 @@
   import MixerSlim from './components/MixerSlim.svelte';
   import ChannelPopover from './components/ChannelPopover.svelte';
   import SynthPlate from './components/SynthPlate.svelte';
+  import PatchNamePrompt from './components/PatchNamePrompt.svelte';
   import PadEditor from './components/PadEditor.svelte';
   import Telemetry from './components/Telemetry.svelte';
   import KeysPlate from './components/KeysPlate.svelte';
@@ -26,9 +27,10 @@
   import { pushEsc, runEsc } from './lib/esc.ts';
   import { bindingLabel, boundIds } from './lib/learn.ts';
   import { SOUND_COLORS, SOUND_LABELS } from './lib/keys.ts';
-  import type { KeysMix, Route, SourceId, SynthTelemetry } from './lib/synth-types.ts';
+  import type { KeysMix, Route, SourceId, SynthTelemetry, PatchRef } from './lib/synth-types.ts';
   import { pushSynthFrame } from './lib/synthFeed.ts';
-  import { setParam, throttle, withoutRoute } from './lib/synth.ts';
+  import { setParam, throttle, withoutRoute, categoryColor } from './lib/synth.ts';
+  import { patchMenuItems, factoryItems, userItems, neighbour, type PatchRequest, type PatchActions } from './lib/patchMenu.ts';
   import { LEARN, type LearnCtx } from './lib/learnable.ts';
   import { createLedFrame, ledToCss } from './lib/led.ts';
   import type { PadInput, Rgb } from './lib/led.ts';
@@ -50,7 +52,7 @@
   const staged = isStaged;
   const editCommands = new Set(['update_pad', 'clear_pad', 'move_pad', 'drop_files', 'locate_sample', 'update_group', 'rename_bank', 'update_bank_lights', 'update_bank_humanize', 'unbind', 'seq_update', 'seq_add_lane', 'set_keys', 'synth_param', 'synth_route', 'synth_load_patch', 'synth_revert']);
   async function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-    if ((editCommands.has(cmd) && cmd !== 'synth_param' && cmd !== 'synth_route') || ['undo','redo','new_set','open_set','open_default_set','retry_startup','synth_load_patch','synth_revert'].includes(cmd)) sendRouteSoon.flush();
+    if ((editCommands.has(cmd) && cmd !== 'synth_param' && cmd !== 'synth_route') || ['undo','redo','new_set','open_set','open_default_set','retry_startup','synth_load_patch','synth_revert','synth_save_patch','synth_rename_patch','synth_delete_patch'].includes(cmd)) sendRouteSoon.flush();
     const result = await call<T>(cmd, args);
     if (!disposed && editCommands.has(cmd)) refreshHistory();
     return result;
@@ -162,7 +164,7 @@
   const KEYS_FOLD_KEY = 'lpd.keys.folded', KEYS_OCTAVE_KEY = 'lpd.keys.octave';
   let keysFolded = $state(false);
   let keysOctave = $state(0);
-  let keysStatus = $state<KeysStatus>({ engine: 'builtin', name: 'BUILT-IN', error: null });
+  let keysStatus = $state<KeysStatus>({ engine: 'synth', name: 'SYNTH', error: null });
   let soundfontPath = $state<string | null>(null);
   let keysDown = $state<Set<number>>(new Set());
   let keysLast = $state<{ note: number; velocity: number } | null>(null);
@@ -212,14 +214,17 @@
   // Mixer channel inputs (UI spec 6): which pads and whether the keys play through a channel.
   const channelInputs = $derived(currentSet.mixer.groups.map((_, i) => ({
     pads: currentSet.banks.reduce((n, b) => n + b.pads.filter(p => p.sample && p.mixGroup === i).length, 0),
-    keysColor: currentSet.keys.output === i ? ledToCss(SOUND_COLORS[currentSet.keys.gmSound]) : null,
-    keysLabel: SOUND_LABELS[currentSet.keys.gmSound],
+    keysColor: currentSet.keys.output === i ? ledToCss(keysStatus.engine==='synth'?categoryColor(currentSet.keys.patch.category):SOUND_COLORS[currentSet.keys.gmSound]) : null,
+    keysLabel: keysStatus.engine==='synth'?currentSet.keys.patch.name:SOUND_LABELS[currentSet.keys.gmSound],
   })));
   function channelMenu(i: number, x: number, y: number, rename = false) {
     chanPop = { index: i, x, y, rename };
   }
   async function useSynth() {
-    try { const status = await invoke<KeysStatus>('set_keys_engine', { engine: 'synth' }); if (status) keysStatus = status; }
+    await setKeysEngine('synth');
+  }
+  async function setKeysEngine(engine: 'synth' | 'soundfont') {
+    try { const status = await invoke<KeysStatus>('set_keys_engine', { engine }); if (status) keysStatus = status; }
     catch (e) { showToast(errorText(e)); }
   }
   // Synth edits are optimistic: the set shows the value now, the backend stores it (spec 2.2).
@@ -269,6 +274,55 @@
     const r = routes()[slot];
     updateRoute(slot, { ...r, amount: Math.min(1, Math.max(-1, r.amount + delta)) });
   }
+  let patchLists = $state<{ factory: PatchRef[]; user: PatchRef[] }>({ factory: [], user: [] });
+  let patchFolder = $state('—');
+  let patchPopup = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  let patchAt = $state({ x: 4, y: 40 });
+  let patchPrompt = $state<{ title: 'SAVE AS' | 'RENAME'; initial: string; error: string | null; retryName: string | null } | null>(null);
+  let patchSaving = false;
+  async function refreshPatches() { const lists=await invoke<typeof patchLists>('synth_patches');if(lists)patchLists=lists; }
+  async function loadPatch(source: PatchRequest) {
+    try { const set=await invoke<SetModel>('synth_load_patch',{source});if(set)replaceSet(set); }
+    catch(e){showToast(errorText(e));}
+  }
+  async function showPatchList(kind: 'factory' | 'user') {
+    try {await refreshPatches();patchPopup={...patchAt,items:kind==='factory'?factoryItems(patchLists.factory,currentSet.keys.patchSource,r=>void loadPatch(r)):userItems(patchLists.user,currentSet.keys.patchSource,r=>void loadPatch(r))};}
+    catch(e){showToast(errorText(e));}
+  }
+  function promptPatch(title: 'SAVE AS' | 'RENAME') {patchPrompt={title,initial:currentSet.keys.patch.name,error:null,retryName:null};}
+  async function savePatch() {
+    if(typeof currentSet.keys.patchSource!=='object'||!('user' in currentSet.keys.patchSource)){promptPatch('SAVE AS');return;}
+    try{await invoke('synth_save_patch',{name:currentSet.keys.patch.name,overwrite:true});await refreshPatchSet();confirm(`Saved ${currentSet.keys.patch.name}`);}
+    catch(e){showToast(errorText(e));}
+  }
+  async function refreshPatchSet() {const set=await invoke<SetModel>('get_current_set');if(set)replaceSet(set);await refreshPatches();}
+  async function submitPatchName(name: string) {
+    const prompt=patchPrompt;if(!prompt||patchSaving)return;patchSaving=true;
+    try {
+      if(prompt.title==='RENAME'){
+        const source=currentSet.keys.patchSource;
+        if(typeof source!=='object'||!('user' in source))return;
+        await invoke('synth_rename_patch',{file:source.user,name});
+      } else await invoke('synth_save_patch',{name,overwrite:prompt.retryName===name});
+      if(patchPrompt===prompt)patchPrompt=null;
+      await refreshPatchSet();confirm(`Saved ${name}`);
+    } catch(e){
+      if(patchPrompt===prompt){const error=errorText(e);prompt.error=error==='exists'&&prompt.title==='SAVE AS'?'Exists — SAVE again to replace':error;prompt.retryName=error==='exists'?name:null;}
+    } finally{patchSaving=false;}
+  }
+  async function deletePatch() {
+    const source=currentSet.keys.patchSource;if(typeof source!=='object'||!('user' in source))return;
+    try{await invoke('synth_delete_patch',{file:source.user});await refreshPatchSet();}catch(e){showToast(errorText(e));}
+  }
+  async function revertPatch() {try{const set=await invoke<SetModel>('synth_revert');if(set)replaceSet(set);}catch(e){showToast(errorText(e));}}
+  async function showPatchesFolder() {try{const path=await invoke<string>('patches_folder');if(path){patchFolder=path;await invoke('reveal_path',{path});}}catch(e){showToast(errorText(e));}}
+  const patchActions:PatchActions={load:r=>void loadPatch(r),save:()=>void savePatch(),saveAs:()=>promptPatch('SAVE AS'),rename:()=>promptPatch('RENAME'),remove:()=>void deletePatch(),revert:()=>void revertPatch(),showFolder:()=>void showPatchesFolder(),openFactory:()=>void showPatchList('factory'),openUser:()=>void showPatchList('user')};
+  async function openPatchMenu(e: Event) {
+    const r=(e.currentTarget as HTMLElement).getBoundingClientRect();patchAt={x:r.left,y:r.bottom+2};
+    try{await refreshPatches();patchPopup={...patchAt,items:patchMenuItems(currentSet.keys,patchLists.user.length,patchActions)};}catch(error){showToast(errorText(error));}
+  }
+  function patchSaveButton(e: Event) {const r=(e.currentTarget as HTMLElement).getBoundingClientRect();patchAt={x:r.left,y:r.bottom+2};void savePatch();}
+  async function stepPatch(step: 1 | -1) {try{await refreshPatches();const next=neighbour(patchLists,currentSet.keys.patchSource,step);if(next)await loadPatch(next);}catch(e){showToast(errorText(e));}}
 
   // MIDI learn (plan 1C Task 12): the control being learned, and the one shared menu of learnable controls.
   let learnArmed = $state<{ id: string; kind: 'cc' | 'note' } | null>(null);
@@ -564,6 +618,7 @@
 
   /** The independent device and preference requests: none waits for another, none blocks the set. */
   async function loadDeviceState() {
+    void invoke<string>('patches_folder').then(path=>{if(path)patchFolder=path;}).catch(e=>showToast(errorText(e)));
     const [config, keys, audio, devices] = await Promise.allSettled([
       invoke<AppConfig>('get_config'), invoke<KeysStatus>('keys_status'),
       invoke<AudioStatus>('get_audio_status'), invoke<MidiDevice[]>('midi_devices'),
@@ -715,6 +770,7 @@
       });
       subscribe<{ pitch: number; mod: number }>('keys-wheel', (event) => { keysWheel = event; });
       subscribe<KeysStatus>('keys-status', (event) => { keysStatus = event; });
+      subscribe<{text:string}>('keys-notice', event=>showToast(event.text));
       subscribe<{ values: [string, number][] }>('synth-params', (event) => {
         for (const [id, v] of event.values) setParam(currentSet.keys.patch.params, id, v);
         currentSet.keys.modified = true;
@@ -1061,11 +1117,13 @@
   {@const keys = currentSet.keys}
   {@const here = keys.output === i}
   <ChannelPopover index={i} group={currentSet.mixer.groups[i]} inputs={channelInputs[i]} keysHere={here}
-    keysWhere={keys.output !== null && !here ? `Keys: on ${groupLegend(keys.output, currentSet.mixer.groups[keys.output].name)}` : `Keys: ${SOUND_LABELS[keys.gmSound]}`}
+    keysWhere={keys.output !== null && !here ? `Keys: on ${groupLegend(keys.output, currentSet.mixer.groups[keys.output].name)}` : `Keys: ${channelInputs[i].keysLabel}`}
     x={chanPop.x} y={chanPop.y} rename={chanPop.rename} onupdategroup={updateGroup}
     onkeys={() => updateKeys({ gmSound: keys.gmSound, volumeDb: keys.volumeDb, output: here ? null : i })} onclose={() => { chanPop = null; }} />
 {/if}
 {#if learnMenu}<ContextMenu x={learnMenu.x} y={learnMenu.y} items={learnMenu.items} onclose={() => { learnMenu = null; }} />{/if}
+{#if patchPopup}<ContextMenu x={patchPopup.x} y={patchPopup.y} items={patchPopup.items} onclose={()=>{patchPopup=null;}}/>{/if}
+{#if patchPrompt}<PatchNamePrompt title={patchPrompt.title} initial={patchPrompt.initial} error={patchPrompt.error} x={patchAt.x} y={patchAt.y} onsubmit={name=>void submitPatchName(name)} oncancel={()=>{patchPrompt=null;}}/>{/if}
 {#if padMenu}<ContextMenu x={padMenu.at.x} y={padMenu.at.y} items={padMenuItems} onclose={() => { padMenu = null; }} />{/if}
 
 <div class="instrument" data-crt={crt} data-bend={bend === 'bent' && crt !== 'off' ? 'on' : 'off'} style:--crt={CRT_FACTORS[crt]}>
@@ -1142,12 +1200,12 @@
                     onchannel={channelMenu}
                     onexpand={(x, y) => { mixPop = { x, y }; }}
                   />
-                  <SynthPlate set={currentSet} width={layout.synthW} height={layout.rowH} engine={keysStatus.engine} onusesynth={() => void useSynth()} onparam={synthParam} {selectedRoute} onaddroute={addRoute} onupdateroute={updateRoute} onremoveroute={removeRoute} onroutedepth={routeDepth} onselectroute={(dest, slot) => { selectedRoute[dest] = slot; }} onblankroute={() => addRoute('env2', null)} />
+                  <SynthPlate set={currentSet} width={layout.synthW} height={layout.rowH} engine={keysStatus.engine} onusesynth={() => void useSynth()} onparam={synthParam} {selectedRoute} onaddroute={addRoute} onupdateroute={updateRoute} onremoveroute={removeRoute} onroutedepth={routeDepth} onselectroute={(dest, slot) => { selectedRoute[dest] = slot; }} onblankroute={() => addRoute('env2', null)} onpatchmenu={openPatchMenu} onpatchstep={step=>void stepPatch(step)} onsavepatch={patchSaveButton}/>
                 </div>
                 <KeysPlate
                   short={layout.kh < 68} folded={keysFolded} set={currentSet} octave={keysOctave} deviceName={keysDeviceName} devicePresent={tauri ? keysPresent : true}
                   remoteDown={keysDown} bind:last={keysLast} wheel={keysWheel}
-                  onsettings={updateKeys} onnote={keysNote} onpad={keysPad}
+                  onsettings={updateKeys} onnote={keysNote} onpad={keysPad} engine={keysStatus.engine} onpatchmenu={openPatchMenu}
                   onpitch={(value) => void invoke('keys_pitch', { value })} onmod={(value) => void invoke('keys_mod', { value })}
                   onoctave={setKeysOctave} onfold={setKeysFolded}
                 />
@@ -1240,7 +1298,7 @@
               {@const Panel = optional.setup}
               <Panel audioStatus={audioStatus} dropoutRecent={dropoutIsRecent} onaudiostatus={(status: AudioStatus) => { audioStatus = status; }} onerror={showToast}
                 midiDevices={midiDevices} midiLog={midiLog} onrole={(port: string, role: 'keys' | 'other') => void setMidiRole(port, role)}
-                keysStatus={keysStatus} soundfont={soundfontPath} onloadsoundfont={() => void loadSoundfont()} onclearsoundfont={() => void applySoundfont(null)}
+                keysStatus={keysStatus} soundfont={soundfontPath} onloadsoundfont={() => void loadSoundfont()} onclearsoundfont={() => void applySoundfont(null)} onengine={(engine: 'synth' | 'soundfont')=>void setKeysEngine(engine)} patches={patchFolder} onshowpatches={()=>void showPatchesFolder()}
                 set={currentSet} onunbind={(index: number) => void unbindAt(index)} crt={crt} bend={bend} oncrt={setCrt} onbend={setBend}
                 onopenlog={() => void invoke('open_log_folder').catch(e => showToast(errorText(e)))} />
             {:else if optionalState.setup === 'error'}

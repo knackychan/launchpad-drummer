@@ -153,6 +153,7 @@ export interface AppConfig {
   lastSet: string | null;
   libraryDir: string | null;
   soundfont: string | null;
+  keysEngine: string | null;
   audio: AudioPrefs;
   midiRoles: Record<string, string>;
 }
