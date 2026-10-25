@@ -6249,14 +6249,16 @@ export function arcPath(cx: number, cy: number, r: number, n0: number, n1: numbe
 
 **ParamKey.svelte** (`{ id, params, label?, onparam }`): a `.key.small` toggle. For `bool`: `class:on`, `aria-pressed`, text = `label ?? meta.label`, click → `onparam(id, value ? 0 : 1)`. For a two-choice selector (POL): text = the current label (BI / UNI), click flips. `learnId = "synth.{id}"` for bools only.
 
-- [ ] **Step 1: Write** `synth.test.ts` → **Step 2: Run** `npm test` — expected: FAIL (module missing).
-- [ ] **Step 3: Implement** synth.ts, the five components and the Knob / learnable additions.
-- [ ] **Step 4: Verify:** `npm test`, `npm run check`, `npm run build`; existing knobs (mixer popover, keys) look and behave exactly as before.
-- [ ] **Step 5: Commit** `feat(ui): synth model helpers and parameter controls`.
+- [x] **Step 1: Write** `synth.test.ts` → **Step 2: Run** `npm test` — expected: FAIL (module missing).
+- [x] **Step 3: Implement** synth.ts, the five components and the Knob / learnable additions.
+- [x] **Step 4: Verify:** `npm test`, `npm run check`, `npm run build`; existing knobs (mixer popover, keys) look and behave exactly as before.
+- [x] **Step 5: Commit** `feat(ui): synth model helpers and parameter controls`.
 
 **Do not:** change `Knob`'s look or behaviour when the new props are absent; make integer steppers or selectors learnable.
 
-**Done when:** [ ] tests first → PASS; [ ] full verification + build; [ ] committed.
+**Done when:** [x] tests first → PASS; [x] full verification + build; [x] committed.
+
+**Task 14 verification (2026-10-25):** Eight prescribed helper tests were written first and npm test failed on the missing synth.ts module; all eight now pass with the supplied helper code. Created the five parameter components and optional Knob modulation props, preserving the original knob DOM/style when absent. A temporary real-component browser harness passed keyboard Home/End, reset, unit text, Alt drag without base-value edits, extra/learn/reset menu ordering, selector choice and bool/polarity toggles; steppers and selectors have no learn id. All 21 Task 13 browser interaction checks still pass at the three sizes, with no page exceptions. Fresh checks: cargo fmt --all -- --check PASS; cargo test --workspace PASS (512 passed, 0 failed, 2 debug timing tests ignored); npm test PASS (139 passed); npm run build including npm run check PASS (0 errors, 0 warnings). Inline compliance and quality reviews checked nested field mapping, tapers, metadata ids, accessibility, old knob callers and optional prop defaults. Small plan correction: choice-knob step uses choices.length minus one because choice metadata has no min/max; this preserves one-choice stepping for the synced RATE/TIME knobs. Browser harness initially used the wrong accessible label LFO 1 rather than metadata LFO1; corrected only the harness. No DSP changes, dependencies or hardware checks.
 
 ### Task 15: Synth sections and pages
 
