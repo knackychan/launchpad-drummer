@@ -9,12 +9,14 @@
   let left = $state(0), top = $state(0);
   onMount(() => {
     const previous = document.activeElement as HTMLElement | null;
+    // Nested synth menus must escape the console's fixed-position containing block.
+    document.body.append(menu);
     const rect = menu.getBoundingClientRect();
     left = Math.max(4, Math.min(x, innerWidth - rect.width - 4));
     top = Math.max(4, Math.min(y, innerHeight - rect.height - 4));
     menu.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
     const remove = pushEsc(onclose);
-    return () => { remove(); if (previous?.isConnected) previous.focus(); };
+    return () => { remove(); menu.remove(); if (previous?.isConnected) previous.focus(); };
   });
   function keydown(e: KeyboardEvent) {
     e.stopPropagation();
@@ -44,7 +46,8 @@
 </div>
 
 <style>
-  .menu { position: fixed; z-index: 50; min-width: 190px; max-width: calc(100vw - 8px); padding: 4px; display: flex; flex-direction: column; box-shadow: 0 0 0 1px #000, 0 10px 30px rgba(0,0,0,.7); }
+  .menu { position: fixed; z-index: 50; min-width: 190px; max-width: calc(100vw - 8px); max-height: calc(100vh - 8px); overflow: auto; box-sizing: border-box; padding: 4px; display: flex; flex-direction: column; box-shadow: 0 0 0 1px #000, 0 10px 30px rgba(0,0,0,.7); }
+  .menu > * { flex-shrink: 0; }
   .menu button { background: none; border: 0; text-align: left; padding: 7px 10px; font: 400 12px var(--f-lcd); color: var(--lcd); border-radius: 3px; cursor: pointer; display: flex; gap: 24px; justify-content: space-between; }
   .menu button:hover, .menu button:focus-visible { background: rgba(94,200,255,.14); }
   .menu button:disabled { color: var(--lcd-dim); cursor: default; }

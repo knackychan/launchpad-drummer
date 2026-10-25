@@ -3,19 +3,19 @@
   import { middleTruncate } from '../lib/format.ts';
   import type { KeysStatus } from '../lib/model.ts';
 
-  let { status, soundfont, onload, onclear }: {
+  let { status, soundfont, onload, onclear, onengine, patches, onshowpatches }: {
     status: KeysStatus;
     /** The `.sf2` path in the app config, if any. */
     soundfont: string | null;
     onload: () => void;
     onclear: () => void;
+    onengine: (engine: 'synth' | 'soundfont') => void; patches: string; onshowpatches: () => void;
   } = $props();
-  const engine = $derived(status.engine === 'soundfont' ? `SOUNDFONT · ${status.name}` : 'BUILT-IN SYNTH');
 </script>
 
 <RackUnit title="KEYS">
   <div class="rows">
-    <div class="row"><span class="silk">ENGINE</span><span class="lcd screen val">{engine}</span></div>
+    <div class="row"><span class="silk">ENGINE</span><div class="switch"><button class="key small" class:on={status.engine==='synth'} aria-pressed={status.engine==='synth'} onclick={()=>onengine('synth')}>SYNTH</button><button class="key small" class:on={status.engine==='soundfont'} aria-pressed={status.engine==='soundfont'} aria-disabled={!soundfont} title={!soundfont?'Load a SoundFont first':status.name} onclick={()=>{if(soundfont)onengine('soundfont');}}>SOUNDFONT</button></div></div>
     <div class="row">
       <span class="silk">SOUNDFONT</span>
       <span class="lcd screen val" title={soundfont ?? ''}>{soundfont ? middleTruncate(soundfont, 40) : 'NONE'}</span>
@@ -23,7 +23,8 @@
       <button type="button" class="key" aria-disabled={!soundfont} onclick={() => { if (soundfont) onclear(); }}>CLEAR</button>
     </div>
     {#if status.error}<p class="error" role="alert">{status.error}</p>{/if}
-    <p class="hint">The built-in synth plays the six sounds; a General MIDI SoundFont (.sf2) replaces it.</p>
+    <div class="row"><span class="silk">PATCHES</span><span class="lcd screen val" title={patches}>{middleTruncate(patches,40)}</span><button class="key small" onclick={onshowpatches}>SHOW</button></div>
+    <p class="hint">The synth plays the keys; a General MIDI SoundFont (.sf2) can replace it.</p>
   </div>
 </RackUnit>
 

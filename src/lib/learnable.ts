@@ -11,7 +11,7 @@ export interface LearnCtx {
 
 export const LEARN = Symbol('learn');
 
-export interface LearnableOptions { ctx?: LearnCtx; id?: string; reset?: () => void }
+export interface LearnableOptions { ctx?: LearnCtx; id?: string; reset?: () => void; extra?: () => MenuItem[] }
 
 export const isLearning = (ctx: LearnCtx | undefined, id: string | undefined) => !!ctx && !!id && ctx.armed() === id;
 export const isLearned = (ctx: LearnCtx | undefined, id: string | undefined) => !!ctx && !!id && ctx.isBound(id);
@@ -19,10 +19,15 @@ export const isLearned = (ctx: LearnCtx | undefined, id: string | undefined) => 
 /** Svelte action: opens the learn menu for `id`. Without `ctx` or `id` it does nothing. */
 export function learnable(node: HTMLElement, options: LearnableOptions) {
   let opts = options;
-  const items = (): MenuItem[] => [
+  const items = (): MenuItem[] => {
+    const extra = opts.extra?.() ?? [];
+    return [
+    ...extra,
+    ...(extra.length ? [{ label: '', sep: true }] : []),
     { label: 'Learn MIDI CC', action: () => opts.ctx?.arm(opts.id!) },
     ...(opts.reset ? [{ label: 'Reset', action: opts.reset }] : []),
-  ];
+    ];
+  };
   const open = (x: number, y: number) => opts.ctx?.openMenu(x, y, items());
   const onContext = (e: MouseEvent) => {
     if (!opts.ctx || !opts.id) return;

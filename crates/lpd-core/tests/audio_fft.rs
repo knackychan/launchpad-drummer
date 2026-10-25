@@ -3,6 +3,34 @@ use std::f32::consts::PI;
 
 const SR: u32 = 48_000;
 
+#[test]
+fn log_freqs_span_the_range() {
+    let f = lpd_core::audio::fft::log_freqs(128, 20.0, 20000.0);
+    assert_eq!(f.len(), 128);
+    assert_eq!(f[0], 20.0);
+    assert!((f[127] - 20000.0).abs() < 0.01);
+    assert!(f.windows(2).all(|w| w[0] < w[1]));
+}
+
+#[test]
+fn log_bands_find_a_sine() {
+    use lpd_core::audio::fft::{log_bands, log_freqs};
+    let hz = 100.0 * SR as f32 / FFT_SIZE as f32;
+    let mut fft = Fft::new();
+    let mags = *fft.magnitudes(&sine(hz, 0.0, 1.0));
+    let f = log_freqs(128, 20.0, 20000.0);
+    let bands = log_bands(&mags, SR, &f);
+    let nearest = |hz: f32| {
+        f.iter()
+            .enumerate()
+            .min_by(|a, b| (a.1 - hz).abs().total_cmp(&(b.1 - hz).abs()))
+            .unwrap()
+            .0
+    };
+    assert!(bands[nearest(hz)] > -1.0);
+    assert!(bands[nearest(hz / 4.0)] < -60.0);
+}
+
 fn sine(freq: f32, phase: f32, amp: f32) -> Box<[f32; FFT_SIZE]> {
     let mut buf = Box::new([0.0f32; FFT_SIZE]);
     for (i, s) in buf.iter_mut().enumerate() {

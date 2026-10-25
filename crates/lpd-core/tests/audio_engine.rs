@@ -346,7 +346,6 @@ fn mute_group(engine: &mut Engine, group: u8) {
 #[test]
 fn keys_on_the_master_are_audible_even_with_every_group_muted() {
     let (mut engine, _) = Engine::new(SR);
-    engine.handle(Command::KeysSound(lpd_core::instrument::KeysSound::Organ));
     for g in 0..8 {
         mute_group(&mut engine, g);
     }
@@ -356,7 +355,6 @@ fn keys_on_the_master_are_audible_even_with_every_group_muted() {
 #[test]
 fn keys_routed_to_a_muted_channel_are_silent_but_other_channels_pass_them() {
     let (mut engine, _) = Engine::new(SR);
-    engine.handle(Command::KeysSound(lpd_core::instrument::KeysSound::Organ));
     engine.handle(Command::KeysRoute {
         gain: 1.0,
         group: Some(2),
@@ -374,7 +372,6 @@ fn keys_routed_to_a_muted_channel_are_silent_but_other_channels_pass_them() {
 #[test]
 fn a_solo_on_another_channel_silences_keys_routed_to_a_channel() {
     let (mut engine, _) = Engine::new(SR);
-    engine.handle(Command::KeysSound(lpd_core::instrument::KeysSound::Organ));
     engine.handle(Command::KeysRoute {
         gain: 1.0,
         group: Some(2),
@@ -392,7 +389,6 @@ fn a_solo_on_another_channel_silences_keys_routed_to_a_channel() {
 #[test]
 fn keys_gain_zero_is_silent() {
     let (mut engine, _) = Engine::new(SR);
-    engine.handle(Command::KeysSound(lpd_core::instrument::KeysSound::Organ));
     engine.handle(Command::KeysRoute {
         gain: 0.0,
         group: None,
@@ -403,7 +399,6 @@ fn keys_gain_zero_is_silent() {
 #[test]
 fn keys_obey_the_master_gain() {
     let (mut engine, _) = Engine::new(SR);
-    engine.handle(Command::KeysSound(lpd_core::instrument::KeysSound::Organ));
     engine.handle(Command::SetMasterGain(0.0));
     assert_eq!(peak(&play_keys(&mut engine)), 0.0);
 }
@@ -413,7 +408,6 @@ fn keys_group_ignores_the_group_pitch() {
     // D5: the pitch offset of a channel does not retune the keys routed into it.
     let crossings = |pitch: f32| {
         let (mut engine, _) = Engine::new(SR);
-        engine.handle(Command::KeysSound(lpd_core::instrument::KeysSound::Organ));
         engine.handle(Command::KeysRoute {
             gain: 1.0,
             group: Some(1),
@@ -439,7 +433,6 @@ fn keys_group_ignores_the_group_pitch() {
 #[test]
 fn keys_show_in_the_level_tap_of_their_channel() {
     let (mut engine, _events, mut taps) = Engine::with_taps(SR);
-    engine.handle(Command::KeysSound(lpd_core::instrument::KeysSound::Organ));
     engine.handle(Command::KeysRoute {
         gain: 1.0,
         group: Some(4),
@@ -472,10 +465,74 @@ fn set_instrument_hands_the_old_one_to_the_trash() {
     let (mut engine, _) = Engine::new(SR);
     let mut trash = engine.take_trash().expect("the consumer is available once");
     assert!(engine.take_trash().is_none());
-    engine.handle(Command::KeysSound(lpd_core::instrument::KeysSound::Organ));
     engine.handle(Command::SetInstrument(Box::new(Silent)));
-    assert!(trash.pop().is_ok(), "the replaced BasicKeys came back");
+    assert!(
+        matches!(trash.pop(), Ok(Trash::Instrument(_))),
+        "the replaced Synth came back"
+    );
     assert!(trash.pop().is_err());
     // The new instrument is silent.
     assert_eq!(peak(&play_keys(&mut engine)), 0.0);
+}
+
+#[test]
+fn synth_commands_reach_the_synth_and_its_monitor() {
+    let (mut engine, _events, mut taps) = Engine::with_taps(SR);
+    engine.handle(Command::SynthParam(
+        lpd_core::synth::params::ParamId::FilterCutoff,
+        300.0,
+    ));
+    engine.handle(Command::KeysNoteOn {
+        note: 60,
+        velocity: 100,
+    });
+    for _ in 0..12 {
+        render(&mut engine, 512);
+    }
+    let mut last = None;
+    while let Ok(m) = taps.synth.pop() {
+        last = Some(m);
+    }
+    let m = last.expect("a monitor per block");
+    assert!((m.cutoff_hz / 300.0 - 1.0).abs() < 0.05, "{}", m.cutoff_hz);
+    assert_eq!(m.voices, 1);
+    assert!(m.cpu > 0.0);
+    let mut any = false;
+    while let Ok(s) = taps.keys.pop() {
+        any |= s.abs() > 1e-3;
+    }
+    assert!(any, "the keys scope carries the synth");
+}
+
+#[test]
+fn a_synth_load_returns_its_box() {
+    let (mut engine, _) = Engine::new(SR);
+    let mut trash = engine.take_trash().unwrap();
+    engine.handle(Command::SynthLoad(Box::new(
+        lpd_core::synth::params::SynthParams::default(),
+    )));
+    assert!(matches!(trash.pop(), Ok(Trash::Params(_))));
+}
+
+#[test]
+fn keys_pitch_is_the_normalized_wheel() {
+    use lpd_core::synth::params::SynthParams;
+    let crossings = |wheel: f32| {
+        let (mut engine, _) = Engine::new(SR);
+        let mut p = SynthParams::default();
+        p.osc_a.pos = 0.0; // sine
+        p.filter.on = false;
+        engine.handle(Command::SynthLoad(Box::new(p)));
+        render(&mut engine, 960);
+        engine.handle(Command::KeysPitch(wheel));
+        engine.handle(Command::KeysNoteOn {
+            note: 60,
+            velocity: 100,
+        });
+        render(&mut engine, 4800);
+        let x = left(&render(&mut engine, 48_000));
+        x.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count() as f32
+    };
+    let ratio = crossings(1.0) / crossings(0.0);
+    assert!((ratio - 2f32.powf(2.0 / 12.0)).abs() < 0.01, "{ratio}");
 }

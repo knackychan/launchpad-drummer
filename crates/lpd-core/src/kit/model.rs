@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub const BANKS: usize = 8;
 pub const GROUPS: usize = 8;
-pub const SET_VERSION: u32 = 1;
+pub const SET_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -162,7 +162,26 @@ impl Set {
     }
 
     pub fn from_json(s: &str) -> anyhow::Result<Set> {
-        let set: Set = serde_json::from_str(s)?;
+        let mut value: serde_json::Value = serde_json::from_str(s)?;
+        if value["version"] == 1 {
+            use crate::instrument::{factory_id, KeysSound};
+            use crate::synth::{factory::factory, patch::PatchSource};
+            let keys = &value["keys"];
+            let sound: KeysSound = serde_json::from_value(
+                keys.get("sound")
+                    .cloned()
+                    .unwrap_or(serde_json::json!("ePiano")),
+            )?;
+            let id = factory_id(sound);
+            value["keys"] = serde_json::json!({
+                "patch": factory(id).expect("known GM factory id"),
+                "patchSource": PatchSource::Factory(id.into()), "modified": false, "gmSound": sound,
+                "volumeDb": keys.get("volumeDb").cloned().unwrap_or(serde_json::json!(-6.0)),
+                "output": keys.get("output").cloned().unwrap_or(serde_json::Value::Null)
+            });
+            value["version"] = serde_json::json!(SET_VERSION);
+        }
+        let set: Set = serde_json::from_value(value)?;
         anyhow::ensure!(
             set.version == SET_VERSION,
             "unsupported set version {}",

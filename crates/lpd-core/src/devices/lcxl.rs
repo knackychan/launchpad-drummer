@@ -5,6 +5,44 @@ pub const PORT_NAME: &str = "Launch Control XL";
 /// The template the LEDs are addressed in and the controls are expected to send on.
 pub const USER_TEMPLATE: u8 = 0;
 
+use crate::synth::params::ParamId;
+pub const SYNTH_KNOBS: [[ParamId; 8]; 3] = [
+    [
+        ParamId::OscAPos,
+        ParamId::OscAWarpAmt,
+        ParamId::OscADetune,
+        ParamId::OscALevel,
+        ParamId::OscBPos,
+        ParamId::OscBWarpAmt,
+        ParamId::OscBDetune,
+        ParamId::OscBLevel,
+    ],
+    [
+        ParamId::FilterCutoff,
+        ParamId::FilterReso,
+        ParamId::FilterDrive,
+        ParamId::FilterEnvAmt,
+        ParamId::Lfo1Rate,
+        ParamId::Lfo2Rate,
+        ParamId::FxDelayMix,
+        ParamId::FxReverbMix,
+    ],
+    [
+        ParamId::Env1Attack,
+        ParamId::Env1Decay,
+        ParamId::Env1Sustain,
+        ParamId::Env1Release,
+        ParamId::Env2Attack,
+        ParamId::Env2Decay,
+        ParamId::Env2Sustain,
+        ParamId::Env2Release,
+    ],
+];
+
+pub fn knob_led_index(row: u8, ch: u8) -> u8 {
+    row * 8 + ch
+}
+
 /// True for the Launch Control XL's port, whatever Windows adds around the name.
 pub fn is_lcxl_port(name: &str) -> bool {
     name.trim().contains(PORT_NAME)

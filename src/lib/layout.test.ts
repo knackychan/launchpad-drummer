@@ -1,73 +1,34 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { LP_CHROME_H, mixChrome, solvePlayLayout } from './layout.ts';
-
+import { solvePlayLayout, synthPageSet, synthKnob } from './layout.ts';
 const base = { drawerOpen: true, drawerPinned: true, teleFolded: false, lanes: 5 };
-
-test('1920x1080 with the editor docked matches the spec table', () => {
-  // Bay of a 1920x1080 window: minus the CRT frame, rail, top and status strips.
-  const l = solvePlayLayout({ ...base, width: 1920 - 24 - 80, height: 1080 - 24 - 68 });
-  assert.equal(l.docked, true);
-  assert.ok(l.pad >= 56 && l.pad <= 62, `pad ${l.pad}`);
-  assert.equal(l.tw, 220);
-  assert.ok(l.mix.cw >= 0.85 * l.pad, `columns ${l.mix.cw} keep up with pads ${l.pad}`);
+const solve = (width: number, height: number, extra = {}) => solvePlayLayout({ ...base, width, height, ...extra });
+test('2560x1440 with the drawer floating keeps 94 px pads and gives the synth one page', () => {
+ const l=solve(2455,1296,{drawerPinned:false}); assert.deepEqual([l.pad,l.tw,l.synthW,l.mixMode,l.docked],[94,300,854,'slim',false]);
 });
-
-test('the mixer plate is as tall as the Launchpad plate', () => {
-  for (const [width, height] of [[1176, 628], [1816, 988], [2455, 1296]]) {
-    const l = solvePlayLayout({ ...base, width, height });
-    const lpH = LP_CHROME_H + 7 * 5 + 8 * l.pad;
-    assert.equal(mixChrome(l.mix) + l.mix.fh, Math.max(lpH, mixChrome(l.mix) + 110));
-  }
+test('2560x1440 with the drawer docked', () => {
+ const l=solve(2455,1296); assert.deepEqual([l.docked,l.tw,l.pad,l.synthW],[true,220,77,760]);
 });
-
-test('a small window floats the drawer instead of crushing the mixer', () => {
-  const l = solvePlayLayout({ ...base, width: 900, height: 628 });
-  assert.equal(l.docked, false);
-  assert.equal(l.pad, 36);
+test('1920x1080: a docked drawer floats so the synth keeps its room', () => {
+ const l=solve(1816,988); assert.deepEqual([l.docked,l.pad,l.tw,l.synthW],[false,56,220,599]);
 });
-
-test('pads stay within 36..112 and the folded telemetry is a strip', () => {
-  const big = solvePlayLayout({ ...base, drawerOpen: false, width: 5000, height: 3000 });
-  assert.equal(big.pad, 112);
-  const folded = solvePlayLayout({ ...base, teleFolded: true, width: 1816, height: 988 });
-  assert.equal(folded.tw, 30);
-  assert.equal(folded.mini, true);
+test('1280x720: telemetry and mixer collapse', () => {
+ const l=solve(1176,628); assert.deepEqual([l.tw,l.mini,l.mixMode,l.pad,l.synthW],[30,true,'strip',37,561]);
 });
-
-// UI spec 4 table: at 1280×720 the open layout has 39 px pads, the sequencer folded 51 and both
-// plates folded 55. The solver's open layout is 37 px in the same bay (a 2 px offset that predates
-// this task and is not retuned here); folding gives 48 and 51 against the spec's 51 and 55 — the
-// folded gain is 3–4 px short of the spec's, reported in the plan's Task 14 notes.
-const BAY_720 = { width: 1176, height: 628 };
-
-test('folding the sequencer gives its height back to the pads', () => {
-  const open = solvePlayLayout({ ...base, drawerOpen: false, ...BAY_720 });
-  const folded = solvePlayLayout({ ...base, drawerOpen: false, seqFolded: true, ...BAY_720 });
-  assert.equal(open.pad, 37);
-  assert.equal(folded.pad, 48);
-  assert.equal(folded.sq, 28);
-  assert.ok(folded.pad - open.pad >= 11);
+test('the keybed and sequencer follow the height alone', () => {
+ for(const drawerPinned of [false,true]) {const l=solve(2455,1296,{drawerPinned});assert.deepEqual([l.kh,l.sq,l.rowH],[85,293,874]);}
+ const l=solve(1176,628);assert.deepEqual([l.kh,l.sq],[44,122]);
 });
-
-test('keys and sequencer both folded: pads grow again, both plates are 28 px strips', () => {
-  const seq = solvePlayLayout({ ...base, drawerOpen: false, seqFolded: true, ...BAY_720 });
-  const both = solvePlayLayout({ ...base, drawerOpen: false, seqFolded: true, keysFolded: true, ...BAY_720 });
-  assert.equal(both.pad, 51);
-  assert.ok(both.pad > seq.pad);
-  assert.equal(both.kh, 28);
-  assert.equal(both.sq, 28);
+test('folding the sequencer gives its height to the row', () => {
+ const l=solve(1176,628,{seqFolded:true});assert.deepEqual([l.pH,l.rowH,l.sq,l.pad],[48,506,28,47]);
 });
-
-test('a folded keys plate alone gives the sequencer the room', () => {
-  const open = solvePlayLayout({ ...base, drawerOpen: false, ...BAY_720 });
-  const keys = solvePlayLayout({ ...base, drawerOpen: false, keysFolded: true, ...BAY_720 });
-  assert.equal(keys.kh, 28);
-  assert.ok(keys.pad >= open.pad);
-  assert.ok(keys.sq >= 110);
+test('folding both plates', () => {const l=solve(1176,628,{seqFolded:true,keysFolded:true});assert.deepEqual([l.pH,l.kh,l.sq],[52,28,28]);});
+test('pads never exceed 112 px', () => {for(const folded of [false,true]) assert.equal(solve(5000,3000,{keysFolded:folded,seqFolded:folded}).pad,112);});
+test('above the minimum window the synth never drops under 480 px', () => {
+ for(let width=1176;width<=2600;width+=50) for(const height of [628,988]) for(const drawerPinned of [false,true]) assert.ok(solve(width,height,{drawerPinned}).synthW>=480,`${width}×${height}`);
 });
-
-test('folded plates never push the pads above 112 px', () => {
-  const l = solvePlayLayout({ ...base, drawerOpen: false, seqFolded: true, keysFolded: true, width: 5000, height: 3000 });
-  assert.equal(l.pad, 112);
+test('below the minimum window the synth may be narrower (K17)', () => {assert.equal(solve(900,628).synthW,293);});
+test('page sets and knob sizes', () => {
+ assert.deepEqual([[854,874],[760,874],[599,666],[561,418]].map(([w,h])=>synthPageSet(w,h)),['wide','wide','narrow','compact']);
+ assert.deepEqual([synthKnob(874,'wide'),synthKnob(418,'compact'),synthKnob(300,'wide')],[44,44,24]);
 });

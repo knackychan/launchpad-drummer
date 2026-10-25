@@ -74,16 +74,19 @@ fn start_swaps_queues_taps_and_status_and_resends_the_mixer() {
     while let Ok(c) = queue.pop() {
         match c {
             Command::SetGroup { .. } | Command::SetMasterGain(_) => mixer += 1,
-            // The keys' sound, route and wheels follow the mixer (Task 15).
+            // The keys' sound, route, tempo, patch and wheels follow the mixer.
             Command::KeysSound(_)
             | Command::KeysRoute { .. }
+            | Command::KeysTempo(_)
+            | Command::SynthLoad(_)
             | Command::KeysPitch(_)
+            | Command::KeysSustain(_)
             | Command::KeysMod(_) => keys += 1,
             other => panic!("unexpected {other:?}"),
         }
     }
     assert_eq!(mixer, 9);
-    assert_eq!(keys, 4);
+    assert_eq!(keys, 7);
 }
 
 #[test]

@@ -3,7 +3,7 @@ use lpd_core::kit::*;
 #[test]
 fn new_set_has_8_banks_and_8_groups_with_defaults() {
     let set = Set::new();
-    assert_eq!(set.version, 1);
+    assert_eq!(set.version, 2);
     assert_eq!(set.banks.len(), 8);
     assert_eq!(set.banks[0].name, "Bank 1");
     assert_eq!(set.banks[7].name, "Bank 8");
@@ -59,7 +59,7 @@ fn json_uses_spec_field_names() {
 #[test]
 fn rejects_wrong_version_and_shape() {
     let mut set = Set::new();
-    set.version = 2;
+    set.version = 3;
     assert!(Set::from_json(&set.to_json()).is_err());
     let mut set = Set::new();
     set.banks.pop();

@@ -10,10 +10,12 @@ mod voice;
 
 pub use biquad::LowPass;
 pub use engine::{
-    Command, Engine, Event, GroupParams, AUDITION_PAD, GROUPS, MAX_BLOCK, MAX_VOICES,
+    Command, Engine, Event, GroupParams, Trash, AUDITION_PAD, GROUPS, MAX_BLOCK, MAX_VOICES,
 };
 pub use sample::Sample;
-pub use taps::{Levels, Taps, LEVELS_CAPACITY, SCOPE_CAPACITY};
+pub use taps::{
+    Levels, Taps, KEYS_SCOPE_CAPACITY, LEVELS_CAPACITY, SCOPE_CAPACITY, SYNTH_MONITOR_CAPACITY,
+};
 pub use voice::{PlayParams, Voice};
 
 pub fn db_to_gain(db: f32) -> f32 {

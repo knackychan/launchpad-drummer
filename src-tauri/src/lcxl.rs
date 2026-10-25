@@ -1,4 +1,4 @@
-//! Launch Control XL MIDI bridge: controls drive the mixer, mute/solo light the button LEDs.
+//! Launch Control XL MIDI bridge: mixer faders/buttons and synth knobs, with matching LEDs.
 
 use lpd_core::devices::lcxl::{self, LedColor};
 use midir::{MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
@@ -43,7 +43,7 @@ impl DeviceStatus {
     }
 }
 
-type LedState = ([bool; 8], [bool; 8]);
+type LedState = ([bool; 8], [bool; 8], bool);
 
 struct Connection {
     input_name: String,
@@ -66,12 +66,16 @@ pub fn start(app: AppHandle, state: AppState) {
     std::thread::spawn(move || run(app, state));
 }
 
-/// The LED messages that bring the device from `last` to `(mute, solo)`: row 0 is amber while a
-/// channel is muted, row 1 green while it is soloed. With no `last` all sixteen are sent.
-fn led_updates(last: Option<LedState>, mute: [bool; 8], solo: [bool; 8]) -> Vec<Vec<u8>> {
+/// Button LEDs follow mute/solo; knob rows follow the selected keys engine.
+fn led_updates(
+    last: Option<LedState>,
+    mute: [bool; 8],
+    solo: [bool; 8],
+    synth: bool,
+) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     for ch in 0..8usize {
-        if last.is_none_or(|(m, _)| m[ch] != mute[ch]) {
+        if last.is_none_or(|(m, _, _)| m[ch] != mute[ch]) {
             let c = if mute[ch] {
                 LedColor::Amber
             } else {
@@ -83,7 +87,7 @@ fn led_updates(last: Option<LedState>, mute: [bool; 8], solo: [bool; 8]) -> Vec<
                 lcxl::led_value(c),
             ));
         }
-        if last.is_none_or(|(_, s)| s[ch] != solo[ch]) {
+        if last.is_none_or(|(_, s, _)| s[ch] != solo[ch]) {
             let c = if solo[ch] {
                 LedColor::Green
             } else {
@@ -94,6 +98,22 @@ fn led_updates(last: Option<LedState>, mute: [bool; 8], solo: [bool; 8]) -> Vec<
                 lcxl::led_index(1, ch as u8),
                 lcxl::led_value(c),
             ));
+        }
+    }
+    if last.is_none_or(|(_, _, old)| old != synth) {
+        for row in 0..3 {
+            let color = if !synth {
+                LedColor::Off
+            } else {
+                [LedColor::Amber, LedColor::Red, LedColor::Green][row as usize]
+            };
+            for ch in 0..8 {
+                out.push(lcxl::led_message(
+                    lcxl::USER_TEMPLATE,
+                    lcxl::knob_led_index(row, ch),
+                    lcxl::led_value(color),
+                ));
+            }
         }
     }
     out
@@ -112,6 +132,7 @@ fn run(app: AppHandle, state: AppState) {
     let mut next_check = start;
     let mut last_emit = start;
     let mut last_set_emit = start;
+    let mut last_synth_emit = start;
     let mut last_led = start;
     loop {
         let now = Instant::now();
@@ -137,11 +158,22 @@ fn run(app: AppHandle, state: AppState) {
             }
             last_set_emit = now;
         }
+        if emit_due(last_synth_emit, now) {
+            let values = state.take_synth_changes();
+            if !values.is_empty() {
+                let _ = app.emit("synth-params", serde_json::json!({ "values": values }));
+                last_synth_emit = now;
+            }
+        }
+        if let Some(text) = state.take_keys_notice() {
+            let _ = app.emit("keys-notice", serde_json::json!({ "text": text }));
+        }
         if now.duration_since(last_led) >= LED_INTERVAL {
             last_led = now;
             if let Some(c) = connection.as_mut() {
+                let synth = state.keys_status().engine == "synth";
                 let (mute, solo) = state.mute_solo();
-                let updates = led_updates(c.leds, mute, solo);
+                let updates = led_updates(c.leds, mute, solo, synth);
                 let mut failed = None;
                 for message in &updates {
                     if let Err(error) = c.output.send(message) {
@@ -150,7 +182,7 @@ fn run(app: AppHandle, state: AppState) {
                     }
                 }
                 match failed {
-                    None => c.leds = Some((mute, solo)),
+                    None => c.leds = Some((mute, solo, synth)),
                     Some(error) => {
                         crate::logfile::log(format!("Launch Control XL LED send failed: {error}"));
                         connection = None;
@@ -248,7 +280,7 @@ fn check_connection(
         output_name,
         output: output_connection,
         _input: input_connection,
-        leds: None, // a new device gets all sixteen LEDs on the next LED tick
+        leds: None, // a new device gets all forty LEDs on the next LED tick
     });
     report_status(app, status, DeviceStatus::Connected);
 }
@@ -274,9 +306,24 @@ mod tests {
     const NONE: [bool; 8] = [false; 8];
 
     #[test]
-    fn a_new_device_gets_all_sixteen_leds() {
-        let updates = led_updates(None, NONE, NONE);
-        assert_eq!(updates.len(), 16);
+    fn knob_leds_follow_the_engine() {
+        let first = led_updates(None, NONE, NONE, true);
+        assert_eq!(first[16][8..10], [0, 0x3F]);
+        assert_eq!(first[24][8..10], [8, 0x0F]);
+        assert_eq!(first[32][8..10], [16, 0x3C]);
+        let off = led_updates(Some((NONE, NONE, true)), NONE, NONE, false);
+        assert_eq!(off.len(), 24);
+        assert!(off
+            .iter()
+            .enumerate()
+            .all(|(i, m)| m[8] == i as u8 && m[9] == 0x0C));
+        assert!(led_updates(Some((NONE, NONE, false)), NONE, NONE, false).is_empty());
+    }
+
+    #[test]
+    fn a_new_device_gets_all_forty_leds() {
+        let updates = led_updates(None, NONE, NONE, true);
+        assert_eq!(updates.len(), 40);
         // Row 0 channel 0 is index 24 and off (0x0C); row 1 channel 7 is index 39 and off.
         assert_eq!(updates[0][8..10], [24, 0x0C]);
         assert_eq!(updates[15][8..10], [39, 0x0C]);
@@ -288,7 +335,7 @@ mod tests {
         mute[2] = true;
         let mut solo = NONE;
         solo[5] = true;
-        let updates = led_updates(Some((NONE, NONE)), mute, solo);
+        let updates = led_updates(Some((NONE, NONE, true)), mute, solo, true);
         assert_eq!(updates.len(), 2);
         assert_eq!(updates[0][8..10], [26, 0x3F]); // 24 + 2, amber
         assert_eq!(updates[1][8..10], [37, 0x3C]); // 32 + 5, green
@@ -298,8 +345,8 @@ mod tests {
     fn only_changes_are_sent_and_nothing_when_equal() {
         let mut mute = NONE;
         mute[0] = true;
-        assert!(led_updates(Some((mute, NONE)), mute, NONE).is_empty());
-        let off = led_updates(Some((mute, NONE)), NONE, NONE);
+        assert!(led_updates(Some((mute, NONE, true)), mute, NONE, true).is_empty());
+        let off = led_updates(Some((mute, NONE, true)), NONE, NONE, true);
         assert_eq!(off.len(), 1);
         assert_eq!(off[0][8..10], [24, 0x0C]);
     }

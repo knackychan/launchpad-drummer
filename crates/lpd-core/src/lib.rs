@@ -5,3 +5,4 @@ pub mod devices;
 pub mod instrument;
 pub mod kit;
 pub mod seq;
+pub mod synth;

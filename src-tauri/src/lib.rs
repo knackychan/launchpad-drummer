@@ -6,6 +6,7 @@ mod launchpad;
 pub mod lcxl;
 pub mod lights;
 pub mod logfile;
+pub mod patches;
 pub mod router;
 pub mod saver;
 pub mod sequencer;
@@ -35,6 +36,9 @@ fn housekeeping(app: AppHandle, state: AppState) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    std::thread::spawn(|| {
+        lpd_core::synth::wavetable::registry();
+    });
     logfile::mark_process_start();
     // Placeholder queues: the audio owner thread installs the real ones once the stream is up.
     let (commands, _) = rtrb::RingBuffer::new(1024);
@@ -184,6 +188,17 @@ pub fn run() {
             commands::keys_pitch,
             commands::keys_mod,
             commands::set_keys,
+            commands::synth_param,
+            commands::synth_route,
+            commands::synth_patches,
+            commands::synth_load_patch,
+            commands::synth_save_patch,
+            commands::synth_rename_patch,
+            commands::synth_delete_patch,
+            commands::synth_revert,
+            commands::synth_table,
+            commands::set_keys_engine,
+            commands::patches_folder,
             commands::trigger_pad_in,
             commands::release_pad_in
         ])

@@ -47,14 +47,23 @@ fn the_status_serializes_in_camel_case_with_a_camel_case_phase() {
     .collect();
     assert_eq!(
         phases,
-        ["settings", "readingSet", "preparingSamples", "installing", "needsSet"]
+        [
+            "settings",
+            "readingSet",
+            "preparingSamples",
+            "installing",
+            "needsSet"
+        ]
     );
 }
 
 #[test]
 fn the_initial_status_is_request_zero_revision_zero_settings() {
     let s = LoadStatus::initial();
-    assert_eq!((s.request_id, s.revision, s.phase), (0, 0, LoadPhase::Settings));
+    assert_eq!(
+        (s.request_id, s.revision, s.phase),
+        (0, 0, LoadPhase::Settings)
+    );
     assert_eq!(s.total, None);
 }
 
@@ -63,9 +72,15 @@ fn revisions_only_rise_and_a_new_request_keeps_counting() {
     let mut t = LoadTracker::default();
     let now = Instant::now();
     let a = t.begin(1, LoadPhase::Settings);
-    let b = t.update(1, LoadStep::phase(LoadPhase::ReadingSet), now).unwrap().unwrap();
+    let b = t
+        .update(1, LoadStep::phase(LoadPhase::ReadingSet), now)
+        .unwrap()
+        .unwrap();
     let c = t.begin(2, LoadPhase::ReadingSet);
-    assert!(a.revision < b.revision && b.revision < c.revision, "{a:?} {b:?} {c:?}");
+    assert!(
+        a.revision < b.revision && b.revision < c.revision,
+        "{a:?} {b:?} {c:?}"
+    );
     assert_eq!(c.completed, 0);
 }
 
@@ -96,14 +111,34 @@ fn progress_within_a_phase_is_throttled_but_always_stored() {
     // A phase change is sent at once.
     assert!(t.update(1, counted(0), t0).unwrap().is_some());
     // Inside the interval: stored, not sent.
-    assert!(t.update(1, counted(1), t0 + Duration::from_millis(10)).unwrap().is_none());
+    assert!(t
+        .update(1, counted(1), t0 + Duration::from_millis(10))
+        .unwrap()
+        .is_none());
     assert_eq!(t.status().completed, 1);
     // Past the interval: sent, with the latest numbers.
-    let sent = t.update(1, counted(5), t0 + PROGRESS_INTERVAL).unwrap().unwrap();
+    let sent = t
+        .update(1, counted(5), t0 + PROGRESS_INTERVAL)
+        .unwrap()
+        .unwrap();
     assert_eq!(sent.completed, 5);
     // The last file and the terminal phase bypass the throttle.
-    assert!(t.update(1, counted(100), t0 + PROGRESS_INTERVAL + Duration::from_millis(1)).unwrap().is_some());
-    assert!(t.update(1, LoadStep::ready(0), t0 + PROGRESS_INTERVAL + Duration::from_millis(2)).unwrap().is_some());
+    assert!(t
+        .update(
+            1,
+            counted(100),
+            t0 + PROGRESS_INTERVAL + Duration::from_millis(1)
+        )
+        .unwrap()
+        .is_some());
+    assert!(t
+        .update(
+            1,
+            LoadStep::ready(0),
+            t0 + PROGRESS_INTERVAL + Duration::from_millis(2)
+        )
+        .unwrap()
+        .is_some());
 }
 
 // ---- helpers --------------------------------------------------------------------------------
@@ -174,7 +209,10 @@ fn restoring_a_saved_set_goes_settings_reading_loading_installing_ready() {
         ]
     );
     let done = r.state.get_load_status();
-    assert_eq!((done.request_id, done.phase, done.failed), (ticket, LoadPhase::Ready, 1));
+    assert_eq!(
+        (done.request_id, done.phase, done.failed),
+        (ticket, LoadPhase::Ready, 1)
+    );
     // The last count seen while loading is the full count, failures included.
     let last_count = seen
         .lock()
@@ -184,7 +222,10 @@ fn restoring_a_saved_set_goes_settings_reading_loading_installing_ready() {
         .next_back()
         .cloned()
         .unwrap();
-    assert_eq!((last_count.completed, last_count.total, last_count.failed), (3, Some(3), 1));
+    assert_eq!(
+        (last_count.completed, last_count.total, last_count.failed),
+        (3, Some(3), 1)
+    );
 }
 
 #[test]
@@ -193,9 +234,15 @@ fn no_saved_set_needs_a_set_and_missing_or_unreadable_ones_too() {
     // First run: no last set in the config.
     let r = rig(1024);
     let seen = record(&r.state);
-    assert_eq!(r.state.restore(tmp.path().join("none").join("config.json")), Startup::FirstRun);
+    assert_eq!(
+        r.state.restore(tmp.path().join("none").join("config.json")),
+        Startup::FirstRun
+    );
     assert_eq!(phases(&seen), [LoadPhase::Settings, LoadPhase::NeedsSet]);
-    assert!(r.state.save_set().is_err(), "saving stays off without a set");
+    assert!(
+        r.state.save_set().is_err(),
+        "saving stays off without a set"
+    );
 
     // Missing folder.
     let gone = tmp.path().join("gone");
@@ -216,7 +263,11 @@ fn no_saved_set_needs_a_set_and_missing_or_unreadable_ones_too() {
     assert!(matches!(outcome, Startup::Unreadable { .. }));
     assert_eq!(
         phases(&seen),
-        [LoadPhase::Settings, LoadPhase::ReadingSet, LoadPhase::NeedsSet]
+        [
+            LoadPhase::Settings,
+            LoadPhase::ReadingSet,
+            LoadPhase::NeedsSet
+        ]
     );
 }
 
@@ -231,22 +282,39 @@ fn opening_creating_and_choosing_default_report_their_own_phases() {
     r.state.open_set(&one.to_string_lossy()).unwrap();
     assert_eq!(
         phases(&seen),
-        [LoadPhase::ReadingSet, LoadPhase::LoadingSamples, LoadPhase::Installing, LoadPhase::Ready]
+        [
+            LoadPhase::ReadingSet,
+            LoadPhase::LoadingSamples,
+            LoadPhase::Installing,
+            LoadPhase::Ready
+        ]
     );
 
     // An empty set has no sample work to show.
     seen.lock().unwrap().clear();
-    r.state.new_set(&tmp.path().join("empty").to_string_lossy()).unwrap();
+    r.state
+        .new_set(&tmp.path().join("empty").to_string_lossy())
+        .unwrap();
     assert_eq!(
         phases(&seen),
-        [LoadPhase::ReadingSet, LoadPhase::Installing, LoadPhase::Ready]
+        [
+            LoadPhase::ReadingSet,
+            LoadPhase::Installing,
+            LoadPhase::Ready
+        ]
     );
-    assert!(seen.lock().unwrap().iter().all(|s| s.total.is_none()), "no 0-of-0 count");
+    assert!(
+        seen.lock().unwrap().iter().all(|s| s.total.is_none()),
+        "no 0-of-0 count"
+    );
 
     // Default on first run: preparation first, then the ordinary loading.
     seen.lock().unwrap().clear();
     let default_dir = tmp.path().join("Default");
-    assert!(!default_dir.exists(), "nothing is created before the explicit choice");
+    assert!(
+        !default_dir.exists(),
+        "nothing is created before the explicit choice"
+    );
     r.state.open_default_set(&default_dir).unwrap();
     assert_eq!(
         phases(&seen),
@@ -287,7 +355,10 @@ fn a_fatal_error_fails_the_request_with_a_reason_and_keeps_the_current_set() {
     r.state.open_set(&one.to_string_lossy()).unwrap();
     let seen = record(&r.state);
 
-    let error = r.state.open_set(&tmp.path().join("nope").to_string_lossy()).unwrap_err();
+    let error = r
+        .state
+        .open_set(&tmp.path().join("nope").to_string_lossy())
+        .unwrap_err();
     let status = r.state.get_load_status();
     assert_eq!(status.phase, LoadPhase::Failed);
     assert_eq!(status.error.as_deref(), Some(error.as_str()));
@@ -331,7 +402,9 @@ fn paused_restore(state: &AppState, ticket: u64, fail: bool) -> PausedRestore {
             KitManager::load_from_dir_with_progress(dir, progress)
         })
     });
-    started_rx.recv_timeout(Duration::from_secs(10)).expect("restore paused");
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("restore paused");
     PausedRestore { resume, handle }
 }
 
@@ -355,7 +428,10 @@ fn a_restore_that_finishes_after_a_newer_open_changes_nothing() {
     r.state.open_set(&b.to_string_lossy()).unwrap();
     let outcome = finish(paused);
 
-    assert!(matches!(outcome, Startup::Loaded { ref name, .. } if name == "B"), "{outcome:?}");
+    assert!(
+        matches!(outcome, Startup::Loaded { ref name, .. } if name == "B"),
+        "{outcome:?}"
+    );
     assert_eq!(r.state.get_current_set().banks[0].name, "B");
     assert!(matches!(r.state.get_startup(), Startup::Loaded { ref name, .. } if name == "B"));
     assert_eq!(
@@ -382,11 +458,17 @@ fn a_restore_that_fails_after_a_newer_open_cannot_fail_the_ui() {
     let seen = record(&r.state);
     let outcome = finish(paused);
 
-    assert!(matches!(outcome, Startup::Loaded { ref name, .. } if name == "B"), "{outcome:?}");
+    assert!(
+        matches!(outcome, Startup::Loaded { ref name, .. } if name == "B"),
+        "{outcome:?}"
+    );
     assert!(matches!(r.state.get_startup(), Startup::Loaded { ref name, .. } if name == "B"));
     let status = r.state.get_load_status();
     assert_eq!((status.phase, status.error), (LoadPhase::Ready, None));
-    assert!(seen.lock().unwrap().is_empty(), "the stale failure published nothing");
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "the stale failure published nothing"
+    );
 }
 
 #[test]
@@ -401,7 +483,10 @@ fn a_failing_restore_with_no_newer_request_ends_needing_a_set() {
     assert!(matches!(outcome, Startup::Unreadable { .. }));
     assert_eq!(r.state.get_startup(), outcome);
     assert_eq!(r.state.get_load_status().phase, LoadPhase::NeedsSet);
-    assert!(r.state.save_set().is_err(), "saving stays off without a set");
+    assert!(
+        r.state.save_set().is_err(),
+        "saving stays off without a set"
+    );
 }
 
 #[test]
@@ -414,7 +499,11 @@ fn progress_callbacks_and_the_notifier_can_read_state_without_deadlock() {
     let inner = r.state.clone();
     r.state.set_load_notifier(Arc::new(move |s| {
         // Everything a UI handler might ask for while a notification is delivered.
-        let _ = (inner.get_load_status(), inner.get_config(), inner.get_current_set());
+        let _ = (
+            inner.get_load_status(),
+            inner.get_config(),
+            inner.get_current_set(),
+        );
         let _ = (inner.get_startup(), s.revision);
     }));
     let state = r.state.clone();
@@ -423,7 +512,11 @@ fn progress_callbacks_and_the_notifier_can_read_state_without_deadlock() {
     let outcome = within(20, move || {
         state.run_restore_with(ticket, move |dir, progress| {
             let read = |done, total, failed| {
-                let _ = (probe.get_config(), probe.get_current_set(), probe.missing_samples());
+                let _ = (
+                    probe.get_config(),
+                    probe.get_current_set(),
+                    probe.missing_samples(),
+                );
                 progress(done, total, failed);
             };
             KitManager::load_from_dir_with_progress(dir, read)
@@ -468,9 +561,16 @@ fn a_backup_restore_still_schedules_the_recovery_save() {
     std::fs::write(dir.join(kit::SET_FILE), "{ broken").unwrap();
     let r = rig(1024);
     let outcome = r.state.restore(config_with_last_set(tmp.path(), &dir));
-    assert!(matches!(outcome, Startup::Loaded { from_backup: true, .. }));
+    assert!(matches!(
+        outcome,
+        Startup::Loaded {
+            from_backup: true,
+            ..
+        }
+    ));
     // Autosave writes set.json back once its debounce is over.
-    r.state.autosave_tick(Instant::now() + Duration::from_secs(60));
+    r.state
+        .autosave_tick(Instant::now() + Duration::from_secs(60));
     assert!(dir.join(kit::SET_FILE).exists());
     assert!(kit::load(&dir).is_ok());
 }
@@ -488,9 +588,16 @@ fn retry_is_refused_while_loading_and_reopens_the_configured_set_afterwards() {
     // Still in the restore: a second one is refused with a clear message.
     let busy = r.state.retry_startup().unwrap_err();
     assert!(busy.contains("Already loading"), "{busy}");
-    assert_eq!(r.state.get_load_status().request_id, ticket, "the refused retry changed nothing");
+    assert_eq!(
+        r.state.get_load_status().request_id,
+        ticket,
+        "the refused retry changed nothing"
+    );
 
-    assert!(matches!(r.state.run_restore(ticket), Startup::NotFound { .. }));
+    assert!(matches!(
+        r.state.run_restore(ticket),
+        Startup::NotFound { .. }
+    ));
     assert_eq!(r.state.get_load_status().phase, LoadPhase::NeedsSet);
 
     // The folder appears; retrying uses the config already loaded.
@@ -516,17 +623,29 @@ fn the_waveform_envelope_is_cached_by_sample_identity_and_bucket_count() {
     let first = r.state.sample_peaks("a.wav", 64).unwrap();
     let again = r.state.sample_peaks("a.wav", 64).unwrap();
     assert_eq!(first.peaks, again.peaks);
-    assert_eq!(r.state.peak_scans(), 1, "the second request came from the cache");
+    assert_eq!(
+        r.state.peak_scans(),
+        1,
+        "the second request came from the cache"
+    );
 
     r.state.sample_peaks("a.wav", 128).unwrap();
-    assert_eq!(r.state.peak_scans(), 2, "another bucket count is another envelope");
+    assert_eq!(
+        r.state.peak_scans(),
+        2,
+        "another bucket count is another envelope"
+    );
 
     // The same path with different audio is a different loaded sample: it must be scanned again.
     common::write_wav(&dir.join("a.wav"), 4800);
     r.state.open_set(&dir.to_string_lossy()).unwrap();
     let replaced = r.state.sample_peaks("a.wav", 128).unwrap();
     assert_eq!(r.state.peak_scans(), 3);
-    assert!(replaced.length_ms > 90.0, "the new, longer recording: {}", replaced.length_ms);
+    assert!(
+        replaced.length_ms > 90.0,
+        "the new, longer recording: {}",
+        replaced.length_ms
+    );
 
     assert!(r.state.sample_peaks("missing.wav", 64).is_none());
 }
@@ -545,7 +664,10 @@ fn the_cache_does_not_keep_a_dropped_sample_alive() {
     r.state.open_set(&two.to_string_lossy()).unwrap(); // the old samples are retired…
     let freed = r.state.router.lock().unwrap().drain_reclaimable(); // …and reclaimed
     drop(freed);
-    assert!(!r.state.peaks_cache_holds_audio(), "only a Weak reference remains");
+    assert!(
+        !r.state.peaks_cache_holds_audio(),
+        "only a Weak reference remains"
+    );
 }
 
 #[test]

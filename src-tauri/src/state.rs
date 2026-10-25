@@ -13,6 +13,7 @@ use crate::config::{self, AppConfig, AudioPrefs};
 use crate::devices::{self, MidiDevice, MidiMsg};
 use crate::lights::LightPainter;
 use crate::logfile;
+use crate::patches::{self, PatchList, PatchRef};
 use crate::router::{LearnTarget, Router, UiEvent};
 use crate::saver::{SaveState, SaveStatus, Saver};
 use crate::sequencer::{Fired, Params, SeqState};
@@ -21,15 +22,44 @@ use crate::store::{prepare_sample, KitManager, LoadedKit};
 use lpd_core::audio::{Command, Event, Sample, Taps};
 use lpd_core::devices::launchpad::LpEvent;
 use lpd_core::devices::lcxl::LcxlEvent;
-use lpd_core::instrument::{BasicKeys, Instrument, KeysSettings, SoundFontKeys};
+use lpd_core::instrument::{KeysMix, SoundFontKeys};
 use lpd_core::kit::learn;
 use lpd_core::kit::{self, History, Pad, Set};
+use lpd_core::synth::{
+    factory::factory,
+    params::{ParamId, Route, ROUTES},
+    patch::{clean_name, Patch, PatchSource},
+};
 use rtrb::{Consumer, Producer};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Instant;
+
+#[derive(serde::Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum PatchRequest {
+    Factory(String),
+    User(String),
+    Init(bool),
+}
+
+fn requested_patch(request: PatchRequest, dir: &Path) -> Result<(Patch, PatchSource), String> {
+    match request {
+        PatchRequest::Factory(id) => {
+            let p = factory(&id).ok_or_else(|| format!("Unknown factory patch: {id}"))?;
+            Ok((p, PatchSource::Factory(id)))
+        }
+        PatchRequest::User(file) => Ok((patches::read(dir, &file)?, PatchSource::User(file))),
+        PatchRequest::Init(true) => Ok((Patch::init(), PatchSource::Init)),
+        PatchRequest::Init(false) => Err(<serde_json::Error as serde::de::Error>::invalid_value(
+            serde::de::Unexpected::Bool(false),
+            &"true",
+        )
+        .to_string()),
+    }
+}
 
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,10 +125,10 @@ pub struct KeysStatus {
 }
 
 impl KeysStatus {
-    pub fn builtin() -> Self {
+    pub fn synth() -> Self {
         KeysStatus {
-            engine: "builtin".into(),
-            name: "BUILT-IN".into(),
+            engine: "synth".into(),
+            name: "SYNTH".into(),
             error: None,
         }
     }
@@ -208,6 +238,8 @@ pub struct AppState {
     /// Which engine plays the keys, and the hook that tells the UI when a background reload changes it.
     keys_status: Arc<Mutex<KeysStatus>>,
     keys_notifier: Arc<Mutex<Option<KeysNotifier>>>,
+    synth_changes: Arc<Mutex<Vec<(String, f32)>>>,
+    keys_notice: Arc<Mutex<KeysNotice>>,
     /// The sequencer clock state (shared with the router's record hook and the clock thread).
     seq: Arc<Mutex<SeqState>>,
     saver: Arc<Mutex<Saver>>,
@@ -222,6 +254,12 @@ pub struct AppState {
     /// Last waveform envelope (a leaf lock) and how many full scans were made (tests).
     peaks_cache: Arc<Mutex<Option<PeaksEntry>>>,
     peak_scans: Arc<AtomicU64>,
+}
+
+#[derive(Default)]
+struct KeysNotice {
+    shown: bool,
+    text: Option<String>,
 }
 
 impl AppState {
@@ -260,8 +298,10 @@ impl AppState {
             wheel: Arc::default(),
             mixer_dirty: Arc::new(AtomicBool::new(false)),
             set_dirty: Arc::new(AtomicBool::new(false)),
-            keys_status: Arc::new(Mutex::new(KeysStatus::builtin())),
+            keys_status: Arc::new(Mutex::new(KeysStatus::synth())),
             keys_notifier: Arc::default(),
+            synth_changes: Arc::default(),
+            keys_notice: Arc::default(),
             seq,
             saver: Arc::new(Mutex::new(Saver::new())),
             save_gate: Arc::new(Mutex::new(())),
@@ -458,10 +498,18 @@ impl AppState {
     ) -> Result<Set, String> {
         let mut pattern = pattern;
         lpd_core::seq::validate(&mut pattern)?;
-        Ok(self.edit(key, |set| {
+        let mut r = lock(&self.router);
+        let changed = r.set().pattern.bpm != pattern.bpm;
+        let set = self.edit_in(&mut r, key, Instant::now(), |set| {
             set.pattern = pattern;
             set.clone()
-        }))
+        });
+        if changed {
+            r.send_tempo();
+        }
+        drop(r);
+        self.touch();
+        Ok(set)
     }
 
     pub fn seq_add_lane(&self, bank: usize, x: u8, y: u8) -> Result<Set, String> {
@@ -551,10 +599,19 @@ impl AppState {
                 learn::apply_set_param(set, &id, value)
             });
             if changed {
-                self.set_dirty.store(true, Ordering::SeqCst);
                 touched = true;
+                if let Some(id) = learn::synth_param(&id) {
+                    let value = id.get(&r.set().keys.patch.params);
+                    r.send_synth_param(id, value);
+                    self.record_synth_change(id, value);
+                } else {
+                    self.set_dirty.store(true, Ordering::SeqCst);
+                }
                 if id.starts_with("keys.") {
                     r.send_keys();
+                }
+                if id == "seq.bpm" {
+                    r.send_tempo();
                 }
             }
         }
@@ -647,16 +704,61 @@ impl AppState {
     /// dirty for autosave and the screen is told (throttled, see `take_mixer_change`). Returns
     /// the `learn-ignored` event when learning is armed (the LCXL is fixed in Part 1).
     pub fn on_lcxl(&self, ev: LcxlEvent) -> Option<UiEvent> {
+        let synth_engine = self.keys_status().engine == "synth";
+        if matches!(ev, LcxlEvent::Knob { .. }) && !synth_engine {
+            let mut notice = lock(&self.keys_notice);
+            if !notice.shown {
+                notice.shown = true;
+                notice.text = Some("LCXL knobs drive the synth — SoundFont active".into());
+            }
+        }
         let (changed, ignored) = {
             let mut r = lock(&self.router);
-            let changed = r.on_lcxl(ev);
+            let outcome = r.on_lcxl(ev, synth_engine);
+            if let Some((id, value)) = outcome.synth {
+                self.edit_in(
+                    &mut r,
+                    Some(&format!("synth.{}", id.meta().id)),
+                    Instant::now(),
+                    |set| {
+                        let before = id.get(&set.keys.patch.params);
+                        id.set(&mut set.keys.patch.params, value);
+                        if before != id.get(&set.keys.patch.params) {
+                            set.keys.modified = true;
+                        }
+                    },
+                );
+                let value = id.get(&r.set().keys.patch.params);
+                r.send_synth_param(id, value);
+                self.record_synth_change(id, value);
+            }
+            let changed = outcome.mixer || outcome.synth.is_some();
+            if outcome.mixer {
+                self.mixer_dirty.store(true, Ordering::SeqCst);
+            }
             (changed, r.learn_ignore("LCXL controls are fixed in Part 1"))
         };
         if changed {
-            self.mixer_dirty.store(true, Ordering::SeqCst);
             self.touch();
         }
         ignored
+    }
+
+    fn record_synth_change(&self, id: ParamId, value: f32) {
+        let mut changes = lock(&self.synth_changes);
+        if let Some((_, v)) = changes.iter_mut().find(|(name, _)| name == id.meta().id) {
+            *v = value;
+        } else {
+            changes.push((id.meta().id.into(), value));
+        }
+    }
+
+    pub fn take_synth_changes(&self) -> Vec<(String, f32)> {
+        std::mem::take(&mut *lock(&self.synth_changes))
+    }
+
+    pub fn take_keys_notice(&self) -> Option<String> {
+        lock(&self.keys_notice).text.take()
     }
 
     /// True once per hardware mixer change; the LCXL bridge emits `mixer-changed` for it.
@@ -800,10 +902,12 @@ impl AppState {
     /// The new engine starts with the built-in synth; a configured SoundFont is loaded again for
     /// its sample rate, in the background.
     fn reload_soundfont(&self) {
-        let Some(path) = self.get_config().soundfont else {
-            *lock(&self.keys_status) = KeysStatus::builtin();
+        let config = self.get_config();
+        if config.engine() != "soundfont" {
+            self.set_keys_status(KeysStatus::synth());
             return;
-        };
+        }
+        let Some(path) = config.soundfont else { return };
         let state = self.clone();
         std::thread::spawn(move || {
             let status = state.load_keys_instrument(Some(&path));
@@ -814,7 +918,7 @@ impl AppState {
     }
 
     /// The router takes the instrument-trash queue of the new engine.
-    pub fn install_trash(&self, trash: Option<Consumer<Box<dyn Instrument>>>) {
+    pub fn install_trash(&self, trash: Option<Consumer<lpd_core::audio::Trash>>) {
         lock(&self.router).set_trash(trash);
     }
 
@@ -826,6 +930,14 @@ impl AppState {
         lock(&self.keys_status).clone()
     }
 
+    fn set_keys_status(&self, status: KeysStatus) {
+        let mut previous = lock(&self.keys_status);
+        if previous.engine != status.engine {
+            *lock(&self.keys_notice) = KeysNotice::default();
+        }
+        *previous = status;
+    }
+
     /// Build the keys instrument (the built-in synth, or the SoundFont at `path`) for the current
     /// output rate and hand it to the engine. A load error keeps the current instrument. Slow:
     /// call it off the UI thread. Without a running stream nothing is loaded (the engine does
@@ -835,11 +947,11 @@ impl AppState {
         let status = match path {
             None => {
                 if rate > 0 {
-                    lock(&self.router).set_instrument(Box::new(BasicKeys::new(rate)));
+                    lock(&self.router).set_instrument(Box::new(lpd_core::synth::Synth::new(rate)));
                 }
-                KeysStatus::builtin()
+                KeysStatus::synth()
             }
-            Some(_) if rate == 0 => KeysStatus::builtin(),
+            Some(_) if rate == 0 => KeysStatus::synth(),
             Some(p) => match SoundFontKeys::load(Path::new(p), rate) {
                 Ok(keys) => {
                     lock(&self.router).set_instrument(Box::new(keys));
@@ -865,7 +977,7 @@ impl AppState {
                 }
             },
         };
-        *lock(&self.keys_status) = status.clone();
+        self.set_keys_status(status.clone());
         status
     }
 
@@ -1124,7 +1236,10 @@ impl AppState {
         let buckets = buckets.clamp(16, 2048);
         let sample = lock(&self.kit_manager).samples.get(path)?.clone();
         if let Some(entry) = lock(&self.peaks_cache).as_ref() {
-            let same = entry.sample.upgrade().is_some_and(|s| Arc::ptr_eq(&s, &sample));
+            let same = entry
+                .sample
+                .upgrade()
+                .is_some_and(|s| Arc::ptr_eq(&s, &sample));
             if same && entry.path == path && entry.buckets == buckets {
                 return Some(entry.peaks.clone());
             }
@@ -1344,9 +1459,8 @@ impl AppState {
         let progress = |done, total, failed| {
             self.report_samples(ticket, LoadPhase::LoadingSamples, done, total, failed)
         };
-        let (decision, kit) = startup::decide_startup(last.as_deref().map(Path::new), |dir| {
-            load(dir, &progress)
-        });
+        let (decision, kit) =
+            startup::decide_startup(last.as_deref().map(Path::new), |dir| load(dir, &progress));
         let outcome = match (decision, kit) {
             (Startup::Loaded { path, name, .. }, Some(kit)) => {
                 match self.finish_open(ticket, kit) {
@@ -1554,8 +1668,176 @@ impl AppState {
     /// Remembers the `.sf2` file and loads it (slow: run it off the UI thread). `None` goes back
     /// to the built-in synth.
     pub fn set_soundfont(&self, path: Option<String>) -> Result<KeysStatus, String> {
-        self.update_config(|c| c.soundfont = path.clone())?;
+        self.update_config(|c| {
+            c.soundfont = path.clone();
+            c.keys_engine = Some(if path.is_some() { "soundfont" } else { "synth" }.into());
+        })?;
         Ok(self.load_keys_instrument(path.as_deref()))
+    }
+
+    pub fn set_keys_engine(&self, engine: &str) -> Result<KeysStatus, String> {
+        if !matches!(engine, "synth" | "soundfont") {
+            return Err(<serde_json::Error as serde::de::Error>::unknown_variant(
+                engine,
+                &["synth", "soundfont"],
+            )
+            .to_string());
+        }
+        let config = self.get_config();
+        if engine == "soundfont" && config.soundfont.is_none() {
+            return Err("Load a SoundFont first".into());
+        }
+        self.update_config(|c| c.keys_engine = Some(engine.into()))?;
+        Ok(self.load_keys_instrument(if engine == "soundfont" {
+            config.soundfont.as_deref()
+        } else {
+            None
+        }))
+    }
+
+    pub fn synth_param(&self, name: &str, value: f32) -> Result<(), String> {
+        let id = ParamId::from_id(name).ok_or_else(|| format!("Unknown synth control: {name}"))?;
+        let mut r = lock(&self.router);
+        self.edit_in(
+            &mut r,
+            Some(&format!("synth.{name}")),
+            Instant::now(),
+            |set| {
+                let before = id.get(&set.keys.patch.params);
+                id.set(&mut set.keys.patch.params, value);
+                if before != id.get(&set.keys.patch.params) {
+                    set.keys.modified = true;
+                }
+            },
+        );
+        let stored = id.get(&r.set().keys.patch.params);
+        r.send_synth_param(id, stored);
+        drop(r);
+        self.touch();
+        Ok(())
+    }
+
+    pub fn synth_route(&self, slot: usize, route: Option<Route>) -> Result<(), String> {
+        let mut r = lock(&self.router);
+        let len = r.set().keys.patch.params.routes.len();
+        if slot >= ROUTES {
+            return Err("Matrix full (16 routes)".into());
+        }
+        if slot > len || (route.is_none() && slot == len) {
+            return Err(format!("No route in slot {}", slot + 1));
+        }
+        let key = (slot < len && route.is_some()).then(|| format!("synth.route.{slot}"));
+        self.edit_in(&mut r, key.as_deref(), Instant::now(), |set| {
+            set.keys.patch.params.routes.set(slot, route);
+            set.keys.modified = true;
+        });
+        let stored = if route.is_some() {
+            r.set().keys.patch.params.routes.get(slot).copied()
+        } else {
+            None
+        };
+        r.send_route(slot, stored);
+        drop(r);
+        self.touch();
+        Ok(())
+    }
+
+    pub fn synth_patches(&self, dir: &Path) -> PatchList {
+        PatchList {
+            factory: patches::factory_list(),
+            user: patches::list(dir),
+        }
+    }
+
+    fn apply_patch(&self, patch: Patch, source: PatchSource) -> Set {
+        let mut r = lock(&self.router);
+        let set = self.edit_in(&mut r, None, Instant::now(), |set| {
+            set.keys.patch = patch;
+            set.keys.patch_source = source;
+            set.keys.modified = false;
+            set.clone()
+        });
+        r.send_patch();
+        drop(r);
+        self.touch();
+        set
+    }
+
+    pub fn load_patch(&self, request: PatchRequest, dir: &Path) -> Result<Set, String> {
+        let user = matches!(&request, PatchRequest::User(_));
+        let (patch, source) = requested_patch(request, dir).map_err(|e| {
+            if user {
+                format!("Patch not loaded — {e}")
+            } else {
+                e
+            }
+        })?;
+        Ok(self.apply_patch(patch, source))
+    }
+
+    pub fn save_patch(&self, name: &str, overwrite: bool, dir: &Path) -> Result<PatchRef, String> {
+        let (before, source) = {
+            let r = lock(&self.router);
+            (
+                r.set().keys.patch.clone(),
+                r.set().keys.patch_source.clone(),
+            )
+        };
+        let mut patch = before.clone();
+        patch.name = clean_name(name);
+        let file = patches::write(dir, &patch, overwrite)?;
+        {
+            let mut r = lock(&self.router);
+            // An edit or patch switch during I/O must keep its modified state.
+            if r.set().keys.patch == before && r.set().keys.patch_source == source {
+                let keys = &mut r.set_mut().keys;
+                keys.patch.name = patch.name.clone();
+                keys.patch_source = PatchSource::User(file.clone());
+                keys.modified = false;
+            }
+        }
+        self.touch();
+        Ok(PatchRef {
+            id: file,
+            name: patch.name,
+            category: patch.category,
+        })
+    }
+
+    pub fn rename_patch(&self, file: &str, name: &str, dir: &Path) -> Result<PatchRef, String> {
+        let renamed = patches::rename(dir, file, name)?;
+        {
+            let mut r = lock(&self.router);
+            if r.set().keys.patch_source == PatchSource::User(file.into()) {
+                r.set_mut().keys.patch.name = renamed.name.clone();
+                r.set_mut().keys.patch_source = PatchSource::User(renamed.id.clone());
+            }
+        }
+        self.touch();
+        Ok(renamed)
+    }
+
+    pub fn delete_patch(&self, file: &str, dir: &Path) -> Result<(), String> {
+        patches::delete(dir, file)?;
+        {
+            let mut r = lock(&self.router);
+            if r.set().keys.patch_source == PatchSource::User(file.into()) {
+                r.set_mut().keys.patch_source = PatchSource::Init;
+            }
+        }
+        self.touch();
+        Ok(())
+    }
+
+    pub fn revert_patch(&self, dir: &Path) -> Result<Set, String> {
+        let source = lock(&self.router).set().keys.patch_source.clone();
+        let request = match source {
+            PatchSource::Factory(id) => PatchRequest::Factory(id),
+            PatchSource::User(file) => PatchRequest::User(file),
+            PatchSource::Init => PatchRequest::Init(true),
+        };
+        let (patch, source) = requested_patch(request, dir)?;
+        Ok(self.apply_patch(patch, source))
     }
 
     /// A key played on the screen: the engine and the mirror (`keys-note`, for the caller to emit).
@@ -1578,9 +1860,11 @@ impl AppState {
     }
 
     /// The keys settings are an undoable edit (a slider drag is one step); the engine follows.
-    pub fn set_keys(&self, settings: KeysSettings) -> Set {
+    pub fn set_keys(&self, mix: KeysMix) -> Set {
         let set = self.edit(Some("keys"), |set| {
-            set.keys = settings;
+            set.keys.gm_sound = mix.gm_sound;
+            set.keys.volume_db = mix.volume_db;
+            set.keys.output = mix.output;
             set.clone()
         });
         lock(&self.router).send_keys();
@@ -1820,6 +2104,228 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lpd_core::instrument::KeysSettings;
+    use lpd_core::synth::{
+        params::{Dest, ParamId, Route, Source},
+        patch::PatchSource,
+    };
+
+    #[test]
+    fn an_lcxl_synth_turn_is_undoable_and_reported() {
+        let (state, _) = app();
+        state.on_lcxl(LcxlEvent::Knob {
+            row: 1,
+            ch: 0,
+            value: 64,
+        });
+        state.on_lcxl(LcxlEvent::Knob {
+            row: 1,
+            ch: 0,
+            value: 127,
+        });
+        assert_eq!(
+            state.take_synth_changes(),
+            vec![("filter.cutoff".into(), 20000.0)]
+        );
+        assert!(state.take_synth_changes().is_empty());
+        assert_eq!(
+            state.undo().unwrap().keys.patch.params.filter.cutoff,
+            12000.0
+        );
+        assert!(!state.history_state().can_undo);
+    }
+
+    #[test]
+    fn a_knob_with_the_soundfont_queues_one_notice() {
+        let (state, _) = app();
+        let status = KeysStatus {
+            engine: "soundfont".into(),
+            name: "TEST".into(),
+            error: None,
+        };
+        state.set_keys_status(status.clone());
+        let knob = LcxlEvent::Knob {
+            row: 1,
+            ch: 0,
+            value: 127,
+        };
+        state.on_lcxl(knob);
+        assert_eq!(
+            state.take_keys_notice().as_deref(),
+            Some("LCXL knobs drive the synth — SoundFont active")
+        );
+        state.on_lcxl(knob);
+        assert_eq!(state.take_keys_notice(), None);
+        assert!(state.take_synth_changes().is_empty());
+        state.set_keys_status(KeysStatus::synth());
+        state.set_keys_status(status);
+        state.on_lcxl(knob);
+        assert!(state.take_keys_notice().is_some());
+    }
+
+    #[test]
+    fn a_synth_param_drag_is_one_undo_step() {
+        let (state, mut rx) = app();
+        while rx.pop().is_ok() {}
+        state.synth_param("filter.cutoff", 300.0).unwrap();
+        state.synth_param("filter.cutoff", 500.0).unwrap();
+        assert!(state.history_state().can_undo);
+        assert_eq!(
+            state.undo().unwrap().keys.patch.params.filter.cutoff,
+            12000.0
+        );
+        assert!(!state.history_state().can_undo);
+        assert!(std::iter::from_fn(|| rx.pop().ok()).any(|c| matches!(c, Command::SynthLoad(_))));
+    }
+
+    #[test]
+    fn an_unknown_synth_param_is_an_error() {
+        let (state, _) = app();
+        assert_eq!(
+            state.synth_param("nope", 1.0),
+            Err("Unknown synth control: nope".into())
+        );
+        assert!(!state.history_state().can_undo);
+    }
+
+    #[test]
+    fn a_synth_param_marks_the_patch_modified_and_reaches_the_engine() {
+        let (state, mut rx) = app();
+        while rx.pop().is_ok() {}
+        state.synth_param("filter.cutoff", 500.0).unwrap();
+        assert!(state.get_current_set().keys.modified);
+        assert!(
+            state.take_synth_changes().is_empty(),
+            "screen edits are not mirrored back"
+        );
+        assert!(std::iter::from_fn(|| rx.pop().ok())
+            .any(|c| matches!(c, Command::SynthParam(ParamId::FilterCutoff, 500.0))));
+    }
+
+    #[test]
+    fn learned_synth_ccs_are_undoable_and_reported_without_a_whole_set_echo() {
+        let (state, mut rx) = app();
+        lock(&state.router).set_mut().learn.push(learn::Binding {
+            device: "K".into(),
+            kind: learn::LearnKind::Cc,
+            number: 9,
+            target: learn::Target::Param("synth.filter.cutoff".into()),
+        });
+        while rx.pop().is_ok() {}
+        state.on_midi(
+            "K",
+            "other",
+            MidiMsg::Cc {
+                ch: 0,
+                cc: 9,
+                value: 127,
+            },
+            false,
+        );
+        assert_eq!(
+            state.take_synth_changes(),
+            vec![("filter.cutoff".into(), 20000.0)]
+        );
+        assert!(!state.take_set_change());
+        assert!(std::iter::from_fn(|| rx.pop().ok())
+            .any(|c| matches!(c, Command::SynthParam(ParamId::FilterCutoff, 20000.0))));
+        assert_eq!(
+            state.undo().unwrap().keys.patch.params.filter.cutoff,
+            12000.0
+        );
+    }
+
+    #[test]
+    fn routes_append_replace_delete_and_refuse_a_seventeenth() {
+        let (state, _) = app();
+        let route = Route {
+            source: Source::Env1,
+            dest: Some(Dest::Cutoff),
+            amount: 0.25,
+            aux: None,
+            bypass: false,
+        };
+        let start = state.get_current_set().keys.patch.params.routes.len();
+        for slot in start..16 {
+            state.synth_route(slot, Some(route)).unwrap();
+        }
+        assert_eq!(
+            state.synth_route(16, Some(route)),
+            Err("Matrix full (16 routes)".into())
+        );
+        state
+            .synth_route(
+                0,
+                Some(Route {
+                    amount: 0.5,
+                    ..route
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            state
+                .get_current_set()
+                .keys
+                .patch
+                .params
+                .routes
+                .get(0)
+                .unwrap()
+                .amount,
+            0.5
+        );
+        state.synth_route(0, None).unwrap();
+        assert_eq!(state.get_current_set().keys.patch.params.routes.len(), 15);
+        assert_eq!(
+            state.synth_route(15, None),
+            Err("No route in slot 16".into())
+        );
+    }
+
+    #[test]
+    fn loading_a_patch_is_one_step_and_clears_modified() {
+        let (state, _) = app();
+        let dir = tempfile::tempdir().unwrap();
+        state.synth_param("filter.cutoff", 500.0).unwrap();
+        let set = state
+            .load_patch(PatchRequest::Factory("moogBass".into()), dir.path())
+            .unwrap();
+        assert_eq!(set.keys.patch.name, "MOOG BASS");
+        assert!(!set.keys.modified);
+        assert_eq!(state.undo().unwrap().keys.patch.params.filter.cutoff, 500.0);
+    }
+
+    #[test]
+    fn save_rename_delete_and_revert_through_the_library() {
+        let (state, _) = app();
+        let dir = tempfile::tempdir().unwrap();
+        state.synth_param("filter.cutoff", 300.0).unwrap();
+        let saved = state.save_patch("MY PATCH", false, dir.path()).unwrap();
+        state.synth_param("filter.cutoff", 700.0).unwrap();
+        let reverted = state.revert_patch(dir.path()).unwrap();
+        assert_eq!(reverted.keys.patch.params.filter.cutoff, 300.0);
+        assert!(!reverted.keys.modified);
+        let renamed = state
+            .rename_patch(&saved.id, "NEW NAME", dir.path())
+            .unwrap();
+        assert_eq!(
+            state.get_current_set().keys.patch_source,
+            PatchSource::User(renamed.id.clone())
+        );
+        state.delete_patch(&renamed.id, dir.path()).unwrap();
+        let set = state.get_current_set();
+        assert_eq!(set.keys.patch_source, PatchSource::Init);
+        assert_eq!(set.keys.patch.params.filter.cutoff, 300.0);
+    }
+
+    #[test]
+    fn the_engine_switch_needs_a_soundfont() {
+        let (state, _) = app();
+        assert_eq!(
+            state.set_keys_engine("soundfont"),
+            Err("Load a SoundFont first".into())
+        );
+    }
     use lpd_core::kit::Pad;
     use rtrb::RingBuffer;
 
@@ -2206,8 +2712,8 @@ mod tests {
         let status = state
             .set_soundfont(Some("does-not-exist.sf2".into()))
             .unwrap();
-        assert_eq!(status.engine, "builtin");
-        assert_eq!(status.name, "BUILT-IN");
+        assert_eq!(status.engine, "synth");
+        assert_eq!(status.name, "SYNTH");
         let error = status.error.clone().expect("an error line");
         assert!(
             error.starts_with("Couldn't load does-not-exist.sf2: "),
@@ -2222,12 +2728,12 @@ mod tests {
     }
 
     #[test]
-    fn clearing_the_soundfont_sends_a_fresh_builtin_instrument() {
+    fn clearing_the_soundfont_sends_a_fresh_synth_instrument() {
         let (state, mut rx) = app();
         with_audio_rate(&state, 48_000);
         while rx.pop().is_ok() {}
         let status = state.set_soundfont(None).unwrap();
-        assert_eq!(status, KeysStatus::builtin());
+        assert_eq!(status, KeysStatus::synth());
         let mut sent_instrument = false;
         while let Ok(c) = rx.pop() {
             sent_instrument |= matches!(c, Command::SetInstrument(_));
@@ -2240,8 +2746,8 @@ mod tests {
         let (state, mut rx) = app();
         while rx.pop().is_ok() {}
         for volume in [-10.0, -12.0, -14.0] {
-            let set = state.set_keys(KeysSettings {
-                sound: lpd_core::instrument::KeysSound::Organ,
+            let set = state.set_keys(KeysMix {
+                gm_sound: lpd_core::instrument::KeysSound::Organ,
                 volume_db: volume,
                 output: Some(2),
             });
@@ -2295,7 +2801,7 @@ mod tests {
             }
         ));
         assert!(matches!(sent[1], Command::KeysNoteOff { note: 60 }));
-        assert!(matches!(sent[2], Command::KeysPitch(p) if (p - 1.0).abs() < 1e-6));
+        assert!(matches!(sent[2], Command::KeysPitch(p) if (p - 0.5).abs() < 1e-6));
         assert!(
             matches!(sent[3], Command::KeysMod(m) if m == 1.0),
             "clamped to 1"

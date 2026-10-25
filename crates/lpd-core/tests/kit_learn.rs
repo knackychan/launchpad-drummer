@@ -2,6 +2,33 @@ use lpd_core::kit::learn::*;
 use lpd_core::kit::ops::{clear_pad, move_pad};
 use lpd_core::kit::{Pad, Set};
 
+#[test]
+fn synth_ids_are_learnable_params() {
+    assert!(is_param("synth.filter.cutoff"));
+    assert!(!is_param("synth.nope"));
+    assert!(!is_param("synth.oscA.table"));
+    assert_eq!(
+        param_value("synth.filter.cutoff", 127),
+        Some(ParamValue::Continuous(20000.0))
+    );
+    assert_eq!(param_value("synth.oscB.on", 127), Some(ParamValue::Toggle));
+    let mut set = Set::new();
+    assert!(apply_set_param(
+        &mut set,
+        "synth.filter.cutoff",
+        ParamValue::Continuous(500.0)
+    ));
+    assert_eq!(set.keys.patch.params.filter.cutoff, 500.0);
+    let before = set.keys.patch.params.osc_b.on;
+    assert!(apply_set_param(
+        &mut set,
+        "synth.oscB.on",
+        ParamValue::Toggle
+    ));
+    assert_ne!(set.keys.patch.params.osc_b.on, before);
+    assert!(set.keys.modified);
+}
+
 fn cc(device: &str, number: u8, id: &str) -> Binding {
     Binding {
         device: device.into(),

@@ -10,10 +10,6 @@ export const SOUND_COLORS: Record<KeysSound, [number, number, number]> = {
   piano: [63, 63, 63], ePiano: [63, 40, 0], organ: [63, 20, 0], synthPad: [25, 0, 63], synthLead: [0, 63, 25], synthBass: [0, 30, 63],
 };
 
-/** The keys settings in the set file (Rust `KeysSettings`). */
-export interface KeysSettings { sound: KeysSound; volumeDb: number; output: number | null }
-export const DEFAULT_KEYS: KeysSettings = { sound: 'ePiano', volumeDb: -6, output: null };
-
 export const KEY_LO = 21; // A0
 export const KEY_HI = 108; // C8
 const NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
