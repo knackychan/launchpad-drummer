@@ -985,7 +985,7 @@
   }
 </script>
 
-<svelte:window onpointerdown={(e) => { if (mixPop && !chanPop && !mixPanel?.contains(e.target as Node)) mixPop = null; }} onkeydown={keydown} onkeyup={keyup} onblur={() => { releaseKeyboard(); cancelDrag(); }}
+<svelte:window onpointerdown={(e) => { if (mixPop && !mixPanel?.contains(e.target as Node) && !(e.target instanceof Element && e.target.closest('.chan-pop'))) mixPop = null; }} onkeydown={keydown} onkeyup={keyup} onblur={() => { releaseKeyboard(); cancelDrag(); }}
   onpointermove={e => { if (drag && !drag.external) updateDrag(e.clientX, e.clientY, e.ctrlKey); }}
   onpointerup={e => { if (drag && !drag.external) { drag.ctrl = e.ctrlKey; void finishDrop(); } }} onpointercancel={cancelDrag} />
 
