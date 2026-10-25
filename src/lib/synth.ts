@@ -149,3 +149,34 @@ export function arcPath(cx: number, cy: number, r: number, n0: number, n1: numbe
   const p = (n: number) => `${(cx + r * Math.cos(a(n))).toFixed(2)} ${(cy + r * Math.sin(a(n))).toFixed(2)}`;
   return `M ${p(s)} A ${r} ${r} 0 ${(e - s) * 270 > 180 ? 1 : 0} 1 ${p(e)}`;
 }
+
+/** Leading + trailing throttle; keyed calls retain the latest arguments for every key (K26). */
+export function throttle<A extends unknown[]>(fn: (...args: A) => void, ms = 16, key: (...args: A) => unknown = () => 0) {
+  let last = -Infinity;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const pending = new Map<unknown, A>();
+  function cancel() { clearTimeout(timer); timer = undefined; pending.clear(); }
+  function flush() {
+    const calls = [...pending.values()];
+    cancel();
+    if (!calls.length) return;
+    last = Date.now();
+    for (const args of calls) fn(...args);
+  }
+  return Object.assign((...args: A) => {
+    pending.set(key(...args), args);
+    const wait = ms - (Date.now() - last);
+    if (wait <= 0) flush();
+    else timer ??= setTimeout(flush, wait);
+  }, { flush, cancel });
+}
+
+/** Selected-route indices after removing `slot` (later slots move up by one). */
+export function withoutRoute(selected: Record<string, number>, slot: number): Record<string, number> {
+  const next: Record<string, number> = {};
+  for (const [dest, s] of Object.entries(selected)) {
+    if (s < slot) next[dest] = s;
+    else if (s > slot) next[dest] = s - 1;
+  }
+  return next;
+}

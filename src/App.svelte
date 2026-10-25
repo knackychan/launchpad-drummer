@@ -26,8 +26,8 @@
   import { pushEsc, runEsc } from './lib/esc.ts';
   import { bindingLabel, boundIds } from './lib/learn.ts';
   import { SOUND_COLORS, SOUND_LABELS } from './lib/keys.ts';
-  import type { KeysMix } from './lib/synth-types.ts';
-  import { setParam } from './lib/synth.ts';
+  import type { KeysMix, Route, SourceId } from './lib/synth-types.ts';
+  import { setParam, throttle, withoutRoute } from './lib/synth.ts';
   import { LEARN, type LearnCtx } from './lib/learnable.ts';
   import { createLedFrame, ledToCss } from './lib/led.ts';
   import type { PadInput, Rgb } from './lib/led.ts';
@@ -49,8 +49,9 @@
   const staged = isStaged;
   const editCommands = new Set(['update_pad', 'clear_pad', 'move_pad', 'drop_files', 'locate_sample', 'update_group', 'rename_bank', 'update_bank_lights', 'update_bank_humanize', 'unbind', 'seq_update', 'seq_add_lane', 'set_keys', 'synth_param', 'synth_route', 'synth_load_patch', 'synth_revert']);
   async function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+    if ((editCommands.has(cmd) && cmd !== 'synth_param' && cmd !== 'synth_route') || ['undo','redo','new_set','open_set','open_default_set','retry_startup','synth_load_patch','synth_revert'].includes(cmd)) sendRouteSoon.flush();
     const result = await call<T>(cmd, args);
-    if (editCommands.has(cmd)) refreshHistory();
+    if (!disposed && editCommands.has(cmd)) refreshHistory();
     return result;
   }
 
@@ -121,14 +122,15 @@
   }
   async function resyncSet() {
     if (!tauri) return;
-    try { const set = await call<SetModel>('get_current_set'); if (set) currentSet = set; } catch { /* keep what is shown */ }
+    sendRouteSoon.flush();
+    try { const set = await call<SetModel>('get_current_set'); if (set) replaceSet(set); } catch { /* keep what is shown */ }
   }
   /** Optimistic: show the new pattern now, send it, and take the returned set unless a newer edit is in flight. */
   function updatePattern(next: Pattern, key?: string) {
     currentSet.pattern = next;
     const id = ++patternCall;
     void invoke<SetModel>('seq_update', { pattern: next, key })
-      .then(set => { if (set && id === patternCall) currentSet = set; })
+      .then(set => { if (set && id === patternCall) replaceSet(set); })
       .catch(e => { showToast(errorText(e)); void resyncSet(); });
   }
   async function addLane() {
@@ -142,7 +144,7 @@
     }
     try {
       const set = await invoke<SetModel>('seq_add_lane', { bank: activeBank, ...selXY });
-      if (set) { currentSet = set; confirm('Lane added'); }
+      if (set) { replaceSet(set); confirm('Lane added'); }
     } catch (e) { showToast(errorText(e)); }
   }
   function toggleSeqPlay() { void invoke('seq_play', { play: !seqPlaying }).catch(e => showToast(errorText(e))); }
@@ -179,7 +181,7 @@
     currentSet.keys.output = mix.output;
     const id = ++keysCall;
     void invoke<SetModel>('set_keys', { settings: mix })
-      .then(set => { if (set && id === keysCall) currentSet = set; })
+      .then(set => { if (set && id === keysCall) replaceSet(set); })
       .catch(e => { showToast(errorText(e)); void resyncSet(); });
   }
   function keysNote(note: number, velocity: number, on: boolean) {
@@ -225,6 +227,45 @@
     currentSet.keys.modified = true;
     void invoke('synth_param', { id, value: stored }).catch((e) => { showToast(errorText(e)); void resyncSet(); });
   }
+  let selectedRoute = $state<Record<string, number>>({});
+  const routes = () => currentSet.keys.patch.params.routes;
+  function sendRoute(slot: number, route: Route | null) {
+    currentSet.keys.modified = true;
+    void invoke('synth_route', { slot, route }).catch((e) => { showToast(errorText(e)); void resyncSet(); });
+  }
+  const sendRouteSoon = throttle(sendRoute, 16, slot => slot);
+  function replaceSet(set: SetModel) {
+    // An authoritative snapshot may already belong to a new patch; never replay old pending edits.
+    sendRouteSoon.cancel();
+    selectedRoute = {};
+    currentSet = set;
+  }
+  function addRoute(source: SourceId, dest: string | null) {
+    if (routes().length >= 16) { showToast('Matrix full (16 routes)'); return; }
+    sendRouteSoon.flush();
+    const route: Route = { source, dest, amount: 0.25, aux: null, bypass: false };
+    routes().push(route);
+    if (dest) selectedRoute[dest] = routes().length - 1;
+    sendRoute(routes().length - 1, route);
+  }
+  function updateRoute(slot: number, route: Route) {
+    routes()[slot] = route;
+    sendRouteSoon(slot, route);
+  }
+  function removeRoute(slot: number) {
+    sendRouteSoon.flush();
+    routes().splice(slot, 1);
+    selectedRoute = withoutRoute(selectedRoute, slot);
+    sendRoute(slot, null);
+  }
+  /** Alt+drag changes the selected route's depth, or the newest route on the destination. */
+  function routeDepth(dest: string, delta: number) {
+    const slots = routes().map((r, i) => r.dest === dest ? i : -1).filter(i => i >= 0);
+    const slot = slots.includes(selectedRoute[dest]) ? selectedRoute[dest] : slots.at(-1);
+    if (slot === undefined) return;
+    const r = routes()[slot];
+    updateRoute(slot, { ...r, amount: Math.min(1, Math.max(-1, r.amount + delta)) });
+  }
 
   // MIDI learn (plan 1C Task 12): the control being learned, and the one shared menu of learnable controls.
   let learnArmed = $state<{ id: string; kind: 'cc' | 'note' } | null>(null);
@@ -253,7 +294,7 @@
     learnArmed = null;
     try {
       const set = await call<SetModel>('get_current_set');
-      if (set) currentSet = set;
+      if (set) replaceSet(set);
       confirm(`Learned ${bindingLabel(binding, currentSet)}`);
       refreshHistory();
     } catch (e) { showToast(errorText(e)); }
@@ -265,7 +306,7 @@
     window.setTimeout(() => padInput({ note, pressed: false, source: 'hardware' }), 120);
   }
   async function unbindAt(index: number) {
-    try { const set = await invoke<SetModel>('unbind', { index }); if (set) currentSet = set; }
+    try { const set = await invoke<SetModel>('unbind', { index }); if (set) replaceSet(set); }
     catch (e) { showToast(errorText(e)); }
   }
   const padBinding = $derived.by(() => {
@@ -348,11 +389,11 @@
     try {
       if (source.source === 'pad') {
         const set = await invoke<SetModel | null>('move_pad', { fromBank: source.fromBank, fromX: source.fromX, fromY: source.fromY, toBank, toX: xy.x, toY: xy.y, copy: source.ctrl });
-        if (set) { currentSet = set; selected = (xy.y + 1) * 10 + xy.x + 1; }
+        if (set) { replaceSet(set); selected = (xy.y + 1) * 10 + xy.x + 1; }
       } else {
         const report = await invoke<DropReport>('drop_files', { bank: toBank, x: xy.x, y: xy.y, paths: source.paths });
         if (report) {
-          currentSet = report.set;
+          replaceSet(report.set);
           if (report.imported) confirm(`Imported ${report.imported}`);
           if (report.leftover) showToast(`${report.leftover} file${report.leftover === 1 ? '' : 's'} not imported — bank full`);
           if (report.rejected && !report.imported) showToast('Not an audio file');
@@ -460,7 +501,7 @@
   async function refreshMissing() { missing = await invoke<MissingPad[]>('missing_samples') ?? []; }
   async function undoRedo(cmd: 'undo' | 'redo') {
     if (cmd === 'undo' ? !history.canUndo : !history.canRedo) return;
-    try { const set = await invoke<SetModel | null>(cmd); if (set) { currentSet = set; confirm(cmd === 'undo' ? 'Undone' : 'Redone'); await refreshMissing(); } refreshHistory(); }
+    try { const set = await invoke<SetModel | null>(cmd); if (set) { replaceSet(set); confirm(cmd === 'undo' ? 'Undone' : 'Redone'); await refreshMissing(); } refreshHistory(); }
     catch (e) { showToast(errorText(e)); }
   }
   async function noticeAction(n: Notice) {
@@ -571,7 +612,7 @@
     }, requestId, () => setGate.isCurrent(token));
     if (result.kind === 'stale') return;
     if (result.kind === 'error') { startupError = `Couldn't read the set — ${result.error}`; return; }
-    currentSet = result.set;
+    replaceSet(result.set);
     startup = result.startup;
     if (startup.kind === 'loaded') { setPath = startup.path; setName = startup.name; backup = startup.fromBackup ? { savedAt: startup.backupSavedAt } : null; }
     if (result.bank !== null) activeBank = result.bank;
@@ -677,7 +718,7 @@
       });
       subscribe<SeqPosition>('seq-position', (event) => { seqPos = event; seqAt = performance.now(); seqRec = event.rec; });
       subscribe<{ bank: number; x: number; y: number }>('pad-hit', (event) => padHit(event.bank, event.x, event.y));
-      subscribe<SetModel>('set-changed', (event) => { currentSet = event; });
+      subscribe<SetModel>('set-changed', (event) => { replaceSet(event); });
       subscribe<SaveStatus>('save-status', (event) => { saveStatus = event; });
       subscribe<AudioStatus>('audio-status', (event) => audioFeed.event(event));
       subscribe<TelemetryFrame>('telemetry', (event) => pushFrame(event));
@@ -690,6 +731,7 @@
     void loadDeviceState();
     if (staged) void followLoad(); else void enterReady(1);
     return () => {
+      sendRouteSoon.flush();
       disposed = true;
       clearTimeout(historyTimer);
       confirmationTimers.forEach(clearTimeout);
@@ -824,7 +866,7 @@
   }
   function clearPad(x: number, y: number) {
     void invoke<SetModel>('clear_pad', { bank: activeBank, x, y })
-      .then(set => { if (set) currentSet = set; confirm('Pad cleared'); void refreshMissing(); })
+      .then(set => { if (set) replaceSet(set); confirm('Pad cleared'); void refreshMissing(); })
       .catch(e => showToast(errorText(e)));
   }
   async function locateSample(x: number, y: number) {
@@ -833,7 +875,7 @@
       const path = await invoke<string | null>('pick_file', { title: 'Locate sample', extensions: ['wav', 'aif', 'aiff', 'flac', 'mp3', 'ogg'] });
       if (!path) return;
       const set = await invoke<SetModel>('locate_sample', { bank, x, y, path });
-      if (set) currentSet = set;
+      if (set) replaceSet(set);
       await refreshMissing(); peaksNonce++;
     } catch (e) { showToast(`Locate failed — ${errorText(e)}`); }
   }
@@ -908,7 +950,7 @@
     try {
       const report = await invoke<DropReport>('load_into_pad', { bank: activeBank, ...selXY, path });
       if (report) {
-        currentSet = report.set;
+        replaceSet(report.set);
         if (report.imported) confirm(`Imported ${report.imported}`);
         if (report.leftover) showToast(`${report.leftover} file${report.leftover === 1 ? '' : 's'} not imported — bank full`);
         if (report.rejected && !report.imported) showToast('Not an audio file');
@@ -1092,7 +1134,7 @@
                     onchannel={channelMenu}
                     onexpand={(x, y) => { mixPop = { x, y }; }}
                   />
-                  <SynthPlate set={currentSet} width={layout.synthW} height={layout.rowH} engine={keysStatus.engine} onusesynth={() => void useSynth()} onparam={synthParam} />
+                  <SynthPlate set={currentSet} width={layout.synthW} height={layout.rowH} engine={keysStatus.engine} onusesynth={() => void useSynth()} onparam={synthParam} {selectedRoute} onaddroute={addRoute} onupdateroute={updateRoute} onremoveroute={removeRoute} onroutedepth={routeDepth} onselectroute={(dest, slot) => { selectedRoute[dest] = slot; }} onblankroute={() => addRoute('env2', null)} />
                 </div>
                 <KeysPlate
                   short={layout.kh < 68} folded={keysFolded} set={currentSet} octave={keysOctave} deviceName={keysDeviceName} devicePresent={tauri ? keysPresent : true}

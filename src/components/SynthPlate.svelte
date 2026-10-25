@@ -8,9 +8,19 @@
   import SynthEnv from './SynthEnv.svelte';
   import SynthLfo from './SynthLfo.svelte';
   import SynthFx from './SynthFx.svelte';
-  let { set, width, height, engine, onusesynth, onparam }: {
+  import ModSourceStrip from './ModSourceStrip.svelte';
+  import SynthMatrix from './SynthMatrix.svelte';
+  import DragGhost from './DragGhost.svelte';
+  import { onDestroy } from 'svelte';
+  import { pushEsc } from '../lib/esc.ts';
+  import { sourceColor, sourceLabel } from '../lib/synth.ts';
+  import type { Route, SourceId } from '../lib/synth-types.ts';
+  let { set, width, height, engine, onusesynth, onparam, selectedRoute, onaddroute, onupdateroute, onremoveroute, onroutedepth, onselectroute, onblankroute }: {
     set: SetModel; width: number; height: number; engine: string; onusesynth: () => void;
     onparam: (id: string, value: number) => void;
+    selectedRoute: Record<string, number>; onaddroute: (source: SourceId, dest: string) => void;
+    onupdateroute: (slot: number, route: Route) => void; onremoveroute: (slot: number) => void;
+    onroutedepth: (dest: string, delta: number) => void; onselectroute: (dest: string, slot: number) => void; onblankroute: () => void;
   } = $props();
   const pageSet = $derived(synthPageSet(width, height));
   let chosen = $state<Record<string, string>>({});
@@ -22,12 +32,50 @@
   });
   const page = $derived(chosen[pageSet] ?? SYNTH_PAGES[pageSet][0]);
   const knob = $derived(Math.min(synthKnob(height, pageSet), page === 'MAIN' || page === 'OSC' || page === 'FILTER' || (page === 'FX' && pageSet === 'compact') ? 24 : 44));
-  const sectionProps = $derived({ params: set.keys.patch.params, live: null, knob, onparam });
+  const sectionProps = $derived({ params: set.keys.patch.params, live: null, knob, onparam, onstart: startMod, mod: { selected: selectedRoute, onselect: onselectroute, ondepth: onroutedepth, onremove: onremoveroute } });
+  let modDrag = $state<{ source: SourceId; x: number; y: number; active: boolean } | null>(null);
+  let stopMod: (() => void) | undefined;
+  function startMod(source: SourceId, event: PointerEvent) {
+    if (event.button !== 0 || !(event.currentTarget instanceof HTMLElement)) return;
+    stopMod?.();
+    event.preventDefault();
+    const el = event.currentTarget, x0 = event.clientX, y0 = event.clientY;
+    el.setPointerCapture(event.pointerId);
+    modDrag = { source, x: x0, y: y0, active: false };
+    let target: HTMLElement | null = null;
+    const move = (e: PointerEvent) => {
+      if (!modDrag) return;
+      modDrag.x = e.clientX; modDrag.y = e.clientY;
+      modDrag.active ||= Math.hypot(e.clientX-x0, e.clientY-y0) >= 4;
+      target?.classList.remove('drop-ok');
+      target = modDrag.active ? document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>('[data-dest]') ?? null : null;
+      target?.classList.add('drop-ok');
+    };
+    const up = (e: PointerEvent) => {
+      move(e);
+      const dest = target?.dataset.dest;
+      const active = modDrag?.active;
+      stopMod?.();
+      if (active && dest) onaddroute(source, dest);
+    };
+    const removeEsc = pushEsc(() => stopMod?.());
+    stopMod = () => {
+      target?.classList.remove('drop-ok');
+      el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up); el.removeEventListener('pointercancel', cancel);
+      if (el.hasPointerCapture(event.pointerId)) el.releasePointerCapture(event.pointerId);
+      removeEsc(); modDrag = null; stopMod = undefined;
+    };
+    const cancel = () => stopMod?.();
+    el.addEventListener('pointermove', move); el.addEventListener('pointerup', up); el.addEventListener('pointercancel', cancel);
+  }
+  onDestroy(() => stopMod?.());
   function choose(next: string) {
+    stopMod?.();
     chosen[pageSet] = next;
     try { localStorage.setItem(`lpd.synth.page.${pageSet}`, next); } catch { /* pages work without storage */ }
   }
 </script>
+{#if modDrag?.active}<DragGhost x={modDrag.x} y={modDrag.y} color={sourceColor(modDrag.source)} label={sourceLabel(modDrag.source)}/>{/if}
 <section class="synth plate" data-label="SYNTH" aria-label="Synth" style:width="{width}px" style:height="{height}px" style:--kn="{knob}px">
   <header class="syn-head">
     <div class="syn-head-row">
@@ -36,7 +84,7 @@
         {#each SYNTH_PAGES[pageSet] as name}<button class="key small" class:on={name === page} role="tab" aria-selected={name === page} onclick={() => choose(name)}>{name}</button>{/each}
       </div>
     </div>
-    <div class="syn-head-row"></div>
+    <div class="syn-head-row"><ModSourceStrip meters={null} onstart={startMod}/></div>
   </header>
   <div class="syn-body" role="tabpanel" aria-label={page} inert={engine === 'soundfont'}>
     {#if page === 'MAIN'}
@@ -64,7 +112,7 @@
     {:else if page === 'FX'}
       <div class="pg-fx" class:wide={pageSet === 'wide'}>{#each ['drive','chorus','delay','reverb'] as unit}<SynthFx unit={unit as 'drive' | 'chorus' | 'delay' | 'reverb'} {...sectionProps}/>{/each}</div>
     {:else}
-      <span class="lcd-dim">Routes appear here (Task 16)</span>
+      <SynthMatrix params={set.keys.patch.params} meters={null} onupdate={onupdateroute} onremove={onremoveroute} onadd={onblankroute}/>
     {/if}
   </div>
   {#if engine === 'soundfont'}<div class="syn-dim" role="note"><span class="lcd">SOUNDFONT ACTIVE</span><button class="key small" onclick={onusesynth}>USE SYNTH</button></div>{/if}

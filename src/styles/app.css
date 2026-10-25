@@ -192,3 +192,5 @@ legend { padding: 0 0 10px; }
 .syn-disp { position: relative; flex: 1 1 36%; min-height: 36px; }
 .syn-disp canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .syn-ctl { display: flex; flex-wrap: wrap; gap: 4px 6px; align-content: flex-start; align-items: flex-start; }
+.syn-title button.silk { border: 0; padding: 0; background: none; color: var(--vec); cursor: grab; touch-action: none; }
+.drop-ok { outline: 2px solid var(--warn); outline-offset: 3px; }

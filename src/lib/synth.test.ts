@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { SYNTH_META } from './synth-meta.ts';
-import { getParam, setParam, meta, fromNorm, toNorm, fmtParam, fmtAmount, arcsFor, arcPath, lcxlTag, categoryColor, sourceColor } from './synth.ts';
+import { getParam, setParam, meta, fromNorm, toNorm, fmtParam, fmtAmount, arcsFor, arcPath, lcxlTag, categoryColor, sourceColor, throttle, withoutRoute } from './synth.ts';
 const init = () => structuredClone(SYNTH_META.init);
 test('every synth parameter reads its metadata default', () => {
   const p = init();
@@ -50,4 +50,35 @@ test('knob arc path spans the full 270 degree track', () => {
 test('synth hardware tags and colours match the registry', () => {
   assert.equal(lcxlTag('filter.cutoff'),'LCXL row 2 · knob 1'); assert.equal(lcxlTag('oscA.pan'),null);
   assert.deepEqual(categoryColor('bass'),[0,30,63]); assert.equal(sourceColor('lfo2'),'#7f8cff');
+});
+test('removing a route clears its selection and shifts later slots', () => {
+  assert.deepEqual(withoutRoute({ a: 0, b: 2, c: 3 }, 2), { a: 0, c: 2 });
+});
+test('throttle sends the leading call and the final arguments in a burst', t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
+  const sent: number[] = [], send = throttle((value: number) => sent.push(value), 16);
+  send(1); t.mock.timers.tick(1); send(2); t.mock.timers.tick(1); send(3);
+  assert.deepEqual(sent, [1]); t.mock.timers.tick(14); assert.deepEqual(sent, [1, 3]);
+});
+test('keyed throttle retains edits to every route while coalescing the same slot', t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1000 });
+  const sent: [number, string][] = [];
+  const send = throttle((slot: number, value: string) => sent.push([slot, value]), 16, slot => slot);
+  send(0, 'A'); t.mock.timers.tick(1); send(1, 'B'); send(2, 'C'); send(1, 'B edited');
+  t.mock.timers.tick(15);
+  assert.deepEqual(sent, [[0, 'A'], [1, 'B edited'], [2, 'C']]);
+});
+test('flushing pending route edits before deletion prevents a stale-slot write', t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1000 });
+  const backend = ['LFO1', 'ENV2'];
+  const send = throttle((slot: number, value: string) => { backend[slot] = value; }, 16, slot => slot);
+  send(0, 'LFO1'); t.mock.timers.tick(1); send(0, 'LFO1 edited');
+  send.flush(); backend.splice(0, 1); t.mock.timers.tick(32);
+  assert.deepEqual(backend, ['ENV2']);
+});
+test('authoritative patch replacement cancels edits queued for the old patch', t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1000 });
+  const sent: number[] = [], send = throttle((value: number) => sent.push(value), 16);
+  send(1); t.mock.timers.tick(1); send(2); send.cancel(); t.mock.timers.tick(32);
+  assert.deepEqual(sent, [1]);
 });
