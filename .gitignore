@@ -1,6 +1,10 @@
 node_modules/
 dist/
-target/
+src-tauri/target/
+/target/*
+!/target/release/
+/target/release/*
+!/target/release/*.exe
 src-tauri/gen/
 .npm-cache/
 .verification/
