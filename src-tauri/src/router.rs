@@ -23,6 +23,9 @@ const TOP_MIXER: u8 = 7;
 /// after the lock is released.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiEvent {
+    LcxlMidi {
+        data: Vec<u8>,
+    },
     KeysNote {
         note: u8,
         velocity: u8,
@@ -53,6 +56,7 @@ impl UiEvent {
     /// The Tauri event name (plan 0.4).
     pub fn name(&self) -> &'static str {
         match self {
+            Self::LcxlMidi { .. } => "lcxl-midi",
             Self::KeysNote { .. } => "keys-note",
             Self::KeysWheel { .. } => "keys-wheel",
             Self::MidiLog { .. } => "midi-log",
@@ -64,6 +68,7 @@ impl UiEvent {
 
     pub fn payload(&self) -> serde_json::Value {
         match self {
+            Self::LcxlMidi { data } => serde_json::json!({ "data": data }),
             Self::KeysNote { note, velocity, on } => {
                 serde_json::json!({ "note": note, "velocity": velocity, "on": on })
             }

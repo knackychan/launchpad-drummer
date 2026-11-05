@@ -435,6 +435,26 @@
       </div>
     </div>
 
+    <div class="game-card" data-game="sector" data-devices="lp">
+      <div class="game-card-top">
+        <div><div class="game-card-title">Sector Defense</div><div class="game-card-sub">Central Station Survival</div></div>
+        <span class="game-card-badge">SPACE DEFENSE</span>
+      </div>
+      <div class="game-card-desc">Defend a central station from incoming ships and asteroids. Tap their lit pads to shoot, collect green repairs, and charge a pulse to clear the field. A phosphor CRT view mirrors your Launchpad’s 8×8 grid.</div>
+      <div class="game-card-hw"><span class="game-card-hw-label">CONTROLLER (HARDWARE MODE)</span><span class="game-card-hw-val">Novation Launchpad MKII · keyboard &amp; mouse also supported</span></div>
+      <div class="game-card-actions"><a href="./sector/index.html" class="game-launch-btn" data-launch="sector">LAUNCH SECTOR DEFENSE</a></div>
+    </div>
+
+    <div class="game-card" data-game="dustline" data-devices="lcxl">
+      <div class="game-card-top">
+        <div><div class="game-card-title">DUSTLINE</div><div class="game-card-sub">twin-engine racer</div></div>
+        <span class="game-card-badge">RACING</span>
+      </div>
+      <div class="game-card-desc">Race the Rift Circuit with independent left and right thrusters. Catch cooling windows and land repair hits while keeping your line.</div>
+      <div class="game-card-hw"><span class="game-card-hw-label">CONTROLLER (HARDWARE MODE)</span><span class="game-card-hw-val">Launch Control XL · keyboard also supported</span></div>
+      <div class="game-card-actions"><a href="./dustline/index.html" class="game-launch-btn" data-launch="dustline">LAUNCH DUSTLINE</a></div>
+    </div>
+
     <!-- HORDE -->
     <div class="game-card" data-game="horde" data-devices="lp">
       <div class="game-card-top">
@@ -632,6 +652,8 @@
           ready = lpConnected || lcxlConnected; // If either is present in hardware mode
         } else if (req.includes('lp')) {
           ready = lpConnected;
+        } else if (req.includes('lcxl')) {
+          ready = lcxlConnected;
         } else {
           ready = anyHw;
         }

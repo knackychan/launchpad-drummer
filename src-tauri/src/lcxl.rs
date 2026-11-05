@@ -3,10 +3,12 @@
 use lpd_core::devices::lcxl::{self, LedColor};
 use midir::{MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use serde::Serialize;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::state::AppState;
+use crate::state::{AppState, InputMode};
 
 const RECHECK: Duration = Duration::from_secs(2);
 /// The device's row in the shared MIDI device registry (SETUP › MIDI DEVICES).
@@ -17,6 +19,118 @@ const MIXER_EMIT_INTERVAL: Duration = Duration::from_millis(33);
 const TICK: Duration = Duration::from_millis(11);
 /// The LEDs follow mute/solo within this long (the screen's own changes included).
 const LED_INTERVAL: Duration = Duration::from_millis(16);
+
+const XL_HEADER: [u8; 7] = [240, 0, 32, 41, 2, 17, 120];
+type LedAddress = (u8, u8, u8); // protocol, template/channel, index/note
+
+#[derive(Default)]
+struct GameLights {
+    values: BTreeMap<LedAddress, u8>,
+    pending: BTreeMap<LedAddress, u8>,
+    template: Option<u8>,
+}
+
+impl GameLights {
+    fn update(&mut self, messages: &[Vec<u8>]) -> Result<(), String> {
+        let mut values = BTreeMap::new();
+        let mut template = None;
+        if messages.len() > 64 {
+            return Err("Too many LCXL LED messages".into());
+        }
+        for message in messages {
+            match message.as_slice() {
+                &[240, 0, 32, 41, 2, 17, 119, selected @ 0..=15, 247] => {
+                    template = Some(selected);
+                }
+                &[status @ 144..=159, note @ 0..=127, color @ 0..=63] => {
+                    values.insert((status, 0, note), color);
+                }
+                bytes
+                    if bytes.len() >= 11
+                        && bytes.len() <= 105
+                        && bytes[..7] == XL_HEADER
+                        && bytes[7] < 16
+                        && bytes.last() == Some(&247)
+                        && bytes.len() % 2 == 1 =>
+                {
+                    for pair in bytes[8..bytes.len() - 1].chunks_exact(2) {
+                        if pair[0] >= 48 || pair[1] > 63 {
+                            return Err("Invalid LCXL LED index or color".into());
+                        }
+                        values.insert((240, bytes[7], pair[0]), pair[1]);
+                    }
+                }
+                _ => return Err("Only LCXL LEDs and template selection are accepted".into()),
+            }
+        }
+        if messages.is_empty() {
+            self.clear();
+        } else {
+            if template.is_some() {
+                self.template = template;
+            }
+            self.values.extend(values.clone());
+            self.pending.extend(values);
+        }
+        Ok(())
+    }
+
+    fn clear(&mut self) {
+        self.template = None;
+        for value in self.pending.values_mut() {
+            *value = 12;
+        }
+        self.pending.extend(
+            std::mem::take(&mut self.values)
+                .into_keys()
+                .map(|address| (address, 12)),
+        );
+    }
+
+    fn take(&mut self) -> Vec<Vec<u8>> {
+        let mut messages = Vec::new();
+        if let Some(template) = self.template.take() {
+            messages.push(vec![240, 0, 32, 41, 2, 17, 119, template, 247]);
+        }
+        let mut sysex = BTreeMap::<u8, Vec<u8>>::new();
+        for ((protocol, template, index), value) in std::mem::take(&mut self.pending) {
+            if protocol == 240 {
+                let packet = sysex.entry(template).or_insert_with(|| {
+                    let mut packet = XL_HEADER.to_vec();
+                    packet.push(template);
+                    packet
+                });
+                packet.extend([index, value]);
+            } else {
+                messages.push(vec![protocol, index, value]);
+            }
+        }
+        for mut packet in sysex.into_values() {
+            packet.push(247);
+            messages.push(packet);
+        }
+        messages
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct LedSender(Arc<Mutex<GameLights>>);
+
+#[tauri::command]
+pub fn send_lcxl_leds(
+    messages: Vec<Vec<u8>>,
+    sender: State<'_, LedSender>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if messages.is_empty() || state.input_mode() == InputMode::Game {
+        sender
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .update(&messages)?;
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DeviceStatus {
@@ -63,7 +177,9 @@ struct MixerChanged {
 }
 
 pub fn start(app: AppHandle, state: AppState) {
-    std::thread::spawn(move || run(app, state));
+    let sender = LedSender::default();
+    app.manage(sender.clone());
+    std::thread::spawn(move || run(app, state, sender));
 }
 
 /// Button LEDs follow mute/solo; knob rows follow the selected keys engine.
@@ -125,7 +241,7 @@ fn emit_due(last_emit: Instant, now: Instant) -> bool {
     now.duration_since(last_emit) >= MIXER_EMIT_INTERVAL
 }
 
-fn run(app: AppHandle, state: AppState) {
+fn run(app: AppHandle, state: AppState, sender: LedSender) {
     let mut connection: Option<Connection> = None;
     let mut status = None;
     let start = Instant::now();
@@ -134,6 +250,7 @@ fn run(app: AppHandle, state: AppState) {
     let mut last_set_emit = start;
     let mut last_synth_emit = start;
     let mut last_led = start;
+    let mut game_mode = false;
     loop {
         let now = Instant::now();
         if now >= next_check {
@@ -170,10 +287,37 @@ fn run(app: AppHandle, state: AppState) {
         }
         if now.duration_since(last_led) >= LED_INTERVAL {
             last_led = now;
+            if state.input_mode() != InputMode::Game {
+                sender
+                    .0
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clear();
+            }
             if let Some(c) = connection.as_mut() {
+                let game = state.input_mode() == InputMode::Game;
                 let synth = state.keys_status().engine == "synth";
                 let (mute, solo) = state.mute_solo();
-                let updates = led_updates(c.leds, mute, solo, synth);
+                let mut updates = Vec::new();
+                {
+                    let mut lights = sender.0.lock().unwrap_or_else(PoisonError::into_inner);
+                    if game != game_mode {
+                        c.leds = None;
+                        if game {
+                            updates.extend(led_updates(None, [false; 8], [false; 8], false));
+                        } else {
+                            lights.clear();
+                        }
+                        game_mode = game;
+                    }
+                    updates.extend(lights.take());
+                }
+                if !game {
+                    if !updates.is_empty() {
+                        c.leds = None;
+                    }
+                    updates.extend(led_updates(c.leds, mute, solo, synth));
+                }
                 let mut failed = None;
                 for message in &updates {
                     if let Err(error) = c.output.send(message) {
@@ -182,7 +326,13 @@ fn run(app: AppHandle, state: AppState) {
                     }
                 }
                 match failed {
-                    None => c.leds = Some((mute, solo, synth)),
+                    None => {
+                        c.leds = if game {
+                            None
+                        } else {
+                            Some((mute, solo, synth))
+                        }
+                    }
                     Some(error) => {
                         crate::logfile::log(format!("Launch Control XL LED send failed: {error}"));
                         connection = None;
@@ -201,7 +351,7 @@ fn check_connection(
     connection: &mut Option<Connection>,
     status: &mut Option<DeviceStatus>,
 ) {
-    let (Ok(input), Ok(output)) = (
+    let (Ok(mut input), Ok(output)) = (
         MidiInput::new("launchpad-drummer-lcxl-in"),
         MidiOutput::new("launchpad-drummer-lcxl-out"),
     ) else {
@@ -240,13 +390,15 @@ fn check_connection(
     *connection = None;
     let app_state = state.clone();
     let events = app.clone();
+    input.ignore(midir::Ignore::None);
     let input_connection = match input.connect(
         &input_port,
         "launchpad-drummer-lcxl-in",
         move |_, msg, _| {
-            if let Some(ev) = lcxl::decode(msg) {
-                if let Some(ignored) = app_state.on_lcxl(ev) {
-                    let _ = events.emit(ignored.name(), ignored.payload());
+            if let Some(event) = app_state.on_lcxl_midi(msg) {
+                // Deliver every edge and CC value in callback order, including the end of a drag.
+                if let Err(error) = events.emit(event.name(), event.payload()) {
+                    crate::logfile::log(format!("Launch Control XL event failed: {error}"));
                 }
             }
         },
@@ -304,6 +456,64 @@ mod tests {
     use super::*;
 
     const NONE: [bool; 8] = [false; 8];
+
+    #[test]
+    fn game_leds_coalesce_deltas_and_clear_every_owned_light() {
+        let mut lights = GameLights::default();
+        let knob = lcxl::led_message(8, 23, 60);
+        lights.update(&[vec![0x92, 41, 63], knob.clone()]).unwrap();
+        lights
+            .update(&[vec![0x92, 41, 12], vec![0x92, 73, 15]])
+            .unwrap();
+        assert_eq!(
+            lights.take(),
+            vec![vec![0x92, 41, 12], vec![0x92, 73, 15], knob]
+        );
+        assert!(lights.take().is_empty());
+        lights.update(&[]).unwrap();
+        lights.update(&[]).unwrap(); // Two frame switches before the output tick still clear old LEDs.
+        assert_eq!(
+            lights.take(),
+            vec![
+                vec![0x92, 41, 12],
+                vec![0x92, 73, 12],
+                lcxl::led_message(8, 23, 12)
+            ]
+        );
+        assert!(lights.values.is_empty());
+    }
+
+    #[test]
+    fn selecting_a_template_precedes_its_light_updates_without_writing_template_contents() {
+        let mut lights = GameLights::default();
+        let select = vec![240, 0, 32, 41, 2, 17, 119, 0, 247];
+        lights
+            .update(&[select.clone(), lcxl::led_message(0, 0, 63)])
+            .unwrap();
+        assert_eq!(lights.take(), vec![select, lcxl::led_message(0, 0, 63)]);
+    }
+
+    #[test]
+    fn game_led_boundary_rejects_non_led_midi_and_invalid_batches_atomically() {
+        for message in [
+            vec![0xb0, 77, 127],
+            vec![0x90, 41, 64],
+            vec![0x90, 128, 12],
+            vec![240, 0, 32, 41, 2, 17, 123, 0, 0, 127, 247],
+            vec![240, 0, 32, 41, 2, 17, 119, 16, 247],
+            lcxl::led_message(16, 0, 12),
+            lcxl::led_message(0, 48, 12),
+            lcxl::led_message(0, 0, 64),
+            vec![240],
+        ] {
+            let mut lights = GameLights::default();
+            assert!(lights.update(&[vec![144, 41, 60], message]).is_err());
+            assert!(lights.take().is_empty());
+        }
+        assert!(GameLights::default()
+            .update(&vec![vec![144, 41, 12]; 65])
+            .is_err());
+    }
 
     #[test]
     fn knob_leds_follow_the_engine() {

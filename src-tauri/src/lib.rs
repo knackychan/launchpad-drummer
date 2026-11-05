@@ -120,6 +120,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             launchpad::send_led_frame,
             launchpad::send_led_leds,
+            lcxl::send_lcxl_leds,
             commands::get_audio_status,
             commands::audio_devices,
             commands::asio_available,

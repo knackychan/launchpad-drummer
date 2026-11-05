@@ -40,6 +40,7 @@
   import type { AppConfig, AudioStatus, Binding, KeysStatus, LoadStatus, Pattern, SeqPosition, DropReport, Group, LightModes, MidiDevice, MissingPad, Pad, SamplePeaks, SetModel, Startup } from './lib/model.ts';
   import { acceptLoad, createGeneration, eventFirst, fetchReadyState, INITIAL_LOAD, isTerminal } from './lib/startup.ts';
   import { PREVIEW_MIDI, pushLog, roleStatus } from './lib/midi.ts';
+  import { readGameStore, setGameStore } from './lib/gameStore.ts';
   import { solvePlayLayout } from './lib/layout.ts';
   import { feedLive, hitAmount, hitGroup, runActivity } from './lib/activity.ts';
   import { audioLabel, dropoutRecent, IDLE_SAVE, padEditKey } from './lib/status.ts';
@@ -587,6 +588,27 @@
   }
   resetProtoLeds();
   const protoActive = () => mode === 'games' && game !== 'horde';
+  let lcxlOutput = Promise.resolve();
+  function sendLcxlLeds(messages: unknown[]) {
+    if (!tauri) return;
+    const frame = protoFrame;
+    lcxlOutput = lcxlOutput.then(() => invoke<void>('send_lcxl_leds', { messages })).catch((error) => {
+      if (frame === protoFrame) toProto({ lpd: 'lcxl-output-error', message: errorText(error) });
+    });
+  }
+  $effect(() => {
+    void game; void mode;
+    sendLcxlLeds([]);
+  });
+  function protoSrc(id: string) {
+    let store = {};
+    try { store = readGameStore(window.localStorage, id); } catch { /* Games still boot if storage is unavailable. */ }
+    return `/games/${id}/index.html#lpd-store=${encodeURIComponent(JSON.stringify(store))}`;
+  }
+  $effect(() => {
+    const state = lcxlStatus;
+    if (protoActive()) toProto({ lpd: 'lcxl-status', state });
+  });
   function toProto(message: object) {
     protoFrame?.contentWindow?.postMessage(message, '*'); // the frame's origin is opaque (sandbox)
   }
@@ -596,13 +618,27 @@
   function protoLoaded() {
     resetProtoLeds();
     toProto({ lpd: 'status', state: deviceState });
+    toProto({ lpd: 'lcxl-status', state: lcxlStatus });
     flushProtoLeds(); // blank pads, so nothing of the previous game lingers
   }
   function onProtoMessage(e: MessageEvent) {
     if (!protoActive() || !protoFrame || e.source !== protoFrame.contentWindow) return;
-    const data = e.data as { lpd?: string; leds?: unknown };
+    const data = e.data as { lpd?: string; leds?: unknown; messages?: unknown; key?: unknown; value?: unknown };
     if (data?.lpd === 'req_status') {
       toProto({ lpd: 'status', state: deviceState });
+      toProto({ lpd: 'lcxl-status', state: lcxlStatus });
+      return;
+    }
+    if (data?.lpd === 'store-set') {
+      if (protoFrame.dataset.game !== game) return;
+      try { setGameStore(window.localStorage, game, data.key, data.value); }
+      catch (error) { showToast(`Game settings not saved — ${errorText(error)}`); }
+      return;
+    }
+    if (data?.lpd === 'lcxl-leds') {
+      if (protoFrame.dataset.game === game && Array.isArray(data.messages) && data.messages.length <= 64) {
+        sendLcxlLeds(data.messages);
+      }
       return;
     }
     if (data?.lpd !== 'leds' || !Array.isArray(data.leds)) return;
@@ -750,6 +786,9 @@
       });
       subscribe<{ index: number; pressed: boolean }>('launchpad-top', (event) => {
         if (protoActive()) toProto({ lpd: 'midi', data: [0xb0, 104 + event.index, event.pressed ? 127 : 0] });
+      });
+      subscribe<{ data: number[] }>('lcxl-midi', (event) => {
+        if (protoActive()) toProto({ lpd: 'lcxl', data: event.data });
       });
       subscribe<[number, number, number][]>('launchpad-frame', (event) => {
         if (mode === 'games') return;
@@ -1023,7 +1062,7 @@
     } catch (e) { showToast(errorText(e)); }
   }
 
-  /** Games own the Launchpad pads and LEDs; every other screen leaves them to the sampler. */
+  /** Games own both controllers' inputs; every other screen leaves them to the sampler. */
   function setMode(next: typeof mode) {
     cancelDrag();
     releaseKeyboard();
@@ -1267,7 +1306,7 @@
           {:else}
             <div class="game-bar" role="tablist" aria-label="Games">
               <span class="silk">GAMES</span>
-              {#each [{ id: 'horde', title: 'HORDE', desc: 'hold the beach' }, { id: 'chess', title: 'CHESS', desc: 'prototype' }, { id: 'xiangqi', title: 'XIANGQI', desc: 'prototype' }, { id: 'cockpit', title: 'COCKPIT', desc: 'prototype' }] as entry}
+              {#each [{ id: 'horde', title: 'HORDE', desc: 'hold the beach' }, { id: 'sector', title: 'SECTOR DEFENSE', desc: 'hold the center' }, { id: 'dustline', title: 'DUSTLINE', desc: 'twin-engine racer' }, { id: 'chess', title: 'CHESS', desc: 'prototype' }, { id: 'xiangqi', title: 'XIANGQI', desc: 'prototype' }, { id: 'cockpit', title: 'COCKPIT', desc: 'prototype' }] as entry}
                 <button class="key" class:on={game === entry.id} role="tab" aria-selected={game === entry.id} onclick={() => { game = entry.id; }}>
                   {entry.title}<small>{entry.desc}</small>
                 </button>
@@ -1287,7 +1326,10 @@
                 <div class="lazy" role="status">Loading Horde…</div>
               {/if}
             {:else}
-              <iframe class="prototype" title={`${game} prototype`} src={`/games/${game}/index.html`} sandbox="allow-scripts" bind:this={protoFrame} onload={protoLoaded}></iframe>
+              {#key game}
+                {@const src = protoSrc(game)}
+                <iframe class="prototype" data-game={game} title={`${game} prototype`} {src} sandbox="allow-scripts" allow="fullscreen" bind:this={protoFrame} onload={protoLoaded}></iframe>
+              {/key}
             {/if}
           </Plate>
         </div>

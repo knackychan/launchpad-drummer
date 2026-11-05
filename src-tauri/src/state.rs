@@ -21,7 +21,7 @@ use crate::startup::{self, LoadPhase, LoadStatus, LoadStep, LoadTracker, Startup
 use crate::store::{prepare_sample, KitManager, LoadedKit};
 use lpd_core::audio::{Command, Event, Sample, Taps};
 use lpd_core::devices::launchpad::LpEvent;
-use lpd_core::devices::lcxl::LcxlEvent;
+use lpd_core::devices::lcxl::{self, LcxlEvent};
 use lpd_core::instrument::{KeysMix, SoundFontKeys};
 use lpd_core::kit::learn;
 use lpd_core::kit::{self, History, Pad, Set};
@@ -148,7 +148,7 @@ struct ConfigFile {
     config: AppConfig,
 }
 
-/// Who owns the Launchpad's pads and LEDs.
+/// Who owns the Launchpad and Launch Control XL inputs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputMode {
     Sampler = 0,
@@ -698,6 +698,16 @@ impl AppState {
             return Ok(None);
         };
         Ok(registry.set(port, role, &status).then(|| registry.list()))
+    }
+
+    /// Route before decoding: games also need buttons outside the sampler's fixed mapping.
+    pub fn on_lcxl_midi(&self, message: &[u8]) -> Option<UiEvent> {
+        if self.input_mode() == InputMode::Game {
+            return Some(UiEvent::LcxlMidi {
+                data: message.to_vec(),
+            });
+        }
+        lcxl::decode(message).and_then(|event| self.on_lcxl(event))
     }
 
     /// A Launch Control XL control. Mixer values are not undoable (UI spec 7.3), but the set is
@@ -2421,6 +2431,77 @@ mod tests {
         state.on_lcxl(LcxlEvent::Fader { ch: 1, value: 127 });
         assert_eq!(save_rev(&state), before + 1);
         assert!(!state.take_mixer_change());
+    }
+
+    #[test]
+    fn game_lcxl_forwards_every_raw_message_without_editing_or_saving() {
+        let (state, mut rx) = app();
+        state.set_input_mode(InputMode::Game);
+        while rx.pop().is_ok() {}
+        let before = serde_json::to_value(state.get_current_set()).unwrap();
+        let revision = save_rev(&state);
+        let messages = [
+            vec![0xb0, 77, 0],
+            vec![0xb0, 84, 127],
+            vec![0xb0, 13, 100],
+            vec![0x90, 41, 127],
+            vec![0x80, 41, 64],
+            vec![0x90, 105, 127],
+            vec![0x90, 105, 0],
+            vec![0xb3, 107, 127],
+            vec![0xb3, 107, 0],
+        ];
+        for message in messages {
+            let event = state.on_lcxl_midi(&message).unwrap();
+            assert_eq!(event.name(), "lcxl-midi");
+            assert_eq!(event.payload(), serde_json::json!({ "data": message }));
+        }
+        for value in 0..=127 {
+            assert_eq!(
+                state.on_lcxl_midi(&[0xb0, 77, value]),
+                Some(UiEvent::LcxlMidi {
+                    data: vec![0xb0, 77, value]
+                })
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(state.get_current_set()).unwrap(),
+            before
+        );
+        assert_eq!(save_rev(&state), revision);
+        assert!(!state.history_state().can_undo);
+        assert!(!state.take_mixer_change());
+        assert!(!state.take_set_change());
+        assert!(state.take_synth_changes().is_empty());
+        assert!(state.take_keys_notice().is_none());
+        assert!(rx.pop().is_err(), "no sampler or synth audio commands");
+    }
+
+    #[test]
+    fn lcxl_returns_to_sampler_mixer_and_synth_after_leaving_games() {
+        let (state, _rx) = app();
+        state.set_input_mode(InputMode::Game);
+        state.on_lcxl_midi(&[0xb0, 78, 0]);
+        state.set_input_mode(InputMode::Sampler);
+        let revision = save_rev(&state);
+        assert_eq!(state.on_lcxl_midi(&[0xb0, 78, 127]), None);
+        assert_eq!(state.mixer().groups[1].volume_db, 6.0);
+        assert_eq!(save_rev(&state), revision + 1);
+        assert!(state.take_mixer_change());
+        state.on_lcxl_midi(&[0x90, 41, 127]);
+        assert!(state.mute_solo().0[0]);
+        state.on_lcxl_midi(&[0x80, 41, 0]);
+        assert!(state.mute_solo().0[0], "release does not toggle mute");
+        state.on_lcxl_midi(&[0xb0, 13, 127]);
+        assert!(!state.take_synth_changes().is_empty());
+        assert!(state.history_state().can_undo);
+        let revision = save_rev(&state);
+        assert_eq!(state.on_lcxl_midi(&[0x90, 105, 127]), None);
+        assert_eq!(
+            save_rev(&state),
+            revision,
+            "unknown sampler buttons remain ignored"
+        );
     }
 
     #[test]
