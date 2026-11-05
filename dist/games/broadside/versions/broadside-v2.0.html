@@ -1,0 +1,2810 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BROADSIDE v2.0 — Co-op Naval Warfare (Gunner: Launch Control XL · Engineer: Launchpad)</title>
+<style>
+  :root {
+    --bg: #070b12;
+    --panel: #0d1420;
+    --panel-border: #1e2c40;
+    --text: #e2e8f0;
+    --dim: #7f8ea3;
+    --sea-foam: #52c2d0;
+    --orange: #ff6b2b;
+    --amber: #f59e0b;
+    --green: #10b981;
+    --red: #ef4444;
+    --cyan: #06b6d4;
+    --violet: #a78bfa;
+    --c-flag: #38bdf8;
+    --c-swift: #2dd4bf;
+    --c-valor: #a3e635;
+  }
+  * { box-sizing: border-box; user-select: none; }
+  html, body {
+    margin: 0; padding: 0; height: 100%; width: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+    overflow: hidden;
+  }
+
+  /* TOP COMMAND HEADER */
+  #bar {
+    height: 44px; background: var(--panel); border-bottom: 1px solid var(--panel-border);
+    display: flex; align-items: center; gap: 10px; padding: 0 12px;
+    font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; z-index: 100; position: relative;
+  }
+  #bar .brand { font-weight: 800; font-size: 13px; letter-spacing: 0.15em; color: var(--sea-foam); white-space: nowrap; }
+  #bar .brand span { color: var(--orange); }
+  #bar .badge { background: #1a2736; color: #94a3b8; padding: 2px 6px; border-radius: 3px; font-size: 9px; font-weight: 700; border: 1px solid #27394e; white-space: nowrap; }
+  .v-sep { width: 1px; height: 22px; background: var(--panel-border); flex: none; }
+  #midi-box { display: flex; align-items: center; gap: 8px; background: #09101a; padding: 3px 8px; border-radius: 4px; border: 1px solid #1a2b3d; }
+  .lamp { width: 9px; height: 9px; border-radius: 50%; background: #334155; box-shadow: inset 0 0 2px #000; flex: none; }
+  .lamp.on { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .lamp.warn { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+  #midiTxt { font-family: monospace; font-size: 10px; color: #94a3b8; white-space: nowrap; }
+  .bar-btn {
+    background: #152232; color: var(--text); border: 1px solid var(--panel-border); border-radius: 3px;
+    padding: 4px 8px; font: inherit; font-size: 10px; cursor: pointer; transition: all 0.15s; text-transform: uppercase; white-space: nowrap;
+  }
+  .bar-btn:hover { border-color: var(--orange); color: #fff; background: #1c2e44; }
+  .bar-btn.active { background: var(--orange); border-color: var(--orange); color: #fff; font-weight: 700; }
+  .bar-select { background: #152232; color: var(--text); border: 1px solid var(--panel-border); border-radius: 3px; padding: 3px 6px; font: inherit; font-size: 10px; text-transform: uppercase; }
+  .keys-hint { margin-left: auto; font-size: 9px; color: #64748b; text-transform: none; letter-spacing: 0; line-height: 1.3; text-align: right; }
+  .keys-hint b { color: #94a3b8; }
+
+  /* MAIN LAYOUT */
+  #viewport { position: absolute; top: 44px; left: 0; right: 0; bottom: 300px; background: #050d18; overflow: hidden; }
+  #sea-canvas { width: 100%; height: 100%; display: block; cursor: crosshair; }
+
+  /* TACTICAL HUD OVERLAY */
+  #tactical-hud { position: absolute; top: 8px; left: 10px; right: 10px; pointer-events: none; display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+  .hud-card {
+    background: rgba(13, 20, 32, 0.82); backdrop-filter: blur(4px); border: 1px solid rgba(82, 194, 208, 0.22);
+    border-radius: 5px; padding: 6px 10px; color: #f1f5f9; font-size: 10px; min-width: 200px;
+  }
+  .hud-title { font-weight: 800; letter-spacing: 0.1em; color: var(--sea-foam); margin-bottom: 3px; display: flex; justify-content: space-between; gap: 8px; }
+  .hud-stat-bar { height: 4px; background: #1e293b; border-radius: 2px; overflow: hidden; margin: 1px 0 3px 0; }
+  .hud-stat-fill { height: 100%; transition: width 0.2s ease; }
+  .fill-hp { background: linear-gradient(90deg, #10b981, #34d399); }
+  .fill-hp.low { background: linear-gradient(90deg, #ef4444, #f87171); }
+  .fill-water { background: linear-gradient(90deg, #0284c7, #38bdf8); }
+  .boat-row { padding: 3px 0 4px; border-bottom: 1px solid rgba(148,163,184,0.12); }
+  .boat-row:last-child { border-bottom: none; }
+  .boat-row .nm { font-weight: 800; letter-spacing: 0.06em; display: flex; justify-content: space-between; gap: 6px; }
+  .boat-row .nm .sel { color: #fff; background: rgba(255,255,255,0.12); padding: 0 4px; border-radius: 2px; font-size: 8px; }
+  .boat-row .bars { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .boat-row .meta { font-size: 8.5px; color: #94a3b8; display: flex; flex-wrap: wrap; gap: 4px 8px; }
+  .boat-row .meta b { color: #e2e8f0; }
+  .flag-tag { font-size: 8px; font-weight: 800; padding: 0 3px; border-radius: 2px; }
+  .ft-fire { background: #7f1d1d; color: #fecaca; }
+  .ft-flood { background: #0c4a6e; color: #bae6fd; }
+  .ft-sys { background: #713f12; color: #fde68a; }
+  .ft-ok { background: #064e3b; color: #a7f3d0; }
+  .ft-sunk { background: #111; color: #f87171; }
+  #center-card { text-align: center; min-width: 170px; }
+  #pd-meter { display: flex; gap: 2px; justify-content: center; margin-top: 3px; }
+  #pd-meter i { width: 12px; height: 5px; background: #1e293b; border-radius: 1px; display: block; }
+  #pd-meter i.on { background: #22c55e; box-shadow: 0 0 4px #22c55e; }
+  #pd-meter i.part { background: #14532d; }
+
+  #toast-layer { position: absolute; top: 96px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 4px; pointer-events: none; }
+  .toast { background: rgba(15,23,42,0.92); border: 1px solid #334155; border-left: 3px solid var(--amber); padding: 3px 10px; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; border-radius: 3px; animation: toastIn 0.15s ease-out; white-space: nowrap; }
+  @keyframes toastIn { from { transform: translateY(-6px); opacity: 0; } to { transform: none; opacity: 1; } }
+  #banner { position: absolute; left: 50%; top: 42%; transform: translate(-50%, -50%); text-align: center; pointer-events: none; display: none; }
+  #banner .big { font-size: 30px; font-weight: 900; letter-spacing: 0.18em; color: #fbbf24; text-shadow: 0 0 18px rgba(251,191,36,0.4); }
+  #banner .small { font-size: 12px; color: #cbd5e1; letter-spacing: 0.08em; margin-top: 4px; }
+
+  /* HARDWARE DECKS AT BOTTOM */
+  #hardware-console { position: absolute; bottom: 0; left: 0; right: 0; height: 300px; background: #090e17; border-top: 2px solid var(--panel-border); display: flex; z-index: 90; }
+  .panel-header { display: flex; justify-content: space-between; align-items: center; font-size: 10px; font-weight: 700; color: #64748b; letter-spacing: 0.08em; margin-bottom: 4px; gap: 8px; }
+  .panel-header b { color: var(--text); }
+  .role-tag { font-size: 9px; font-weight: 900; padding: 1px 6px; border-radius: 3px; letter-spacing: 0.1em; }
+  .role-gunner { background: #7c2d12; color: #fed7aa; }
+  .role-engineer { background: #1e3a8a; color: #bfdbfe; }
+
+  /* LAUNCH CONTROL XL */
+  #lc-xl-panel { flex: 55; background: #0b111a; border-right: 2px solid var(--panel-border); padding: 6px 10px; display: flex; flex-direction: column; min-width: 0; }
+  .channels-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 5px; flex: 1; min-height: 0; }
+  .channel-strip {
+    background: #111a26; border: 1px solid #1e2c3d; border-top: 3px solid var(--boat); border-radius: 5px; padding: 3px 2px;
+    display: flex; flex-direction: column; align-items: center; justify-content: space-between; position: relative; min-width: 0;
+  }
+  .channel-strip.sunk { opacity: 0.35; filter: grayscale(1); }
+  .channel-tag { font-size: 9px; font-weight: 800; color: #94a3b8; display: flex; gap: 4px; align-items: center; }
+  .channel-tag .bt { color: var(--boat); font-size: 8px; }
+  .channel-turret-name { font-size: 7.5px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .knob-wrap { display: flex; flex-direction: column; align-items: center; cursor: ns-resize; }
+  .knob-ring { width: 20px; height: 20px; border-radius: 50%; background: radial-gradient(circle at 35% 35%, #2a384c, #131b26); border: 1px solid #334458; position: relative; box-shadow: 0 2px 4px rgba(0,0,0,0.6); }
+  .knob-ring.led-green { box-shadow: 0 0 6px rgba(34,197,94,0.7); border-color: #22c55e; }
+  .knob-ring.led-red { box-shadow: 0 0 6px rgba(239,68,68,0.7); border-color: #ef4444; }
+  .knob-ring.led-amber { box-shadow: 0 0 6px rgba(245,158,11,0.7); border-color: #f59e0b; }
+  .knob-pointer { position: absolute; width: 2px; height: 8px; background: #38bdf8; top: 1px; left: 8px; transform-origin: 1px 9px; border-radius: 1px; pointer-events: none; }
+  .knob-val { font-size: 7.5px; font-family: monospace; color: #cbd5e1; white-space: nowrap; }
+  .knob-val i { color: #64748b; font-style: normal; }
+  .pad-btn {
+    width: 34px; height: 15px; background: #172333; border: 1px solid #2d415b; border-radius: 3px; font-size: 7px; font-weight: 800; color: #94a3b8;
+    display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background 0.08s; padding: 0; font-family: inherit;
+  }
+  .pad-btn:hover { border-color: #38bdf8; color: #fff; }
+  .pad-btn.g { border-color: #22c55e; color: #bbf7d0; background: #065f46; box-shadow: 0 0 6px rgba(34,197,94,0.5); }
+  .pad-btn.a { border-color: #f59e0b; color: #fde68a; background: #713f12; }
+  .pad-btn.r { border-color: #ef4444; color: #fecaca; background: #7f1d1d; box-shadow: 0 0 6px rgba(239,68,68,0.5); }
+  .pad-btn.off { opacity: 0.5; }
+  .fire-btn { height: 18px; width: 36px; font-size: 8px; }
+  .rack { display: flex; gap: 2px; height: 6px; align-items: center; }
+  .rack i { width: 5px; height: 5px; border-radius: 50%; background: #1e293b; display: block; }
+  .rack i.on { background: #fbbf24; }
+  .rack i.breech { background: #22c55e; border-radius: 1px; }
+  .rack i.transit { background: #a78bfa; }
+  .fader-wrap { width: 100%; display: flex; flex-direction: column; align-items: center; cursor: ns-resize; }
+  .fader-track { width: 6px; height: 46px; background: #0a0f16; border: 1px solid #1e2c3d; border-radius: 3px; position: relative; }
+  .fader-fill { position: absolute; bottom: 0; left: 0; right: 0; background: linear-gradient(to top, #0284c7, #38bdf8); border-radius: 2px; }
+  .fader-cap { position: absolute; width: 22px; height: 11px; left: -9px; background: linear-gradient(180deg, #3d4f68 0%, #1e2838 50%, #151d29 100%); border: 1px solid #556c8b; border-radius: 2px; box-shadow: 0 2px 5px rgba(0,0,0,0.8); display: flex; align-items: center; justify-content: center; }
+  .fader-cap::after { content: ''; width: 14px; height: 2px; background: #38bdf8; }
+  .fader-val { font-size: 7.5px; font-family: monospace; color: #94a3b8; }
+  .xl-side { display: flex; gap: 6px; justify-content: flex-end; margin-top: 4px; font-size: 8px; color: #64748b; align-items: center; }
+
+  .channel-strip.disabled {
+    opacity: 0.35;
+    filter: grayscale(0.8);
+    border-top: 3px solid #334155 !important;
+    background: #0a0f16;
+  }
+  .channel-strip.disabled .fader-wrap,
+  .channel-strip.disabled .knob-wrap,
+  .channel-strip.disabled .pad-btn {
+    pointer-events: none;
+    cursor: not-allowed;
+  }
+  .fader-safe-badge {
+    font-size: 7px;
+    font-weight: 800;
+    color: #f59e0b;
+    text-transform: uppercase;
+    background: rgba(245, 158, 11, 0.12);
+    padding: 1px 4px;
+    border-radius: 2px;
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    margin: 2px 0;
+    text-align: center;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+
+  /* LAUNCHPAD PANEL */
+  #lp-panel { flex: 45; background: #080d14; padding: 6px 10px; display: flex; flex-direction: column; min-width: 0; }
+  .lp-body { flex: 1; display: flex; gap: 12px; min-height: 0; align-items: center; }
+  .launchpad-grid {
+    display: grid; grid-template-columns: repeat(9, 23px); grid-template-rows: repeat(9, 23px); gap: 3px;
+    background: #060a0f; padding: 7px; border-radius: 6px; border: 2px solid #1a2533; box-shadow: inset 0 0 10px rgba(0,0,0,0.8); flex: none;
+  }
+  .lp-pad {
+    width: 23px; height: 23px; border-radius: 3px; background: #10161e; border: 1px solid #1d2733;
+    display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 6.5px; font-weight: 800; color: rgba(255,255,255,0.75);
+    position: relative; overflow: hidden; line-height: 1; text-align: center; letter-spacing: -0.02em;
+  }
+  .lp-pad:hover { outline: 1px solid #94a3b8; }
+  .lp-pad.pressed { transform: scale(0.9); }
+  .lp-round { border-radius: 50%; width: 19px; height: 19px; margin: 2px; font-size: 6px; }
+  .lp-corner { visibility: hidden; }
+  #lpInfo { flex: 1; font-size: 10px; color: #94a3b8; min-width: 0; align-self: stretch; display: flex; flex-direction: column; gap: 4px; overflow: hidden; }
+  #lpInfo .pg { font-size: 12px; font-weight: 900; letter-spacing: 0.1em; }
+  #lpInfo .row { display: flex; justify-content: space-between; gap: 6px; }
+  #lpInfo b { color: #e2e8f0; }
+  .side-legend { display: grid; grid-template-columns: auto 1fr; gap: 1px 6px; font-size: 9px; }
+  .side-legend span:nth-child(odd) { color: #64748b; font-family: monospace; }
+  .lp-legend { display: flex; flex-wrap: wrap; gap: 3px 8px; font-size: 8px; color: #64748b; text-transform: uppercase; margin-top: auto; }
+  .lp-legend span { display: flex; align-items: center; gap: 3px; }
+  .dot { width: 7px; height: 7px; border-radius: 2px; display: inline-block; }
+
+  /* MODAL */
+  #modal-screen { position: absolute; inset: 0; background: rgba(5, 11, 20, 0.86); backdrop-filter: blur(6px); display: none; flex-direction: column; align-items: center; justify-content: center; z-index: 200; }
+  .modal-card { background: #0f172a; border: 2px solid var(--orange); border-radius: 8px; padding: 22px 30px; text-align: center; max-width: 760px; box-shadow: 0 10px 40px rgba(0,0,0,0.9); }
+  .modal-title { font-size: 22px; font-weight: 800; letter-spacing: 0.1em; color: var(--orange); margin-bottom: 8px; }
+  .modal-desc { color: #94a3b8; font-size: 12.5px; line-height: 1.5; margin-bottom: 16px; text-align: left; }
+  .modal-desc .roles { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .modal-desc h4 { margin: 0 0 4px; font-size: 12px; letter-spacing: 0.1em; }
+  .modal-desc ul { margin: 0; padding-left: 16px; }
+  .modal-desc li { margin-bottom: 2px; }
+  .modal-btn { background: var(--orange); color: #fff; border: none; border-radius: 4px; padding: 10px 20px; font-weight: 700; font-size: 13px; letter-spacing: 0.08em; cursor: pointer; text-transform: uppercase; }
+  .modal-btn:hover { background: #ea580c; }
+  .modal-hint { font-size: 10px; color: #64748b; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<!-- TOP COMMAND BAR -->
+<div id="bar">
+  <div class="brand">⚓ BROADSIDE <span>CO-OP</span></div>
+  <div class="badge">v2.0 · P1 GUNNER = LAUNCH CONTROL XL · P2 ENGINEER = LAUNCHPAD</div>
+  <div class="v-sep"></div>
+  <div id="midi-box">
+    <div class="lamp" id="lamp"></div>
+    <div id="midiTxt">MIDI: Initializing...</div>
+    <button class="bar-btn" id="midiBtn">Connect</button>
+  </div>
+  <div class="v-sep"></div>
+  <label style="color:var(--dim);">Fleet:
+    <select class="bar-select" id="fleetConfigSel" title="Boat & Fader Configuration (?boats=1 or ?boats=2)">
+      <option value="1">1 Boat (4 Turrets · CH 1–4) [Default]</option>
+      <option value="2">2 Boats (6 Turrets · CH 1–6) [Swift Escort · Fader 7 Safe]</option>
+      <option value="3">3 Boats (8 Turrets · CH 1–8) [Full Fleet]</option>
+    </select>
+  </label>
+  <div class="v-sep"></div>
+  <label style="color:var(--dim);">Mode:
+    <select class="bar-select" id="gameModeSel">
+      <option value="waves">Co-op: Convoy Waves</option>
+      <option value="boss">Co-op: Leviathan Boss</option>
+    </select>
+  </label>
+  <button class="bar-btn" id="fullSalvoBtn" title="Fire every loaded flagship turret (Space)">🔥 Salvo</button>
+  <button class="bar-btn" id="assistBtn" title="Solo testing: an AI engineer slowly hoists shells, fights fires and intercepts threats">🤖 Eng. Assist: OFF</button>
+  <button class="bar-btn" id="audioToggleBtn">🔊 Audio ON</button>
+  <button class="bar-btn" id="pauseBtn">⏸ Pause</button>
+  <button class="bar-btn" id="resetBtn">Restart</button>
+  <div class="keys-hint">
+    Gunner: <b>1-4</b> fire (1-8 in fleet) · <b>Shift+1-4</b> call ammo · <b>Space</b> salvo<br>
+    Engineer: <b>Q</b> flagship (W/E escorts) · <b>R</b> radar · <b>↑/↓</b> engine · click sea = flak · <b>P</b> pause
+  </div>
+</div>
+
+<!-- OCEAN BATTLEFIELD VIEWPORT -->
+<div id="viewport">
+  <canvas id="sea-canvas"></canvas>
+  <div id="tactical-hud">
+    <div class="hud-card" id="fleet-card" style="min-width:250px;"></div>
+    <div class="hud-card" id="center-card">
+      <div class="hud-title" style="justify-content:center;" id="match-title">WAVE 1</div>
+      <div style="font-size:14px; font-weight:800; color:#f59e0b; margin:1px 0;" id="score-txt">SCORE: 0</div>
+      <div style="font-size:9px; color:#94a3b8;" id="wave-enemies-txt">ENEMIES: 0</div>
+      <div style="font-size:9px; color:#94a3b8; margin-top:3px;">WIND <b id="wind-txt" style="color:#f59e0b;">+0</b> · POINT DEFENSE</div>
+      <div id="pd-meter"></div>
+    </div>
+    <div class="hud-card" id="enemy-card">
+      <div class="hud-title"><span id="enemy-fleet-label">HOSTILE CONVOY</span><span id="threat-txt" style="color:#f87171;">—</span></div>
+      <div style="display:flex; justify-content:space-between; font-size:9px;"><span>FLEET HEALTH</span><span id="e-hp-txt">100%</span></div>
+      <div class="hud-stat-bar"><div class="hud-stat-fill" id="e-hp-fill" style="width:100%; background:linear-gradient(90deg,#ef4444,#f87171);"></div></div>
+      <div style="font-size:9px; color:#94a3b8;" id="incoming-txt">INCOMING: none</div>
+    </div>
+  </div>
+  <div id="toast-layer"></div>
+  <div id="banner"><div class="big" id="bannerBig"></div><div class="small" id="bannerSmall"></div></div>
+</div>
+
+<!-- HARDWARE CONTROL CONSOLE -->
+<div id="hardware-console">
+  <div id="lc-xl-panel">
+    <div class="panel-header">
+      <span><span class="role-tag role-gunner">PLAYER 1 · GUNNER</span> &nbsp;<b>LAUNCH CONTROL XL</b> — FLEET GUNNERY</span>
+      <span id="xl-channels-legend">CH1–4 <b style="color:var(--c-flag)">FLAGSHIP (4 TURRETS)</b> · <span style="color:#f59e0b;font-size:9px;">CH5–8 INACTIVE (FADER 7 SAFEGUARD)</span></span>
+    </div>
+    <div class="channels-grid" id="channelsGrid"></div>
+    <div class="xl-side">
+      <span>Knobs: <b style="color:#cbd5e1">Elevation · Ammo AP/HE · Fine trim</b> &nbsp;|&nbsp; Buttons: <b style="color:#cbd5e1">CALL ammo · FIRE</b> &nbsp;|&nbsp; Fader: <b style="color:#cbd5e1">Charge</b></span>
+      <button class="pad-btn" id="xlSoloBtn" style="width:auto;padding:0 6px;" title="LCXL SOLO button: salvo escorts (CH5-8)">SOLO ▸ ESCORT SALVO</button>
+      <button class="pad-btn" id="xlArmBtn" style="width:auto;padding:0 6px;" title="LCXL REC ARM button: salvo flagship (CH1-4)">REC ARM ▸ FLAGSHIP SALVO</button>
+    </div>
+  </div>
+
+  <div id="lp-panel">
+    <div class="panel-header">
+      <span><span class="role-tag role-engineer">PLAYER 2 · ENGINEER</span> &nbsp;<b>LAUNCHPAD MK2</b> — DAMAGE CONTROL · HELM · POINT DEFENSE</span>
+    </div>
+    <div class="lp-body">
+      <div class="launchpad-grid" id="launchpadGrid"></div>
+      <div id="lpInfo"></div>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL -->
+<div id="modal-screen">
+  <div class="modal-card">
+    <div class="modal-title" id="modalTitle">BROADSIDE</div>
+    <div class="modal-desc" id="modalDesc"></div>
+    <button class="modal-btn" id="modalActionBtn">Start</button>
+    <div class="modal-hint" id="modalHint">…or press any FIRE button on the Launch Control XL / any pad on the Launchpad</div>
+  </div>
+</div>
+
+<script>
+'use strict';
+/* =========================================================================
+   BROADSIDE v2.0 — CO-OP
+   P1 GUNNER   : Launch Control XL — aims & fires the 8 guns of the fleet
+                 (CH1-4 flagship turrets, CH5-6 escort SWIFT, CH7-8 escort VALOR).
+   P2 ENGINEER : Launchpad MK2 — per-boat damage control (fires, floods,
+                 repairs), shell hoists (guns only hold a few ready rounds),
+                 helm orders, and the RADAR page: shoot down incoming rockets,
+                 missiles and torpedoes with point-defense flak / depth charges.
+   ========================================================================= */
+const cv = document.getElementById('sea-canvas');
+const ctx = cv.getContext('2d');
+let W = 1200, H = 500, DPR = 1;
+const GRAV = 150;                 // px/s² for shells
+const WIND_K = 0.9;               // wind (kts) -> px/s² on fleet shells
+const seaY = () => H * 0.70;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const rand = (a, b) => a + Math.random() * (b - a);
+const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+function randn() { let u = 0, v = 0; while (!u) u = Math.random(); while (!v) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+
+/* -------------------------------------------------------------------------
+   1. FLEET DEFINITIONS
+   Launchpad grid layout per boat: rows top (0) -> keel (7), columns stern (0) -> bow (7),
+   so the pad layout mirrors the boat as drawn on screen (bow faces the enemy, right).
+   Tokens: DIR rangefinder, BRG bridge, T# turret, H# shell hoist, M# magazine,
+           BLR boiler, PMP bilge pump, SUP superstructure, HUL hull, . empty
+   ------------------------------------------------------------------------- */
+const BOAT_DEFS = [
+  { key: 'flag', name: 'HMS DREADNOUGHT', short: 'FLAGSHIP', tag: 'FLG', color: '#38bdf8', rgb: [8, 40, 63],
+    len: 290, deck: 18, draft: 12, maxSpeed: 26, maxHp: 140, magMax: 44, rackMax: 3, cycle: 2.4, dmgAP: 26, dmgHE: 18, startX: 0.25,
+    guns: ['T1 Fore-A', 'T2 Fore-B', 'T3 Aft-X', 'T4 Aft-Y'],
+    layout: [
+      '.   .   .   DIR BRG .   .   .  ',
+      '.   T4  T3  SUP SUP T2  T1  .  ',
+      'SUP H4  H3  SUP SUP H2  H1  SUP',
+      'HUL M4  M3  HUL HUL M2  M1  HUL',
+      'HUL HUL BLR BLR BLR BLR HUL HUL',
+      'HUL HUL BLR BLR BLR BLR HUL HUL',
+      '.   HUL HUL HUL HUL HUL HUL .  ',
+      '.   .   PMP PMP PMP PMP .   .  ',
+    ] },
+  { key: 'swift', name: 'DD-1 SWIFT', short: 'SWIFT', tag: 'SWF', color: '#2dd4bf', rgb: [4, 50, 40],
+    len: 160, deck: 12, draft: 8, maxSpeed: 40, maxHp: 70, magMax: 26, rackMax: 4, cycle: 1.3, dmgAP: 15, dmgHE: 11, startX: 0.42,
+    guns: ['Fwd Gun', 'Aft Gun'],
+    layout: [
+      '.   .   .   .   .   .   .   .  ',
+      '.   .   .   DIR BRG .   .   .  ',
+      '.   T2  .   SUP SUP .   T1  .  ',
+      '.   H2  SUP SUP SUP SUP H1  .  ',
+      '.   M2  HUL BLR BLR HUL M1  .  ',
+      '.   HUL HUL BLR BLR HUL HUL .  ',
+      '.   .   HUL HUL HUL HUL .   .  ',
+      '.   .   .   PMP PMP .   .   .  ',
+    ] },
+  { key: 'valor', name: 'DD-2 VALOR', short: 'VALOR', tag: 'VAL', color: '#a3e635', rgb: [28, 52, 4],
+    len: 160, deck: 12, draft: 8, maxSpeed: 40, maxHp: 70, magMax: 26, rackMax: 4, cycle: 1.3, dmgAP: 15, dmgHE: 11, startX: 0.08,
+    guns: ['Fwd Gun', 'Aft Gun'],
+    layout: null /* same as SWIFT */ },
+];
+BOAT_DEFS[2].layout = BOAT_DEFS[1].layout;
+
+const SYS_KINDS = new Set(['bridge', 'director', 'turret', 'hoist', 'magazine', 'boiler', 'pump']);
+const KIND_LABEL = { bridge: 'BRG', director: 'DIR', boiler: 'BLR', pump: 'PMP', sup: '', hull: '' };
+const KIND_NAME = { bridge: 'Bridge (helm)', director: 'Rangefinder (gunner aim arcs)', turret: 'Turret', hoist: 'Shell hoist', magazine: 'Magazine', boiler: 'Boiler (speed)', pump: 'Bilge pump', sup: 'Superstructure', hull: 'Hull compartment' };
+
+function parseToken(tok) {
+  if (tok === '.') return null;
+  const m = tok.match(/^([THM])(\d)$/);
+  if (m) return { kind: { T: 'turret', H: 'hoist', M: 'magazine' }[m[1]], gun: +m[2] - 1 };
+  return { kind: { DIR: 'director', BRG: 'bridge', BLR: 'boiler', PMP: 'pump', SUP: 'sup', HUL: 'hull' }[tok], gun: -1 };
+}
+
+function parseUrlFleetConfig() {
+  const params = new URLSearchParams(window.location.search);
+  const val = params.get('fleet') || params.get('boats') || params.get('faders') || params.get('channels');
+  if (val === '4' || val === '1' || val === 'flagship') return 1;
+  if (val === '6' || val === '2' || val === 'escort' || val === 'swift') return 2;
+  if (val === '8' || val === '3' || val === 'all' || val === 'full') return 3;
+  return 1; // DEFAULT: 1 boat (4 turrets controlled via CH 1-4, avoids broken Fader 7)
+}
+
+/* -------------------------------------------------------------------------
+   2. GLOBAL STATE
+   ------------------------------------------------------------------------- */
+const G = {
+  boatCount: 1,                       // default: 1 boat (4 turrets), up to 2 (6 ch) or 3 (8 ch)
+  mode: 'waves', state: 'title',      // title | play | inter | over
+  paused: false, audioEnabled: true, assist: false,
+  time: 0, rt: 0, score: 0, wave: 1, wind: 4, windTarget: 4, windT: 10,
+  boats: [], guns: [], enemies: [], wrecks: [], shells: [], threats: [], particles: [], bursts: [], splashes: [],
+  spawnQueue: [], spawnT: 0, bossSpawnT: 20, interT: 0, later: [],
+  sel: 0, page: 'boat',               // engineer view: 'boat' (G.sel) | 'radar'
+  held: new Map(), radarFlash: Array.from({ length: 8 }, () => new Array(8).fill(0)),
+  pd: { charges: 8, max: 8, regen: 0 },
+  assistT: 0, uiT: 0, ledT: 0,
+};
+
+function makeFleet() {
+  G.boats = []; G.guns = [];
+  let ch = 0;
+  const defs = BOAT_DEFS.slice(0, G.boatCount);
+  defs.forEach((def, idx) => {
+    const grid = def.layout.map((row, r) => row.trim().split(/\s+/).map((tok, c) => {
+      const p = parseToken(tok);
+      if (!p) return null;
+      return { r, c, kind: p.kind, gun: p.gun, sys: SYS_KINDS.has(p.kind), state: 'ok', fire: 0, prog: 0, dmgUnder: false, growT: 0, spreadT: 0, magT: 0, flash: 0, pumpCd: 0 };
+    }));
+    let c0 = 8, c1 = -1;
+    grid.forEach(row => row.forEach(cell => { if (cell) { c0 = Math.min(c0, cell.c); c1 = Math.max(c1, cell.c); } }));
+    const startX = G.boatCount === 1 ? 0.28 * W : (idx === 0 ? 0.22 * W : (idx === 1 ? 0.42 * W : 0.08 * W));
+    const b = { def, idx, grid, c0, c1, x: startX, y: seaY(), vx: 0, order: 0, evasive: false, smokeT: 0, smokeCd: 0, dcCd: 0,
+      hp: def.maxHp, water: 0, stock: def.magMax, sunk: false, sinkT: 0, tilt: 0, hitFlash: 0, guns: [] };
+    const cells = grid.flat().filter(Boolean);
+    def.guns.forEach((gname, gi) => {
+      const g = { ch: ch++, boat: b, gi, name: gname, elev: idx === 0 ? 34 : 30, trim: 0, power: idx === 0 ? 72 : 60, ammo: gi % 2 ? 'HE' : 'AP',
+        loaded: true, rack: def.rackMax, cycleT: 0, recoil: 0, callT: 0, touchT: 0, hoistCd: 0, transit: [], flashT: 0,
+        tCell: cells.find(x => x.kind === 'turret' && x.gun === gi),
+        hCell: cells.find(x => x.kind === 'hoist' && x.gun === gi),
+        mCell: cells.find(x => x.kind === 'magazine' && x.gun === gi) };
+      g.col = g.tCell.c;
+      b.guns.push(g); G.guns.push(g);
+    });
+    b.cells = cells;
+    G.boats.push(b);
+  });
+  if (G.sel >= G.boatCount) G.sel = 0;
+}
+
+/* -------------------------------------------------------------------------
+   3. PROCEDURAL WEB AUDIO
+   ------------------------------------------------------------------------- */
+let audioCtx = null, master = null;
+const sfxLast = {};
+function initAudio() {
+  if (!audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (AC) { audioCtx = new AC(); master = audioCtx.createGain(); master.gain.value = 0.55; master.connect(audioCtx.destination); }
+  }
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+}
+function noiseBuf(sec, decay) {
+  const n = Math.floor(audioCtx.sampleRate * sec), buf = audioCtx.createBuffer(1, n, audioCtx.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (decay ? Math.exp(-i / (audioCtx.sampleRate * decay)) : 1);
+  return buf;
+}
+function tone(type, f0, f1, dur, vol, t0 = 0) {
+  const now = audioCtx.currentTime + t0, o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o.type = type; o.frequency.setValueAtTime(f0, now); if (f1 !== f0) o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), now + dur);
+  g.gain.setValueAtTime(vol, now); g.gain.exponentialRampToValueAtTime(0.001, now + dur);
+  o.connect(g); g.connect(master); o.start(now); o.stop(now + dur + 0.02);
+}
+function noise(dur, decay, ftype, f0, f1, vol, t0 = 0, q = 1) {
+  const now = audioCtx.currentTime + t0, src = audioCtx.createBufferSource(), f = audioCtx.createBiquadFilter(), g = audioCtx.createGain();
+  src.buffer = noiseBuf(dur, decay); f.type = ftype; f.Q.value = q; f.frequency.setValueAtTime(f0, now);
+  if (f1 !== f0) f.frequency.exponentialRampToValueAtTime(Math.max(20, f1), now + dur);
+  g.gain.setValueAtTime(vol, now); g.gain.exponentialRampToValueAtTime(0.001, now + dur);
+  src.connect(f); f.connect(g); g.connect(master); src.start(now);
+}
+function sfx(name) {
+  if (!G.audioEnabled || !audioCtx) return;
+  const now = performance.now();
+  if (sfxLast[name] && now - sfxLast[name] < 55) return;
+  sfxLast[name] = now;
+  switch (name) {
+    case 'cannon': tone('sine', 140, 25, 0.55, 0.9); noise(0.4, 0.08, 'lowpass', 1200, 80, 0.7); break;
+    case 'cannonLight': tone('sine', 200, 40, 0.35, 0.6); noise(0.3, 0.06, 'lowpass', 2200, 120, 0.5); break;
+    case 'enemyGun': tone('sine', 110, 30, 0.4, 0.35); noise(0.3, 0.07, 'lowpass', 900, 80, 0.3); break;
+    case 'hit': tone('sawtooth', 120, 40, 0.3, 0.4); noise(0.3, 0.06, 'lowpass', 1800, 100, 0.5); break;
+    case 'boom': tone('sawtooth', 90, 25, 0.7, 0.8); noise(0.9, 0.25, 'lowpass', 900, 40, 0.9); break;
+    case 'splash': noise(0.35, 0.12, 'bandpass', 700, 150, 0.25, 0, 0.8); break;
+    case 'alarm': tone('square', 760, 760, 0.12, 0.18); tone('square', 600, 600, 0.12, 0.18, 0.13); break;
+    case 'deny': tone('square', 140, 110, 0.1, 0.15); break;
+    case 'tick': tone('triangle', 900, 900, 0.04, 0.12); break;
+    case 'hoist': noise(0.08, 0.02, 'bandpass', 2400, 1800, 0.35, 0, 4); tone('triangle', 420, 380, 0.08, 0.15); break;
+    case 'clank': noise(0.06, 0.015, 'bandpass', 3200, 2600, 0.35, 0, 6); tone('square', 260, 200, 0.05, 0.1); break;
+    case 'lock': tone('triangle', 520, 780, 0.07, 0.08); break;
+    case 'hiss': noise(0.35, 0.15, 'highpass', 3000, 5000, 0.3); break;
+    case 'weld': tone('sawtooth', 70, 65, 0.18, 0.12); noise(0.18, 0.05, 'highpass', 4000, 6000, 0.15); break;
+    case 'ratchet': for (let i = 0; i < 3; i++) noise(0.03, 0.008, 'bandpass', 2000, 2000, 0.3, i * 0.05, 5); break;
+    case 'fixed': tone('triangle', 660, 660, 0.08, 0.18); tone('triangle', 990, 990, 0.12, 0.18, 0.08); break;
+    case 'pump': noise(0.3, 0.12, 'lowpass', 500, 200, 0.3); break;
+    case 'ping': tone('sine', 1320, 1320, 0.25, 0.22); tone('sine', 1760, 1760, 0.25, 0.12, 0.09); break;
+    case 'flak': noise(0.18, 0.04, 'highpass', 1400, 800, 0.45); tone('square', 300, 90, 0.08, 0.15); break;
+    case 'depth': tone('sine', 70, 30, 0.5, 0.7); noise(0.5, 0.15, 'lowpass', 400, 60, 0.4, 0.05); break;
+    case 'launch': noise(0.6, 0.3, 'bandpass', 600, 2400, 0.25, 0, 2); break;
+    case 'kill': tone('square', 880, 1320, 0.1, 0.15); tone('square', 1320, 1760, 0.1, 0.12, 0.08); break;
+    case 'helm': tone('triangle', 330, 330, 0.06, 0.15); tone('triangle', 440, 440, 0.08, 0.15, 0.07); break;
+    case 'page': tone('sine', 700, 900, 0.06, 0.1); break;
+  }
+}
+
+/* -------------------------------------------------------------------------
+   4. WEB MIDI (Launch Control XL + Launchpad MK2)
+   LCXL (User/Factory template, defaults): faders CC77-84, knob rows CC13-20 / 29-36 / 49-56,
+   Track Focus buttons notes 41-44,57-60, Track Control buttons notes 73-76,89-92,
+   side buttons Device 105 · Mute 106 · Solo 107 · Rec Arm 108.
+   LCXL LEDs: SysEx F0 00 20 29 02 11 78 <template> <index> <value> F7
+     index 0-23 knobs (row-major), 24-31 focus buttons, 32-39 control buttons, 40-43 side.
+     value = 0x0C | red(0-3) | green(0-3)<<4
+   Launchpad MK2 (Session layout): pads note (row*10+col), row 1 = bottom; side col 9;
+   top row CC 104-111. RGB SysEx F0 00 20 29 02 18 0B [led r g b]... F7 (0-63, <=80 LEDs).
+   ------------------------------------------------------------------------- */
+const MIDI = { access: null, lcIn: null, lcOut: null, lpIn: null, lpOut: null, lcTemplate: 0, lcCache: new Map(), lpCache: new Map() };
+
+function updateMidiStatus(text, cls) {
+  document.getElementById('lamp').className = 'lamp ' + cls;
+  document.getElementById('midiTxt').textContent = text;
+}
+function initMIDI() {
+  if (!navigator.requestMIDIAccess) { updateMidiStatus('MIDI: not supported (use Edge/Chrome)', 'warn'); return; }
+  updateMidiStatus('MIDI: requesting access…', 'warn');
+  navigator.requestMIDIAccess({ sysex: true }).then(access => {
+    MIDI.access = access; access.onstatechange = scanMidiDevices; scanMidiDevices();
+  }, err => updateMidiStatus('MIDI: access denied (' + err.name + ')', 'warn'));
+}
+function bestPort(ports, test) {
+  const list = [...ports.values()].filter(p => test((p.name || '').toLowerCase()));
+  list.sort((a, b) => /^midi(in|out)\d/i.test(a.name) - /^midi(in|out)\d/i.test(b.name));
+  return list[0] || null;
+}
+function scanMidiDevices() {
+  if (!MIDI.access) return;
+  const isLC = n => n.includes('launch control xl');
+  const isLP = n => n.includes('launchpad');
+  const lcIn = bestPort(MIDI.access.inputs, isLC), lpIn = bestPort(MIDI.access.inputs, isLP);
+  const lcOut = bestPort(MIDI.access.outputs, isLC), lpOut = bestPort(MIDI.access.outputs, isLP);
+  if (MIDI.lcIn && MIDI.lcIn !== lcIn) MIDI.lcIn.onmidimessage = null;
+  if (MIDI.lpIn && MIDI.lpIn !== lpIn) MIDI.lpIn.onmidimessage = null;
+  if (lcIn) lcIn.onmidimessage = handleLaunchControlMidi;
+  if (lpIn) lpIn.onmidimessage = handleLaunchpadMidi;
+  if (lcOut && lcOut !== MIDI.lcOut) {
+    MIDI.lcCache.clear();
+    try { for (let t = 0; t < 16; t++) lcOut.send([0xB0 + t, 0, 0]); } catch (e) {}   // reset LEDs on every template
+  }
+  if (lpOut && lpOut !== MIDI.lpOut) {
+    MIDI.lpCache.clear();
+    try { lpOut.send([0xF0, 0x00, 0x20, 0x29, 0x02, 0x18, 0x22, 0x00, 0xF7]); lpOut.send([0xF0, 0x00, 0x20, 0x29, 0x02, 0x18, 0x0E, 0x00, 0xF7]); } catch (e) {}
+  }
+  Object.assign(MIDI, { lcIn, lcOut, lpIn, lpOut });
+  const parts = [];
+  if (lcIn) parts.push('LCXL ✓ (gunner)');
+  if (lpIn) parts.push('Launchpad ✓ (engineer)');
+  if (parts.length) updateMidiStatus('MIDI: ' + parts.join(' + '), lcIn && lpIn ? 'on' : 'warn');
+  else updateMidiStatus('MIDI: no devices — mouse & keyboard active', '');
+}
+
+function handleLaunchControlMidi(e) {
+  initAudio();
+  const d = e.data;
+  if (d[0] === 0xF0) {   // template change: F0 00 20 29 02 11 77 tt F7
+    if (d[5] === 0x11 && d[6] === 0x77) { MIDI.lcTemplate = d[7] & 0x0F; MIDI.lcCache.clear(); }
+    return;
+  }
+  const type = d[0] & 0xF0, n = d[1], v = d[2];
+  if (type === 0xB0) {
+    if (n >= 77 && n <= 84) {
+      const ch = n - 77;
+      if (ch < G.guns.length) setGunPower(ch, Math.round(30 + v / 127 * 70));
+    } else if (n >= 13 && n <= 20) {
+      const ch = n - 13;
+      if (ch < G.guns.length) setGunElev(ch, Math.round(5 + v / 127 * 75));
+    } else if (n >= 29 && n <= 36) {
+      const ch = n - 29;
+      if (ch < G.guns.length) setGunAmmo(ch, v < 64 ? 'AP' : 'HE');
+    } else if (n >= 49 && n <= 56) {
+      const ch = n - 49;
+      if (ch < G.guns.length) setGunTrim(ch, Math.round((v - 64) / 63 * 30) / 10);
+    }
+  } else if (type === 0x90 && v > 0) {
+    if (n >= 73 && n <= 76) {
+      const ch = n - 73;
+      if (ch < G.guns.length) pressFire(ch);
+    } else if (n >= 89 && n <= 92) {
+      const ch = n - 89 + 4;
+      if (ch < G.guns.length) pressFire(ch);
+    } else if (n >= 41 && n <= 44) {
+      const ch = n - 41;
+      if (ch < G.guns.length) callAmmo(G.guns[ch], true);
+    } else if (n >= 57 && n <= 60) {
+      const ch = n - 57 + 4;
+      if (ch < G.guns.length) callAmmo(G.guns[ch], true);
+    } else if (n === 108) {
+      pressSalvo('flag');
+    } else if (n === 107) {
+      if (G.boatCount >= 2) pressSalvo('escorts');
+      else pressSalvo('flag');
+    }
+  }
+}
+
+function handleLaunchpadMidi(e) {
+  initAudio();
+  const [st, n, v] = e.data, type = st & 0xF0;
+  if (type === 0x90 || type === 0x80) {
+    const down = type === 0x90 && v > 0, row = Math.floor(n / 10), col = n % 10;
+    if (row < 1 || row > 8) return;
+    if (col >= 1 && col <= 8) { const r = 8 - row, c = col - 1; down ? lpGridDown(r, c) : lpGridUp(r, c); }
+    else if (col === 9 && down) lpSidePress(8 - row);
+  } else if (type === 0xB0 && n >= 104 && n <= 111 && v > 0) {
+    lpTopPress(n - 104);
+  }
+}
+
+/* =========================================================================
+   5. HARDWARE LED OUTPUT ROUTINES (LCXL & LAUNCHPAD MK2)
+   ========================================================================= */
+function sendLcXlLed(template, index, red, green) {
+  if (!MIDI.lcOut) return;
+  const val = 0x0C | (red & 3) | ((green & 3) << 4);
+  const key = `${template}:${index}`;
+  if (MIDI.lcCache.get(key) === val) return;
+  MIDI.lcCache.set(key, val);
+  try {
+    MIDI.lcOut.send([0xF0, 0x00, 0x20, 0x29, 0x02, 0x11, 0x78, template, index, val, 0xF7]);
+  } catch (e) {}
+}
+
+function sendLpColor(led, r, g, b) {
+  if (!MIDI.lpOut) return;
+  const key = led;
+  const val = (r << 12) | (g << 6) | b;
+  if (MIDI.lpCache.get(key) === val) return;
+  MIDI.lpCache.set(key, val);
+  try {
+    MIDI.lpOut.send([0xF0, 0x00, 0x20, 0x29, 0x02, 0x18, 0x0B, led, r & 63, g & 63, b & 63, 0xF7]);
+  } catch (e) {}
+}
+
+function updateHardwareLEDs() {
+  const t = performance.now() * 0.001;
+  const pulseFast = Math.sin(t * 10) > 0;
+  const pulseSlow = Math.sin(t * 4) > 0;
+
+  // --- LAUNCH CONTROL XL FEEDBACK ---
+  if (MIDI.lcOut) {
+    const tmpl = MIDI.lcTemplate;
+    for (let i = 0; i < 8; i++) {
+      if (i < G.guns.length) {
+        const g = G.guns[i];
+        // Row 0 buttons (Track Focus: 24..31) = Ammo Ready / Call Ammo indicator
+        let fRed = 0, fGreen = 0;
+        if (g.rack >= g.boat.def.rackMax) {
+          fGreen = 3; fRed = 0; // full rack: green
+        } else if (g.rack > 0) {
+          fGreen = 2; fRed = 2; // partial rack: amber
+        } else {
+          // empty rack: flashing red/amber
+          fRed = pulseFast ? 3 : 1; fGreen = 0;
+        }
+        sendLcXlLed(tmpl, 24 + i, fRed, fGreen);
+
+        // Row 1 buttons (Track Control: 32..39) = FIRE button state
+        let cRed = 0, cGreen = 0;
+        const turretBroken = g.tCell && g.tCell.state === 'dmg';
+        if (g.boat.sunk || turretBroken) {
+          cRed = 1; cGreen = 0; // damaged / sunk: dim red
+        } else if (g.cycleT > 0) {
+          cRed = 2; cGreen = 1; // cycling: amber
+        } else if (g.rack > 0) {
+          cGreen = 3; cRed = 0; // ready: bright green
+        } else {
+          cRed = pulseSlow ? 3 : 0; // no ammo: pulsing red
+        }
+        sendLcXlLed(tmpl, 32 + i, cRed, cGreen);
+
+        // Knob LEDs: Row 0 (0..7) = Elevation range indicator
+        const elevHue = g.elev > 50 ? 3 : 1;
+        sendLcXlLed(tmpl, 0 + i, 0, elevHue);
+        // Row 1 (8..15) = Ammo type (AP = Amber/Red, HE = Orange/Green)
+        sendLcXlLed(tmpl, 8 + i, g.ammo === 'AP' ? 3 : 1, g.ammo === 'AP' ? 1 : 3);
+        // Row 2 (16..23) = Trim indicator
+        sendLcXlLed(tmpl, 16 + i, g.trim !== 0 ? 2 : 0, 2);
+      } else {
+        // Inactive channel: turn off all LEDs on this strip!
+        sendLcXlLed(tmpl, 24 + i, 0, 0);
+        sendLcXlLed(tmpl, 32 + i, 0, 0);
+        sendLcXlLed(tmpl, 0 + i, 0, 0);
+        sendLcXlLed(tmpl, 8 + i, 0, 0);
+        sendLcXlLed(tmpl, 16 + i, 0, 0);
+      }
+    }
+
+    // Side Buttons (40..43)
+    // 42 = Solo (Escort Salvo): Green if escorts ready
+    const escortsReady = G.boatCount >= 2 && G.guns.slice(4).some(g => g.rack > 0 && g.cycleT <= 0);
+    sendLcXlLed(tmpl, 42, escortsReady ? 0 : 1, escortsReady ? 3 : 0);
+    // 43 = Rec Arm (Flagship Salvo): Green if flagship ready
+    const flagReady = G.guns.slice(0, 4).some(g => g.rack > 0 && g.cycleT <= 0);
+    sendLcXlLed(tmpl, 43, flagReady ? 0 : 1, flagReady ? 3 : 0);
+  }
+
+  // --- LAUNCHPAD MK2 FEEDBACK ---
+  if (MIDI.lpOut) {
+    // 1. Top row round buttons (104..111)
+    // 104: Boat 0 (HMS Dreadnought - Flagship)
+    const b0Active = G.page === 'boat' && G.sel === 0;
+    const b0Hurt = G.boats[0] && (G.boats[0].water > 20 || G.boats[0].cells.some(c => c.fire > 0));
+    sendLpColor(104, b0Hurt && pulseFast ? 55 : (b0Active ? 10 : 2), b0Active ? 45 : 12, b0Active ? 60 : 18);
+
+    // 105: Boat 1 (Swift)
+    if (G.boatCount >= 2 && G.boats[1]) {
+      const b1Active = G.page === 'boat' && G.sel === 1;
+      const b1Hurt = G.boats[1].water > 20 || G.boats[1].cells.some(c => c.fire > 0);
+      sendLpColor(105, b1Hurt && pulseFast ? 55 : (b1Active ? 4 : 1), b1Active ? 55 : 15, b1Active ? 45 : 12);
+    } else {
+      sendLpColor(105, 0, 0, 0); // unlit if not deployed
+    }
+
+    // 106: Boat 2 (Valor)
+    if (G.boatCount >= 3 && G.boats[2]) {
+      const b2Active = G.page === 'boat' && G.sel === 2;
+      const b2Hurt = G.boats[2].water > 20 || G.boats[2].cells.some(c => c.fire > 0);
+      sendLpColor(106, b2Hurt && pulseFast ? 55 : (b2Active ? 30 : 6), b2Active ? 55 : 14, b2Active ? 4 : 1);
+    } else {
+      sendLpColor(106, 0, 0, 0); // unlit if not deployed
+    }
+
+    // 107: Radar / Point Defense mode
+    const isRadar = G.page === 'radar';
+    const threatCount = G.threats.length;
+    if (threatCount > 0) {
+      sendLpColor(107, pulseFast ? 63 : 30, 0, pulseFast ? 40 : 15);
+    } else {
+      sendLpColor(107, isRadar ? 45 : 10, isRadar ? 10 : 2, isRadar ? 55 : 12);
+    }
+
+    // 108: Damage Control Siren (All-hands)
+    sendLpColor(108, G.boats[G.sel].dcCd > 0 ? 10 : 50, G.boats[G.sel].dcCd > 0 ? 10 : 35, 0);
+    // 109: Smoke Screen
+    sendLpColor(109, G.boats[G.sel].smokeCd > 0 ? 8 : 40, G.boats[G.sel].smokeCd > 0 ? 8 : 40, G.boats[G.sel].smokeCd > 0 ? 8 : 40);
+    // 110: Speed Down / Astern
+    sendLpColor(110, 45, 12, 0);
+    // 111: Speed Up / Ahead
+    sendLpColor(111, 0, 50, 20);
+
+    // 2. Side round buttons (Row 0..7 => note (8-i)*10 + 9)
+    for (let i = 0; i < 8; i++) {
+      const note = (8 - i) * 10 + 9;
+      if (i === 0) sendLpColor(note, 0, 45, 20);       // Speed +
+      else if (i === 1) sendLpColor(note, 45, 20, 0);  // Speed -
+      else if (i === 2) sendLpColor(note, 30, 10, 50); // Evasive weave
+      else if (i === 3) sendLpColor(note, 40, 40, 40); // Smoke
+      else if (i === 4) sendLpColor(note, 0, 35, 55);  // All pumps
+      else if (i === 5) sendLpColor(note, 55, 45, 0);  // Hoist all
+      else if (i === 6) sendLpColor(note, G.pd.charges > 0 ? 55 : 10, G.pd.charges > 0 ? 15 : 2, 0); // Flak Barrage
+      else if (i === 7) sendLpColor(note, 0, G.pd.charges > 0 ? 40 : 8, G.pd.charges > 0 ? 55 : 10); // Depth charges
+    }
+
+    // 3. 8x8 Grid (notes 11..18, 21..28, ..., 81..88)
+    if (G.page === 'boat') {
+      const b = G.boats[G.sel];
+      for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c++) {
+          const note = (8 - r) * 10 + (c + 1);
+          const cell = b.grid[r][c];
+          if (!cell) {
+            sendLpColor(note, 0, 0, 0);
+            continue;
+          }
+          if (cell.flash > 0) {
+            sendLpColor(note, 63, 63, 63);
+          } else if (cell.fire > 0) {
+            sendLpColor(note, pulseFast ? 63 : 40, pulseFast ? 15 : 5, 0);
+          } else if (cell.state === 'flood') {
+            sendLpColor(note, 0, pulseFast ? 35 : 15, pulseFast ? 60 : 35);
+          } else if (cell.state === 'dmg') {
+            sendLpColor(note, 50, 25, 0);
+          } else if (cell.kind === 'hoist') {
+            const gun = b.guns.find(g => g.gi === cell.gun);
+            if (gun && gun.callT > 0) {
+              sendLpColor(note, pulseFast ? 63 : 20, pulseFast ? 55 : 15, 0);
+            } else if (gun && gun.rack < b.def.rackMax) {
+              sendLpColor(note, 35, 25, 5);
+            } else {
+              sendLpColor(note, 10, 35, 10);
+            }
+          } else if (cell.kind === 'turret') {
+            const gun = b.guns.find(g => g.gi === cell.gun);
+            if (gun && gun.rack === 0) sendLpColor(note, pulseFast ? 40 : 10, 0, 0);
+            else if (gun && gun.cycleT > 0) sendLpColor(note, 35, 25, 0);
+            else sendLpColor(note, 5, 45, 15);
+          } else if (cell.kind === 'boiler') {
+            sendLpColor(note, 35, 15, 0);
+          } else if (cell.kind === 'pump') {
+            sendLpColor(note, 0, 30, 45);
+          } else if (cell.kind === 'bridge' || cell.kind === 'director') {
+            sendLpColor(note, 20, 15, 45);
+          } else {
+            // standard hull compartment nominal
+            sendLpColor(note, 4, 18, 12);
+          }
+        }
+      }
+    } else {
+      // RADAR / POINT DEFENSE PAGE (8x8)
+      for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c++) {
+          const note = (8 - r) * 10 + (c + 1);
+          if (G.radarFlash[r][c] > 0) {
+            sendLpColor(note, 63, 63, 63);
+            continue;
+          }
+          // Find threats in this sector
+          const threatsHere = getThreatsInRadarCell(r, c);
+          if (threatsHere.length > 0) {
+            const th = threatsHere[0];
+            if (th.type === 'rocket') {
+              sendLpColor(note, pulseFast ? 63 : 35, pulseFast ? 20 : 5, 0);
+            } else if (th.type === 'missile') {
+              sendLpColor(note, pulseFast ? 63 : 25, 0, pulseFast ? 50 : 20);
+            } else { // torpedo
+              sendLpColor(note, 0, pulseFast ? 45 : 15, pulseFast ? 63 : 35);
+            }
+          } else {
+            // Radar background grid: Top 5 rows = sky (dim navy/purple), Bottom 3 rows = sea (dim cyan/teal)
+            if (r < 5) {
+              const sweep = Math.floor((t * 2) % 8) === c;
+              sendLpColor(note, sweep ? 12 : 2, sweep ? 8 : 1, sweep ? 20 : 6);
+            } else {
+              const sweep = Math.floor((t * 2) % 8) === c;
+              sendLpColor(note, 0, sweep ? 18 : 3, sweep ? 24 : 6);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+function getThreatsInRadarCell(r, c) {
+  // r 0..4 = Air threats (rockets/missiles), y from high to low
+  // r 5..7 = Sea threats (torpedoes), depth
+  // c 0..7 = Distance / Range from fleet (0 = at fleet, 7 = distant horizon)
+  const matches = [];
+  G.threats.forEach(th => {
+    let tr, tc;
+    const progress = clamp((th.x - G.boats[0].x) / (W * 0.75), 0, 1);
+    tc = Math.min(7, Math.floor(progress * 8));
+    if (th.type === 'torpedo') {
+      tr = 5 + Math.floor(Math.random() * 2.99); // water band
+    } else {
+      const altNorm = clamp(1 - (th.y / seaY()), 0, 1);
+      tr = Math.min(4, Math.floor((1 - altNorm) * 5));
+    }
+    if (tr === r && tc === c) matches.push(th);
+  });
+  return matches;
+}
+
+/* =========================================================================
+   6. GUNNERY & LCXL FUNCTIONS (PLAYER 1)
+   ========================================================================= */
+function setGunPower(idx, val) {
+  const g = G.guns[idx];
+  if (!g) return;
+  g.power = clamp(val, 30, 100);
+  g.touchT = 0.5;
+  updateChannelStrip(idx);
+}
+
+function setGunElev(idx, val) {
+  const g = G.guns[idx];
+  if (!g) return;
+  g.elev = clamp(val, 5, 80);
+  g.touchT = 0.5;
+  updateChannelStrip(idx);
+}
+
+function setGunAmmo(idx, ammo) {
+  const g = G.guns[idx];
+  if (!g) return;
+  g.ammo = ammo;
+  g.touchT = 0.5;
+  sfx('clank');
+  updateChannelStrip(idx);
+}
+
+function setGunTrim(idx, trim) {
+  const g = G.guns[idx];
+  if (!g) return;
+  g.trim = trim;
+  g.touchT = 0.5;
+  updateChannelStrip(idx);
+}
+
+function callAmmo(g, isGunner = false) {
+  if (!g || g.boat.sunk) return;
+  if (g.rack >= g.boat.def.rackMax) {
+    if (isGunner) toast(`${g.boat.def.short} ${g.name}: Ready-rack is already FULL!`);
+    sfx('deny');
+    return;
+  }
+  if (g.boat.stock <= 0) {
+    toast(`CRITICAL: ${g.boat.def.short} magazine is DEPLETED!`);
+    sfx('deny');
+    return;
+  }
+  if (g.hCell && g.hCell.state === 'dmg') {
+    toast(`HOIST DAMAGED: ${g.boat.def.short} Hoist #${g.gi + 1} needs repairs!`);
+    sfx('deny');
+    return;
+  }
+
+  g.callT = 3.0; // engineer sees pulsing light
+  sfx('hoist');
+
+  // Start ammo transit from deep magazine
+  g.boat.stock--;
+  g.transit.push({ t: 1.2, maxT: 1.2, ammo: g.ammo });
+  toast(`${g.boat.def.short} ${g.name}: Shell called from magazine!`);
+}
+
+function pressFire(idx) {
+  const g = G.guns[idx];
+  if (!g || g.boat.sunk) return;
+
+  // Check turret damage
+  if (g.tCell && g.tCell.state === 'dmg') {
+    toast(`MALFUNCTION: ${g.boat.def.short} Turret #${g.gi + 1} is JAMMED/DAMAGED!`);
+    sfx('deny');
+    return;
+  }
+
+  // Check cycle reload
+  if (g.cycleT > 0) {
+    sfx('deny');
+    return;
+  }
+
+  // Check ready rack
+  if (g.rack <= 0) {
+    toast(`OUT OF AMMO: ${g.boat.def.short} ${g.name} rack empty! Call Engineer for shells!`);
+    sfx('deny');
+    callAmmo(g, true);
+    return;
+  }
+
+  // Consume shell from ready rack
+  g.rack--;
+  g.cycleT = g.boat.def.cycle;
+  g.recoil = 12;
+  g.flashT = 0.15;
+  if (g.tCell) g.tCell.flash = 0.2;
+
+  // Sound
+  if (g.boat.def.key === 'flag') sfx('cannon');
+  else sfx('cannonLight');
+
+  // Calculate projectile velocity & trajectory
+  const rad = ((g.elev + g.trim) * Math.PI) / 180;
+  const muzzleVel = g.power * 2.4;
+  const startX = g.boat.x + (g.gi < 2 ? 40 : -40);
+  const startY = g.boat.y - g.boat.def.deck - 6;
+
+  // Muzzle flash particle blast
+  for (let i = 0; i < 16; i++) {
+    G.particles.push({
+      x: startX + Math.cos(rad) * 25,
+      y: startY - Math.sin(rad) * 25,
+      vx: Math.cos(rad) * muzzleVel * 0.12 + rand(-3, 3),
+      vy: -Math.sin(rad) * muzzleVel * 0.12 + rand(-3, 3),
+      life: rand(0.3, 0.6), maxLife: 0.6,
+      size: rand(4, 10),
+      color: pick(['#ff6b2b', '#fbbf24', '#f59e0b', '#94a3b8'])
+    });
+  }
+
+  // Dispersion calculation (worse if director damaged)
+  const dirDamaged = g.boat.cells.some(c => c.kind === 'director' && c.state === 'dmg');
+  const spreadFactor = dirDamaged ? 0.08 : 0.02;
+  const spreadRad = rad + randn() * spreadFactor;
+  const vx = Math.cos(spreadRad) * muzzleVel + (g.boat.vx * 0.3);
+  const vy = -Math.sin(spreadRad) * muzzleVel;
+
+  G.shells.push({
+    x: startX, y: startY,
+    vx, vy,
+    owner: 'player',
+    gun: g,
+    boat: g.boat,
+    ammo: g.ammo,
+    dmg: g.ammo === 'AP' ? g.boat.def.dmgAP : g.boat.def.dmgHE,
+    life: 8.0
+  });
+
+  updateChannelStrip(idx);
+}
+
+function pressSalvo(group) {
+  let list = [];
+  if (group === 'flag') list = G.guns.slice(0, 4);
+  else if (group === 'escorts') list = G.guns.slice(4);
+  else list = G.guns;
+
+  let delay = 0;
+  list.forEach(g => {
+    if (g.rack > 0 && g.cycleT <= 0 && (!g.tCell || g.tCell.state !== 'dmg')) {
+      setTimeout(() => pressFire(g.ch), delay);
+      delay += 85;
+    }
+  });
+}
+
+/* =========================================================================
+   7. ENGINEER & LAUNCHPAD FUNCTIONS (PLAYER 2)
+   ========================================================================= */
+function lpTopPress(idx) {
+  if (idx >= 0 && idx <= 2) {
+    if (idx >= G.boatCount) {
+      sfx('deny');
+      toast(`${idx === 1 ? 'SWIFT' : 'VALOR'} escort not deployed (Fleet set to ${G.boatCount} boat${G.boatCount > 1 ? 's' : ''}). Switch Fleet in menu!`);
+      return;
+    }
+    // Switch active boat view
+    G.page = 'boat';
+    G.sel = idx;
+    sfx('page');
+    toast(`ENGINEER: Viewing ${G.boats[idx].def.name}`);
+    renderLaunchpadDOM();
+  } else if (idx === 3) {
+    // Switch to RADAR / POINT DEFENSE view
+    G.page = 'radar';
+    sfx('ping');
+    toast(`ENGINEER: TACTICAL RADAR & POINT DEFENSE ONLINE`);
+    renderLaunchpadDOM();
+  } else if (idx === 4) {
+    // All-Hands Damage Control Siren
+    triggerFleetDC(G.boats[G.sel]);
+  } else if (idx === 5) {
+    // Smoke screen
+    deploySmoke(G.boats[G.sel]);
+  } else if (idx === 6) {
+    // Speed down
+    adjustFleetSpeed(-1);
+  } else if (idx === 7) {
+    // Speed up
+    adjustFleetSpeed(1);
+  }
+}
+
+function lpSidePress(idx) {
+  const b = G.boats[G.sel];
+  if (idx === 0) adjustFleetSpeed(1);
+  else if (idx === 1) adjustFleetSpeed(-1);
+  else if (idx === 2) toggleEvasive(b);
+  else if (idx === 3) deploySmoke(b);
+  else if (idx === 4) emergencyBilgePumps(b);
+  else if (idx === 5) hoistAllGuns(b);
+  else if (idx === 6) fireFlakBarrage();
+  else if (idx === 7) dropDepthChargeSpread();
+}
+
+function adjustFleetSpeed(delta) {
+  const b = G.boats[G.sel];
+  if (b.sunk) return;
+  // Boilers check
+  const boilersWorking = b.cells.filter(c => c.kind === 'boiler' && c.state === 'ok').length;
+  if (delta > 0 && boilersWorking === 0) {
+    toast(`ENGINE FAILURE: All boilers damaged on ${b.def.short}!`);
+    sfx('deny');
+    return;
+  }
+  b.order = clamp(b.order + delta, -1, 2);
+  sfx('helm');
+  const spdLabels = { '-1': 'FULL ASTERN', '0': 'ALL STOP', '1': 'STANDARD AHEAD', '2': 'FLANK SPEED' };
+  toast(`${b.def.short} ENGINE ORDER: ${spdLabels[b.order]}`);
+}
+
+function toggleEvasive(b) {
+  if (b.sunk) return;
+  b.evasive = !b.evasive;
+  sfx('helm');
+  toast(`${b.def.short} EVASIVE WEAVING: ${b.evasive ? 'ENGAGED' : 'DISENGAGED'}`);
+}
+
+function deploySmoke(b) {
+  if (b.smokeCd > 0 || b.sunk) { sfx('deny'); return; }
+  b.smokeCd = 12;
+  b.smokeT = 7.0;
+  sfx('hiss');
+  toast(`${b.def.short} DEPLOYED SMOKE SCREEN!`);
+  for (let i = 0; i < 45; i++) {
+    G.particles.push({
+      x: b.x + rand(-50, 50),
+      y: b.y - rand(10, 30),
+      vx: rand(-4, 1) + (G.wind * 0.08),
+      vy: rand(-2, -0.5),
+      life: rand(3.0, 5.0), maxLife: 5.0,
+      size: rand(18, 36),
+      color: 'rgba(203, 213, 225, 0.45)'
+    });
+  }
+}
+
+function triggerFleetDC(b) {
+  if (b.dcCd > 0 || b.sunk) { sfx('deny'); return; }
+  b.dcCd = 15;
+  sfx('alarm');
+  toast(`ALL-HANDS DAMAGE CONTROL on ${b.def.short}!`);
+  // Extinguishes half fires and patches breaches
+  b.cells.forEach(c => {
+    if (c.fire > 0) c.fire = Math.max(0, c.fire - 50);
+    if (c.state === 'flood') c.state = 'ok';
+  });
+  b.water = Math.max(0, b.water - 25);
+  renderLaunchpadDOM();
+}
+
+function emergencyBilgePumps(b) {
+  const pumps = b.cells.filter(c => c.kind === 'pump' && c.state === 'ok');
+  if (pumps.length === 0) {
+    toast(`PUMP FAILURE: All bilge pumps knocked out on ${b.def.short}!`);
+    sfx('deny');
+    return;
+  }
+  sfx('pump');
+  b.water = Math.max(0, b.water - 18 * pumps.length);
+  toast(`BILGE PUMPS MAX POWER: Water pumped out!`);
+  pumps.forEach(p => p.flash = 0.4);
+}
+
+function hoistAllGuns(b) {
+  let hoisted = 0;
+  b.guns.forEach(g => {
+    if (g.rack < b.def.rackMax && b.stock > 0) {
+      callAmmo(g, false);
+      hoisted++;
+    }
+  });
+  if (hoisted > 0) toast(`ENGINEER: Hoisted shells for all ${b.def.short} turrets!`);
+  else sfx('deny');
+}
+
+function lpGridDown(r, c) {
+  if (G.page === 'boat') {
+    handleBoatGridPress(r, c);
+  } else {
+    handleRadarGridPress(r, c);
+  }
+}
+
+function lpGridUp(r, c) {
+  // Key release
+}
+
+function handleBoatGridPress(r, c) {
+  const b = G.boats[G.sel];
+  const cell = b.grid[r][c];
+  if (!cell || b.sunk) return;
+
+  cell.flash = 0.3;
+
+  // 1. Fight Fire
+  if (cell.fire > 0) {
+    cell.fire = Math.max(0, cell.fire - 45);
+    sfx('hiss');
+    if (cell.fire <= 0) {
+      cell.fire = 0;
+      sfx('fixed');
+      toast(`FIRE EXTINGUISHED in ${KIND_NAME[cell.kind] || 'compartment'}!`);
+    } else {
+      toast(`FIGHTING FIRE (${Math.round(cell.fire)}% remaining)...`);
+    }
+    renderLaunchpadDOM();
+    return;
+  }
+
+  // 2. Patch Flooding / Breach
+  if (cell.state === 'flood') {
+    cell.state = 'ok';
+    b.water = Math.max(0, b.water - 12);
+    sfx('weld');
+    toast(`HULL BREACH WELDED in row ${r + 1}!`);
+    renderLaunchpadDOM();
+    return;
+  }
+
+  // 3. Repair Damaged System
+  if (cell.state === 'dmg') {
+    cell.state = 'ok';
+    sfx('ratchet');
+    sfx('fixed');
+    toast(`REPAIRED: ${KIND_NAME[cell.kind] || 'system'} back online!`);
+    renderLaunchpadDOM();
+    return;
+  }
+
+  // 4. Manual Hoist Crank (Rapid shell delivery)
+  if (cell.kind === 'hoist' || cell.kind === 'magazine') {
+    const gun = b.guns.find(g => g.gi === cell.gun);
+    if (gun) {
+      if (gun.transit.length > 0) {
+        // accelerate transit
+        gun.transit[0].t = 0;
+        sfx('ratchet');
+        toast(`HOIST CRANKED: Shell delivered immediately to ${gun.name}!`);
+      } else {
+        callAmmo(gun, false);
+      }
+    }
+    renderLaunchpadDOM();
+    return;
+  }
+
+  // 5. Bilge Pump manual stroke
+  if (cell.kind === 'pump') {
+    sfx('pump');
+    b.water = Math.max(0, b.water - 10);
+    toast(`BILGE PUMP ACTIVATED (-10% water)`);
+    renderLaunchpadDOM();
+    return;
+  }
+
+  // Routine inspect
+  sfx('tick');
+}
+
+/* =========================================================================
+   POINT DEFENSE: RADAR INTERCEPTIONS (ROCKETS, MISSILES, TORPEDOES)
+   ========================================================================= */
+function handleRadarGridPress(r, c) {
+  if (G.pd.charges <= 0) {
+    toast(`POINT DEFENSE RELOADING! Wait for charges!`);
+    sfx('deny');
+    return;
+  }
+
+  G.pd.charges--;
+  G.radarFlash[r][c] = 0.35;
+
+  const isAir = r < 5;
+  const sectorProg = c / 7;
+  const targetX = G.boats[0].x + sectorProg * (W * 0.75);
+
+  if (isAir) {
+    // Air sector Flak Interceptor Burst
+    const altProg = 1 - (r / 4);
+    const targetY = seaY() - (altProg * (H * 0.65));
+    sfx('flak');
+    createFlakBurst(targetX, targetY);
+    interceptThreatsInRadius(targetX, targetY, 95, ['rocket', 'missile']);
+  } else {
+    // Water sector Depth Charge / Anti-Torpedo Drop
+    const depthY = seaY() + rand(4, 18);
+    sfx('depth');
+    createWaterExplosion(targetX, depthY);
+    interceptThreatsInRadius(targetX, depthY, 110, ['torpedo']);
+  }
+
+  renderLaunchpadDOM();
+}
+
+function fireFlakBarrage() {
+  if (G.pd.charges <= 0) { sfx('deny'); return; }
+  G.pd.charges = Math.max(0, G.pd.charges - 2);
+  sfx('flak');
+  toast(`FLAK BARRAGE UNLEASHED! Airspace saturated!`);
+  for (let i = 0; i < 4; i++) {
+    const rx = G.boats[0].x + rand(80, 500);
+    const ry = seaY() - rand(80, 260);
+    createFlakBurst(rx, ry);
+    interceptThreatsInRadius(rx, ry, 130, ['rocket', 'missile']);
+  }
+}
+
+function dropDepthChargeSpread() {
+  if (G.pd.charges <= 0) { sfx('deny'); return; }
+  G.pd.charges = Math.max(0, G.pd.charges - 2);
+  sfx('depth');
+  toast(`DEPTH CHARGE SPREAD DROPPED! Anti-torpedo screen active!`);
+  for (let i = 0; i < 4; i++) {
+    const rx = G.boats[0].x + rand(40, 420);
+    const ry = seaY() + rand(4, 15);
+    createWaterExplosion(rx, ry);
+    interceptThreatsInRadius(rx, ry, 140, ['torpedo']);
+  }
+}
+
+function interceptThreatsInRadius(x, y, radius, validTypes) {
+  let intercepted = 0;
+  for (let i = G.threats.length - 1; i >= 0; i--) {
+    const th = G.threats[i];
+    if (!validTypes.includes(th.type)) continue;
+    const dist = Math.hypot(th.x - x, th.y - y);
+    if (dist <= radius) {
+      // Destroy incoming projectile!
+      G.threats.splice(i, 1);
+      intercepted++;
+      G.score += th.type === 'missile' ? 350 : (th.type === 'torpedo' ? 300 : 200);
+      createExplosion(th.x, th.y, true, 28);
+      sfx('kill');
+      toast(`DIRECT HIT: Incoming ${th.type.toUpperCase()} INTERCEPTED!`);
+    }
+  }
+  return intercepted;
+}
+
+/* =========================================================================
+   8. COMBAT SIMULATION & THREAT PHYSICS (ROCKETS, MISSILES, TORPEDOES)
+   ========================================================================= */
+function spawnWave() {
+  G.enemies = [];
+  G.threats = [];
+  G.shells = [];
+  const startX = W * 0.76;
+
+  if (G.mode === 'boss') {
+    const bossHp = G.boatCount === 1 ? 380 : (G.boatCount === 2 ? 470 : 550);
+    G.enemies.push({
+      type: 'boss',
+      name: 'SMS KAISER LEVIATHAN',
+      x: startX + 60, y: seaY(),
+      hp: bossHp, maxHp: bossHp,
+      w: 280, h: 48,
+      speed: 6,
+      fireTimer: 2.5,
+      rocketTimer: 4.0,
+      missileTimer: 7.0,
+      torpTimer: 6.0
+    });
+  } else {
+    // Convoy wave: scale with fleet size
+    const count = G.boatCount === 1 ? 1 + Math.min(3, G.wave) : (G.boatCount === 2 ? 2 + Math.min(3, G.wave) : 2 + Math.min(4, G.wave));
+    for (let i = 0; i < count; i++) {
+      let etype = 'gunboat';
+      if (i === 1) etype = 'rocket_barge';
+      else if (i === 2) etype = 'torpedo_boat';
+      else if (i >= 3) etype = G.wave >= 3 ? 'cruiser' : 'rocket_barge';
+
+      const hpMap = { gunboat: 50, rocket_barge: 65, torpedo_boat: 55, cruiser: 130 };
+      G.enemies.push({
+        type: etype,
+        name: etype === 'rocket_barge' ? 'Rocket Artillery Barge' : (etype === 'torpedo_boat' ? 'Torpedo Raider' : (etype === 'cruiser' ? 'Armored Cruiser' : 'Patrol Gunboat')),
+        x: startX + i * 140 + rand(-20, 20),
+        y: seaY(),
+        hp: hpMap[etype], maxHp: hpMap[etype],
+        w: etype === 'cruiser' ? 160 : (etype === 'rocket_barge' ? 110 : 85),
+        h: etype === 'cruiser' ? 34 : 22,
+        speed: etype === 'torpedo_boat' ? 16 : 10,
+        fireTimer: rand(1.5, 3.0),
+        rocketTimer: rand(3.0, 5.0),
+        missileTimer: rand(5.0, 8.0),
+        torpTimer: rand(4.0, 7.0)
+      });
+    }
+  }
+
+  document.getElementById('wave-enemies-txt').textContent = `ENEMIES: ${G.enemies.length}`;
+  document.getElementById('match-title').textContent = G.mode === 'boss' ? 'LEVIATHAN BATTLE' : `WAVE ${G.wave}`;
+}
+
+function updateSimulation(dt) {
+  G.time += dt;
+
+  // 1. Wind oscillation
+  G.windT -= dt;
+  if (G.windT <= 0) {
+    G.windT = rand(8, 15);
+    G.windTarget = rand(-14, 14);
+  }
+  G.wind += (G.windTarget - G.wind) * dt * 0.4;
+
+  // 2. Point Defense Charges regeneration
+  if (G.pd.charges < G.pd.max) {
+    G.pd.regen += dt;
+    if (G.pd.regen >= 1.6) { // 1.6s per charge
+      G.pd.charges++;
+      G.pd.regen = 0;
+    }
+  }
+
+  // 3. Update fleet boats
+  G.boats.forEach(b => {
+    if (b.sunk) {
+      b.sinkT += dt;
+      b.y = seaY() + Math.min(40, b.sinkT * 8);
+      b.tilt = Math.min(0.25, b.sinkT * 0.05);
+      return;
+    }
+
+    // Cooldowns
+    if (b.smokeCd > 0) b.smokeCd = Math.max(0, b.smokeCd - dt);
+    if (b.smokeT > 0) b.smokeT = Math.max(0, b.smokeT - dt);
+    if (b.dcCd > 0) b.dcCd = Math.max(0, b.dcCd - dt);
+    if (b.hitFlash > 0) b.hitFlash = Math.max(0, b.hitFlash - dt);
+
+    // Speed calculation based on order and working boilers
+    const workingBoilers = b.cells.filter(c => c.kind === 'boiler' && c.state === 'ok').length;
+    const boilerEfficiency = b.def.key === 'flag' ? (workingBoilers / 4) : (workingBoilers / 2);
+    const targetVx = (b.order * (b.def.maxSpeed * 0.5) * boilerEfficiency) + (b.evasive ? Math.sin(G.time * 3) * 6 : 0);
+    b.vx += (targetVx - b.vx) * dt * 1.2;
+    b.x = clamp(b.x + b.vx * dt, 40, W * 0.62);
+
+    // Float physics with sea waves & flooding listing
+    const seaLev = seaY() + Math.sin(G.time * 2 + b.idx) * 4;
+    const sinkOffset = (b.water / 100) * 16;
+    b.y = seaLev + sinkOffset;
+    b.tilt = Math.sin(G.time * 2.2 + b.idx) * 0.02 + (b.water / 100) * 0.04;
+
+    // Compartment fire & flood spread
+    b.cells.forEach(cell => {
+      if (cell.flash > 0) cell.flash = Math.max(0, cell.flash - dt);
+      if (cell.fire > 0) {
+        cell.fire = Math.min(100, cell.fire + dt * 4); // fire grows!
+        b.hp = Math.max(0, b.hp - dt * 0.35);
+
+        // Fire particle sparks
+        if (Math.random() > 0.6) {
+          G.particles.push({
+            x: b.x + (cell.c - 3.5) * 16 + rand(-6, 6),
+            y: b.y - b.def.deck - (7 - cell.r) * 4,
+            vx: rand(-1, 1) + (G.wind * 0.05),
+            vy: -rand(2, 4),
+            life: rand(0.3, 0.7), maxLife: 0.7,
+            size: rand(3, 7),
+            color: pick(['#ff6b2b', '#ef4444', '#f59e0b', '#334155'])
+          });
+        }
+
+        // Fire spread to adjacent cells
+        cell.spreadT = (cell.spreadT || 0) + dt;
+        if (cell.spreadT > 6.0 && cell.fire > 60) {
+          cell.spreadT = 0;
+          const neighbors = b.cells.filter(n => Math.abs(n.r - cell.r) + Math.abs(n.c - cell.c) === 1 && n.fire <= 0);
+          if (neighbors.length > 0) {
+            pick(neighbors).fire = 25;
+            toast(`FIRE SPREADING on ${b.def.short}!`);
+          }
+        }
+      }
+
+      // Flooding breach accumulates water
+      if (cell.state === 'flood') {
+        const workingPumps = b.cells.filter(c => c.kind === 'pump' && c.state === 'ok').length;
+        const netFlood = Math.max(0.1, 0.9 - workingPumps * 0.25);
+        b.water = Math.min(100, b.water + dt * netFlood);
+      }
+    });
+
+    // Check sinking
+    if (b.water >= 100 || b.hp <= 0) {
+      if (!b.sunk) {
+        b.sunk = true;
+        sfx('boom');
+        toast(`MAYDAY: ${b.def.name} IS SINKING!`);
+        createExplosion(b.x, b.y, true, 40);
+        checkFleetSurvival();
+      }
+    }
+  });
+
+  // 4. Update Turrets & Ammo Transits
+  G.guns.forEach(g => {
+    if (g.recoil > 0) g.recoil = Math.max(0, g.recoil - dt * 28);
+    if (g.flashT > 0) g.flashT = Math.max(0, g.flashT - dt);
+    if (g.callT > 0) g.callT = Math.max(0, g.callT - dt);
+
+    // Gun cycle reload
+    if (g.cycleT > 0) {
+      g.cycleT = Math.max(0, g.cycleT - dt);
+      if (g.cycleT <= 0 && g.rack > 0) {
+        sfx('lock');
+      }
+    }
+
+    // Ammo transit along hoist
+    for (let i = g.transit.length - 1; i >= 0; i--) {
+      const tr = g.transit[i];
+      tr.t -= dt;
+      if (tr.t <= 0) {
+        g.transit.splice(i, 1);
+        if (g.rack < g.boat.def.rackMax) {
+          g.rack++;
+          sfx('clank');
+          if (g.rack === 1 && g.cycleT <= 0) sfx('lock');
+        }
+      }
+    }
+  });
+
+  // 5. Update Shells (Ballistics)
+  for (let i = G.shells.length - 1; i >= 0; i--) {
+    const s = G.shells[i];
+    s.x += s.vx * dt + (G.wind * WIND_K) * dt;
+    s.vy += GRAV * dt;
+    s.y += s.vy * dt;
+    s.life -= dt;
+
+    // Shell trail
+    if (Math.random() > 0.35) {
+      G.particles.push({
+        x: s.x, y: s.y,
+        vx: -s.vx * 0.04, vy: -s.vy * 0.04,
+        life: 0.25, maxLife: 0.25,
+        size: 2,
+        color: s.ammo === 'HE' ? '#ff6b2b' : '#38bdf8'
+      });
+    }
+
+    // Water impact
+    const waterLevel = seaY() + Math.sin(s.x * 0.015 + G.time * 2) * 5;
+    if (s.y >= waterLevel) {
+      createWaterSplash(s.x, waterLevel);
+      sfx('splash');
+      G.shells.splice(i, 1);
+      continue;
+    }
+
+    // Player shells hitting enemies
+    if (s.owner === 'player') {
+      let hit = false;
+      for (let eIdx = G.enemies.length - 1; eIdx >= 0; eIdx--) {
+        const e = G.enemies[eIdx];
+        if (checkEnemyHit(e, s)) {
+          e.hp -= s.dmg;
+          G.score += 120;
+          createExplosion(s.x, s.y, s.ammo === 'HE', 18);
+          sfx(s.dmg > 20 ? 'hit' : 'cannonLight');
+
+          if (e.hp <= 0) {
+            createExplosion(e.x, seaY(), true, 45);
+            sfx('boom');
+            toast(`ENEMY NEUTRALIZED: ${e.name}!`);
+            G.enemies.splice(eIdx, 1);
+            G.score += 600;
+            document.getElementById('wave-enemies-txt').textContent = `ENEMIES: ${G.enemies.length}`;
+            if (G.enemies.length === 0) {
+              onWaveVictory();
+            }
+          }
+          hit = true;
+          break;
+        }
+      }
+      if (hit) {
+        G.shells.splice(i, 1);
+        continue;
+      }
+    } else {
+      // Enemy shells hitting fleet boats
+      let hitBoat = false;
+      for (let b of G.boats) {
+        if (!b.sunk && checkBoatHit(b, s)) {
+          applyBoatDamage(b, s.dmg, s.ammo);
+          hitBoat = true;
+          break;
+        }
+      }
+      if (hitBoat) {
+        G.shells.splice(i, 1);
+        continue;
+      }
+    }
+
+    // Expired shell
+    if (s.life <= 0 || s.x < -100 || s.x > W + 200) {
+      G.shells.splice(i, 1);
+    }
+  }
+
+  // 6. Update Threats (Rockets, Missiles, Torpedoes)
+  for (let i = G.threats.length - 1; i >= 0; i--) {
+    const th = G.threats[i];
+    th.life -= dt;
+
+    if (th.type === 'rocket') {
+      // Fast ballistic rocket
+      th.x += th.vx * dt;
+      th.vy += (GRAV * 0.7) * dt;
+      th.y += th.vy * dt;
+
+      // Rocket flame trail
+      G.particles.push({
+        x: th.x - th.vx * 0.02, y: th.y - th.vy * 0.02,
+        vx: -th.vx * 0.05 + rand(-1, 1), vy: -th.vy * 0.05 + rand(-1, 1),
+        life: 0.35, maxLife: 0.35, size: rand(3, 6),
+        color: pick(['#ff6b2b', '#fbbf24', '#ffffff', '#7f1d1d'])
+      });
+    } else if (th.type === 'missile') {
+      // Guided cruise missile tracking flagship
+      const target = G.boats[0];
+      const targetY = target.y - target.def.deck - 10;
+      const angleToTarget = Math.atan2(targetY - th.y, target.x - th.x);
+      th.angle += (angleToTarget - th.angle) * dt * 2.2;
+      th.vx = Math.cos(th.angle) * th.spd;
+      th.vy = Math.sin(th.angle) * th.spd;
+      th.x += th.vx * dt;
+      th.y += th.vy * dt;
+
+      // White dense smoke exhaust
+      G.particles.push({
+        x: th.x, y: th.y,
+        vx: -th.vx * 0.08, vy: -th.vy * 0.08,
+        life: 0.5, maxLife: 0.5, size: rand(4, 8),
+        color: 'rgba(226, 232, 240, 0.7)'
+      });
+    } else if (th.type === 'torpedo') {
+      // High-speed water skimming torpedo
+      th.x += th.vx * dt;
+      th.y = seaY() + Math.sin(th.x * 0.04 + G.time * 3) * 3 + 4;
+
+      // Torpedo bubbling wake
+      if (Math.random() > 0.4) {
+        G.particles.push({
+          x: th.x + 8, y: th.y,
+          vx: rand(1, 3), vy: -rand(0.5, 1.5),
+          life: 0.6, maxLife: 0.6, size: rand(2, 5),
+          color: 'rgba(224, 242, 254, 0.85)'
+        });
+      }
+    }
+
+    // Check threat hitting fleet boats!
+    let threatHit = false;
+    for (let b of G.boats) {
+      if (!b.sunk && checkThreatHitBoat(b, th)) {
+        if (th.type === 'rocket') {
+          // Rocket explosion: heavy fires!
+          applyBoatDamage(b, 20, 'HE');
+          const randCell = pick(b.cells.filter(c => c.r <= 2));
+          if (randCell) randCell.fire = 90;
+          toast(`ROCKET IMPACT on ${b.def.short}! Heavy fire started!`);
+        } else if (th.type === 'missile') {
+          // Cruise missile: direct citadel / superstructure blow
+          applyBoatDamage(b, 35, 'AP');
+          const sysCell = pick(b.cells.filter(c => c.sys && c.state === 'ok'));
+          if (sysCell) sysCell.state = 'dmg';
+          toast(`CRUISE MISSILE HIT on ${b.def.short}! System severed!`);
+        } else if (th.type === 'torpedo') {
+          // Torpedo: severe waterline hull breach & flood!
+          applyBoatDamage(b, 40, 'AP');
+          const keelCell = pick(b.cells.filter(c => c.r >= 6));
+          if (keelCell) keelCell.state = 'flood';
+          b.water = Math.min(100, b.water + 32);
+          toast(`TORPEDO DETONATION on ${b.def.short}! Massive flooding!`);
+        }
+        createExplosion(th.x, th.y, true, 35);
+        sfx('boom');
+        threatHit = true;
+        break;
+      }
+    }
+
+    if (threatHit || th.life <= 0 || th.x < -60 || th.y > H + 50) {
+      G.threats.splice(i, 1);
+    }
+  }
+
+  // 7. Enemy AI firing & threat launches
+  G.enemies.forEach(e => {
+    // Artillery fire
+    e.fireTimer -= dt;
+    if (e.fireTimer <= 0) {
+      e.fireTimer = rand(2.2, 4.0);
+      const targetBoat = pick(G.boats.filter(b => !b.sunk)) || G.boats[0];
+      const rad = rand(20, 36) * Math.PI / 180;
+      const dist = Math.abs(e.x - targetBoat.x);
+      const power = Math.sqrt((dist * GRAV) / Math.sin(2 * rad)) * rand(0.92, 1.08);
+      G.shells.push({
+        x: e.x - 20, y: seaY() - e.h - 6,
+        vx: -Math.cos(rad) * power,
+        vy: -Math.sin(rad) * power,
+        owner: 'enemy',
+        ammo: Math.random() > 0.5 ? 'HE' : 'AP',
+        dmg: 18, life: 8.0
+      });
+      sfx('enemyGun');
+    }
+
+    // Rocket Barrage launch (Rocket barges and Boss)
+    if (e.type === 'rocket_barge' || e.type === 'boss') {
+      e.rocketTimer -= dt;
+      if (e.rocketTimer <= 0) {
+        e.rocketTimer = rand(6.0, 9.0);
+        launchEnemyRocketVolley(e);
+      }
+    }
+
+    // Cruise Missile launch (Cruisers and Boss)
+    if (e.type === 'cruiser' || e.type === 'boss') {
+      e.missileTimer -= dt;
+      if (e.missileTimer <= 0) {
+        e.missileTimer = rand(9.0, 14.0);
+        launchEnemyCruiseMissile(e);
+      }
+    }
+
+    // Torpedo launch (Torpedo boats and Boss)
+    if (e.type === 'torpedo_boat' || e.type === 'boss') {
+      e.torpTimer -= dt;
+      if (e.torpTimer <= 0) {
+        e.torpTimer = rand(8.0, 12.0);
+        launchEnemyTorpedo(e);
+      }
+    }
+  });
+
+  // 8. Update Bursts, Flak, Particles, Splashes
+  for (let i = G.bursts.length - 1; i >= 0; i--) {
+    const b = G.bursts[i];
+    b.t += dt;
+    if (b.t >= b.dur) G.bursts.splice(i, 1);
+  }
+
+  for (let i = G.splashes.length - 1; i >= 0; i--) {
+    const sp = G.splashes[i];
+    sp.t += dt;
+    if (sp.t >= sp.dur) G.splashes.splice(i, 1);
+  }
+
+  for (let i = G.particles.length - 1; i >= 0; i--) {
+    const p = G.particles[i];
+    p.x += p.vx; p.y += p.vy;
+    p.life -= dt;
+    if (p.life <= 0) G.particles.splice(i, 1);
+  }
+
+  // 9. Decay Radar Flashes
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      if (G.radarFlash[r][c] > 0) {
+        G.radarFlash[r][c] = Math.max(0, G.radarFlash[r][c] - dt);
+      }
+    }
+  }
+
+  // 10. AI Engineer Assist (Solo mode helper)
+  if (G.assist) {
+    G.assistT += dt;
+    if (G.assistT >= 1.2) {
+      G.assistT = 0;
+      runEngineerAssist();
+    }
+  }
+
+  // Update HUD values
+  updateHUDTelemetry();
+}
+
+function launchEnemyRocketVolley(enemy) {
+  sfx('launch');
+  toast(`WARNING: INCOMING ROCKET SALVO DETECTED!`);
+  for (let i = 0; i < 3; i++) {
+    setTimeout(() => {
+      const targetBoat = pick(G.boats.filter(b => !b.sunk)) || G.boats[0];
+      const rad = rand(35, 50) * Math.PI / 180;
+      const dist = Math.abs(enemy.x - targetBoat.x) + rand(-40, 40);
+      const vel = Math.sqrt((dist * (GRAV * 0.7)) / Math.sin(2 * rad)) * rand(0.95, 1.05);
+      G.threats.push({
+        type: 'rocket',
+        x: enemy.x - 15, y: seaY() - enemy.h - 12,
+        vx: -Math.cos(rad) * vel,
+        vy: -Math.sin(rad) * vel,
+        life: 8.0
+      });
+    }, i * 220);
+  }
+}
+
+function launchEnemyCruiseMissile(enemy) {
+  sfx('launch');
+  toast(`AIR DEFENSE ALERT: CRUISE MISSILE INBOUND!`);
+  G.threats.push({
+    type: 'missile',
+    x: enemy.x - 20, y: seaY() - enemy.h - 25,
+    angle: Math.PI,
+    spd: 180,
+    life: 10.0
+  });
+}
+
+function launchEnemyTorpedo(enemy) {
+  sfx('splash');
+  toast(`TORPEDO WARNING: WAKE DETECTED IN WATER!`);
+  G.threats.push({
+    type: 'torpedo',
+    x: enemy.x - 20, y: seaY() + 4,
+    vx: -110,
+    life: 12.0
+  });
+}
+
+function checkBoatHit(boat, shell) {
+  const dx = Math.abs(shell.x - boat.x);
+  const dy = shell.y - boat.y;
+  return dx < (boat.def.len * 0.48) && dy > -boat.def.deck - 15 && dy < boat.def.draft + 5;
+}
+
+function checkThreatHitBoat(boat, th) {
+  const dx = Math.abs(th.x - boat.x);
+  const dy = th.y - boat.y;
+  return dx < (boat.def.len * 0.46) && dy > -boat.def.deck - 18 && dy < boat.def.draft + 8;
+}
+
+function checkEnemyHit(enemy, shell) {
+  const dx = Math.abs(shell.x - enemy.x);
+  const dy = shell.y - (seaY() - enemy.h * 0.5);
+  return dx < (enemy.w * 0.5) && Math.abs(dy) < (enemy.h * 0.65);
+}
+
+function applyBoatDamage(boat, dmg, ammo) {
+  boat.hp = Math.max(0, boat.hp - dmg);
+  boat.hitFlash = 0.3;
+  createExplosion(boat.x + rand(-40, 40), boat.y - rand(5, 20), ammo === 'HE', 20);
+  sfx(ammo === 'AP' ? 'boom' : 'hit');
+
+  // Random cell impact
+  const hitCell = pick(boat.cells);
+  if (hitCell) {
+    if (ammo === 'HE') {
+      hitCell.fire = Math.min(100, (hitCell.fire || 0) + 55);
+    } else {
+      if (hitCell.r >= 6) {
+        hitCell.state = 'flood';
+        boat.water = Math.min(100, boat.water + 14);
+      } else if (hitCell.sys) {
+        hitCell.state = 'dmg';
+      }
+    }
+  }
+
+  renderLaunchpadDOM();
+}
+
+function createFlakBurst(x, y) {
+  G.bursts.push({ x, y, r: 50, t: 0, dur: 0.45 });
+  for (let i = 0; i < 22; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const spd = rand(3, 9);
+    G.particles.push({
+      x, y,
+      vx: Math.cos(ang) * spd,
+      vy: Math.sin(ang) * spd,
+      life: rand(0.3, 0.6), maxLife: 0.6,
+      size: rand(3, 8),
+      color: pick(['#fbbf24', '#f59e0b', '#cbd5e1', '#ffffff', '#ff5b1f'])
+    });
+  }
+}
+
+function createWaterExplosion(x, y) {
+  createWaterSplash(x, y);
+  G.bursts.push({ x, y, r: 60, t: 0, dur: 0.5 });
+  for (let i = 0; i < 20; i++) {
+    G.particles.push({
+      x, y,
+      vx: rand(-4, 4), vy: -rand(3, 8),
+      life: rand(0.4, 0.8), maxLife: 0.8,
+      size: rand(4, 9),
+      color: '#e0f2fe'
+    });
+  }
+}
+
+function createWaterSplash(x, y) {
+  G.splashes.push({ x, y, t: 0, dur: 0.8 });
+  for (let i = 0; i < 14; i++) {
+    G.particles.push({
+      x: x + rand(-10, 10), y,
+      vx: rand(-3, 3), vy: -rand(4, 8),
+      life: rand(0.4, 0.7), maxLife: 0.7,
+      size: rand(2, 5),
+      color: '#e0f2fe'
+    });
+  }
+}
+
+function createExplosion(x, y, isHE, count = 20) {
+  for (let i = 0; i < count; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const spd = rand(2, 8);
+    G.particles.push({
+      x, y,
+      vx: Math.cos(ang) * spd,
+      vy: Math.sin(ang) * spd - 1.5,
+      life: rand(0.35, 0.75), maxLife: 0.75,
+      size: rand(3, 9),
+      color: isHE ? pick(['#ff5b1f', '#f59e0b', '#fbbf24', '#ffffff']) : pick(['#94a3b8', '#cbd5e1', '#64748b'])
+    });
+  }
+}
+
+function runEngineerAssist() {
+  // Auto-hoist empty guns
+  for (let g of G.guns) {
+    if (g.rack === 0 && g.boat.stock > 0 && g.transit.length === 0) {
+      callAmmo(g, false);
+      return;
+    }
+  }
+  // Auto-fight fires
+  for (let b of G.boats) {
+    const fireCell = b.cells.find(c => c.fire > 20);
+    if (fireCell) {
+      fireCell.fire = Math.max(0, fireCell.fire - 40);
+      sfx('hiss');
+      return;
+    }
+  }
+  // Auto-shoot nearest threat
+  if (G.threats.length > 0 && G.pd.charges > 0) {
+    const th = G.threats[0];
+    if (th.type === 'torpedo') {
+      handleRadarGridPress(6, 4);
+    } else {
+      handleRadarGridPress(2, 4);
+    }
+  }
+}
+
+/* =========================================================================
+   9. CANVAS RENDERING ENGINE (BATTLEFIELD, SHIPS, THREATS, PARTICLES)
+   ========================================================================= */
+function drawScene() {
+  ctx.save();
+  ctx.fillStyle = '#050c18';
+  ctx.fillRect(0, 0, W, H);
+
+  const baseY = seaY();
+
+  // Sky atmospheric gradient
+  const skyGrad = ctx.createLinearGradient(0, 0, 0, baseY);
+  skyGrad.addColorStop(0, '#040813');
+  skyGrad.addColorStop(0.65, '#0a1a2e');
+  skyGrad.addColorStop(1, '#112b48');
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(0, 0, W, baseY + 10);
+
+  // Distant rugged mountain ridge
+  ctx.fillStyle = '#091c33';
+  ctx.beginPath();
+  ctx.moveTo(0, baseY);
+  for (let x = 0; x <= W; x += 30) {
+    const my = baseY - 28 - Math.sin(x * 0.006) * 22 - Math.cos(x * 0.015) * 14;
+    ctx.lineTo(x, my);
+  }
+  ctx.lineTo(W, baseY);
+  ctx.fill();
+
+  // Draw Fleet boats
+  G.boats.forEach(b => drawFleetBoat(b));
+
+  // Draw Enemy warships
+  G.enemies.forEach(e => drawEnemyWarship(e));
+
+  // Draw Shells in air
+  G.shells.forEach(s => {
+    ctx.fillStyle = s.ammo === 'HE' ? '#ff6b2b' : '#38bdf8';
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, 3.2, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // Draw Threats (Rockets, Missiles, Torpedoes)
+  G.threats.forEach(th => {
+    if (th.type === 'rocket') {
+      ctx.save();
+      ctx.translate(th.x, th.y);
+      const ang = Math.atan2(th.vy, th.vx);
+      ctx.rotate(ang);
+      ctx.fillStyle = '#f59e0b';
+      ctx.fillRect(-8, -2, 16, 4);
+      ctx.fillStyle = '#ff5b1f';
+      ctx.beginPath();
+      ctx.moveTo(8, -2); ctx.lineTo(13, 0); ctx.lineTo(8, 2);
+      ctx.fill();
+      ctx.restore();
+    } else if (th.type === 'missile') {
+      ctx.save();
+      ctx.translate(th.x, th.y);
+      ctx.rotate(th.angle);
+      // Cruise missile body & delta fins
+      ctx.fillStyle = '#e2e8f0';
+      ctx.fillRect(-12, -3, 24, 6);
+      ctx.fillStyle = '#ef4444';
+      ctx.beginPath();
+      ctx.moveTo(12, -3); ctx.lineTo(18, 0); ctx.lineTo(12, 3);
+      ctx.fill();
+      ctx.fillStyle = '#64748b';
+      ctx.fillRect(-4, -7, 6, 14); // wing fins
+      ctx.restore();
+    } else if (th.type === 'torpedo') {
+      ctx.save();
+      ctx.translate(th.x, th.y);
+      ctx.fillStyle = '#0284c7';
+      ctx.fillRect(-10, -2.5, 20, 5);
+      ctx.fillStyle = '#38bdf8';
+      ctx.fillRect(8, -1.5, 4, 3);
+      ctx.restore();
+    }
+  });
+
+  // Draw Particles
+  G.particles.forEach(p => {
+    const alpha = clamp(p.life / p.maxLife, 0, 1);
+    ctx.fillStyle = p.color;
+    ctx.globalAlpha = alpha;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * (0.4 + alpha * 0.6), 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1.0;
+
+  // Draw Flak / Water Bursts
+  G.bursts.forEach(b => {
+    const prog = b.t / b.dur;
+    ctx.strokeStyle = `rgba(251, 191, 36, ${1 - prog})`;
+    ctx.lineWidth = 3 * (1 - prog);
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r * prog, 0, Math.PI * 2);
+    ctx.stroke();
+  });
+
+  // Draw Water Splashes
+  G.splashes.forEach(sp => {
+    const prog = sp.t / sp.dur;
+    ctx.strokeStyle = `rgba(224, 242, 254, ${1 - prog})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.ellipse(sp.x, sp.y, 16 * prog, 38 * (1 - prog), 0, 0, Math.PI * 2);
+    ctx.stroke();
+  });
+
+  // Draw Ocean Wave surface (multilayer foreground)
+  drawOceanWaves(baseY);
+
+  ctx.restore();
+}
+
+function drawFleetBoat(b) {
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  ctx.rotate(b.tilt);
+
+  const halfLen = b.def.len * 0.5;
+
+  // Hull
+  ctx.fillStyle = b.def.key === 'flag' ? '#1e293b' : '#142533';
+  ctx.strokeStyle = b.def.color;
+  ctx.lineWidth = 1.5;
+
+  ctx.beginPath();
+  ctx.moveTo(-halfLen, 8);
+  ctx.lineTo(halfLen - 15, 8);
+  ctx.lineTo(halfLen, -b.def.deck);
+  ctx.lineTo(-halfLen + 15, -b.def.deck);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  // Waterline red stripe
+  ctx.fillStyle = '#dc2626';
+  ctx.fillRect(-halfLen + 5, 2, b.def.len - 15, 4);
+
+  // Superstructure
+  ctx.fillStyle = '#334155';
+  ctx.fillRect(-25, -b.def.deck - 18, 50, 18);
+  ctx.fillRect(-10, -b.def.deck - 30, 20, 12); // bridge
+
+  // Funnel & steam smoke
+  ctx.fillStyle = '#1e293b';
+  ctx.fillRect(-4, -b.def.deck - 24, 8, 14);
+
+  // Turrets
+  b.guns.forEach((g, gi) => {
+    const tx = (gi < 2 ? 1 : -1) * (b.def.len * (gi % 2 === 0 ? 0.32 : 0.16));
+    const ty = -b.def.deck - 2;
+
+    // Barbette
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(tx - 10, ty - 4, 20, 6);
+
+    // Housing
+    ctx.fillStyle = '#475569';
+    ctx.fillRect(tx - 12, ty - 14, 24, 11);
+
+    // Barrels (rotating with angle & recoil)
+    const rad = (-(g.elev + g.trim) * Math.PI) / 180;
+    ctx.save();
+    ctx.translate(tx + 4, ty - 9);
+    ctx.rotate(rad);
+    ctx.fillStyle = '#94a3b8';
+    ctx.fillRect(-g.recoil, -2.5, 26, 2.5);
+    ctx.fillRect(-g.recoil, 1, 26, 2.5);
+    ctx.restore();
+  });
+
+  // Label tag above ship
+  ctx.fillStyle = b.def.color;
+  ctx.font = 'bold 9px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(b.def.short, 0, -b.def.deck - 38);
+
+  ctx.restore();
+}
+
+function drawEnemyWarship(e) {
+  ctx.save();
+  ctx.translate(e.x, seaY() + Math.sin(G.time * 2 + e.x) * 3);
+
+  ctx.fillStyle = '#3b1c1c';
+  ctx.strokeStyle = '#ef4444';
+  ctx.lineWidth = 1.2;
+
+  const halfW = e.w * 0.5;
+  ctx.beginPath();
+  ctx.moveTo(-halfW + 12, 6);
+  ctx.lineTo(halfW, 6);
+  ctx.lineTo(halfW - 14, -e.h * 0.5);
+  ctx.lineTo(-halfW, -e.h * 0.5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  // Superstructure
+  ctx.fillStyle = '#5c2222';
+  ctx.fillRect(-halfW * 0.4, -e.h, halfW * 0.8, e.h * 0.5);
+
+  // Health bar above enemy
+  const barW = e.w * 0.85;
+  const hpRatio = clamp(e.hp / e.maxHp, 0, 1);
+  ctx.fillStyle = '#1e293b';
+  ctx.fillRect(-barW * 0.5, -e.h - 14, barW, 4);
+  ctx.fillStyle = '#ef4444';
+  ctx.fillRect(-barW * 0.5, -e.h - 14, barW * hpRatio, 4);
+
+  // Label
+  ctx.fillStyle = '#fca5a5';
+  ctx.font = 'bold 8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(e.name, 0, -e.h - 18);
+
+  ctx.restore();
+}
+
+function drawOceanWaves(baseY) {
+  const oceanGrad = ctx.createLinearGradient(0, baseY, 0, H);
+  oceanGrad.addColorStop(0, 'rgba(16, 52, 85, 0.94)');
+  oceanGrad.addColorStop(0.5, 'rgba(10, 30, 50, 0.98)');
+  oceanGrad.addColorStop(1, '#050c18');
+
+  ctx.fillStyle = oceanGrad;
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  ctx.lineTo(0, baseY);
+  for (let x = 0; x <= W; x += 15) {
+    const y = baseY + Math.sin(x * 0.015 + G.time * 2.5) * 5 + Math.cos(x * 0.03 - G.time * 1.8) * 3;
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(W, H);
+  ctx.closePath();
+  ctx.fill();
+
+  // Foam edge
+  ctx.strokeStyle = 'rgba(82, 194, 208, 0.75)';
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  for (let x = 0; x <= W; x += 15) {
+    const y = baseY + Math.sin(x * 0.015 + G.time * 2.5) * 5 + Math.cos(x * 0.03 - G.time * 1.8) * 3;
+    if (x === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+/* =========================================================================
+   10. UI DOM BUILDING & INTERACTION
+   ========================================================================= */
+function buildChannelsGrid() {
+  const container = document.getElementById('channelsGrid');
+  container.innerHTML = '';
+
+  for (let i = 0; i < 8; i++) {
+    const strip = document.createElement('div');
+
+    if (i < G.guns.length) {
+      const g = G.guns[i];
+      strip.className = 'channel-strip';
+      strip.style.setProperty('--boat', g.boat.def.color);
+      strip.id = `strip-${i}`;
+
+      strip.innerHTML = `
+        <div class="channel-tag">
+          <span>CH${i + 1}</span>
+          <span class="bt">${g.boat.def.short}</span>
+        </div>
+        <div class="channel-turret-name">${g.name}</div>
+
+        <!-- KNOB 1: ELEVATION -->
+        <div class="knob-wrap" data-ch="${i}" data-knob="elev" title="Elevation Angle (CC ${13 + i})">
+          <div class="knob-ring" id="knob-elev-${i}">
+            <div class="knob-pointer" id="ptr-elev-${i}"></div>
+          </div>
+          <div class="knob-val" id="val-elev-${i}">${g.elev}°</div>
+        </div>
+
+        <!-- KNOB 2: AMMO -->
+        <div class="knob-wrap" data-ch="${i}" data-knob="ammo" title="Ammo Selector AP/HE (CC ${29 + i})">
+          <div class="knob-ring" id="knob-ammo-${i}">
+            <div class="knob-pointer" id="ptr-ammo-${i}"></div>
+          </div>
+          <div class="knob-val" id="val-ammo-${i}">${g.ammo}</div>
+        </div>
+
+        <!-- READY RACK INDICATOR -->
+        <div class="rack" id="rack-${i}" title="Ready rack rounds"></div>
+
+        <!-- BUTTON 1: CALL AMMO HOIST -->
+        <button class="pad-btn" id="call-btn-${i}" title="Call ammo from deep magazine (Note ${41 + i})">HOIST</button>
+
+        <!-- BUTTON 2: FIRE -->
+        <button class="pad-btn fire-btn g" id="fire-btn-${i}" title="FIRE CANNON! (Note ${73 + i})">FIRE</button>
+
+        <!-- FADER: POWER CHARGE -->
+        <div class="fader-wrap" data-ch="${i}" title="Powder Charge Velocity (CC ${77 + i})">
+          <div class="fader-track">
+            <div class="fader-fill" id="fader-fill-${i}" style="height:${g.power}%;"></div>
+            <div class="fader-cap" id="fader-cap-${i}" style="bottom:calc(${g.power}% - 6px);"></div>
+          </div>
+          <div class="fader-val" id="fader-val-${i}">${g.power}%</div>
+        </div>
+      `;
+
+      container.appendChild(strip);
+
+      // Bind Fire button
+      strip.querySelector(`#fire-btn-${i}`).addEventListener('click', () => pressFire(i));
+      // Bind Call Hoist button
+      strip.querySelector(`#call-btn-${i}`).addEventListener('click', () => callAmmo(g, true));
+
+      // Bind Mouse Drag for Knobs & Fader
+      setupKnobDrag(strip.querySelector('[data-knob="elev"]'), i, 'elev');
+      setupKnobDrag(strip.querySelector('[data-knob="ammo"]'), i, 'ammo');
+      setupFaderDrag(strip.querySelector('.fader-wrap'), i);
+    } else {
+      // Inactive / Disabled channel (Safe from hardware fader 7)
+      strip.className = 'channel-strip disabled';
+      strip.id = `strip-${i}`;
+
+      strip.innerHTML = `
+        <div class="channel-tag">
+          <span>CH${i + 1}</span>
+          <span class="bt" style="color:#64748b;">OFF</span>
+        </div>
+        <div class="channel-turret-name" style="color:#475569;">INACTIVE</div>
+        <div class="fader-safe-badge">${i === 6 ? 'FADER 7 SAFE' : 'BYPASS'}</div>
+
+        <div style="flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; opacity:0.3; margin:4px 0;">
+          <div class="knob-ring" style="background:#0e1620; border-color:#1e293b;"></div>
+          <div class="knob-ring" style="background:#0e1620; border-color:#1e293b;"></div>
+          <div class="pad-btn off" style="width:32px; height:13px; font-size:6.5px;">OFF</div>
+          <div class="pad-btn off" style="width:34px; height:15px; font-size:6.5px;">OFF</div>
+        </div>
+
+        <div class="fader-wrap" style="opacity:0.25; cursor:not-allowed;">
+          <div class="fader-track" style="background:#080c12;">
+            <div class="fader-fill" style="height:0%;"></div>
+            <div class="fader-cap" style="bottom:-6px; opacity:0.4;"></div>
+          </div>
+          <div class="fader-val" style="color:#475569;">—</div>
+        </div>
+      `;
+
+      container.appendChild(strip);
+    }
+  }
+
+  updateAllChannelStrips();
+}
+
+function updateChannelStrip(i) {
+  if (i >= G.guns.length) return;
+  const g = G.guns[i];
+  if (!g) return;
+
+  // Elev knob
+  const ptrElev = document.getElementById(`ptr-elev-${i}`);
+  const valElev = document.getElementById(`val-elev-${i}`);
+  if (ptrElev) {
+    const rot = -135 + ((g.elev - 5) / 75) * 270;
+    ptrElev.style.transform = `rotate(${rot}deg)`;
+  }
+  if (valElev) valElev.textContent = `${g.elev}°`;
+
+  // Ammo knob
+  const ptrAmmo = document.getElementById(`ptr-ammo-${i}`);
+  const valAmmo = document.getElementById(`val-ammo-${i}`);
+  if (ptrAmmo) {
+    ptrAmmo.style.transform = `rotate(${g.ammo === 'AP' ? -60 : 60}deg)`;
+  }
+  if (valAmmo) valAmmo.textContent = g.ammo;
+
+  // Ready rack dots
+  const rackEl = document.getElementById(`rack-${i}`);
+  if (rackEl) {
+    let dotsHtml = '';
+    for (let r = 0; r < g.boat.def.rackMax; r++) {
+      dotsHtml += `<i class="${r < g.rack ? 'on' : ''}"></i>`;
+    }
+    rackEl.innerHTML = dotsHtml;
+  }
+
+  // Fire button state
+  const fireBtn = document.getElementById(`fire-btn-${i}`);
+  if (fireBtn) {
+    if (g.boat.sunk) {
+      fireBtn.className = 'pad-btn fire-btn off';
+      fireBtn.textContent = 'SUNK';
+    } else if (g.tCell && g.tCell.state === 'dmg') {
+      fireBtn.className = 'pad-btn fire-btn r';
+      fireBtn.textContent = 'JAM';
+    } else if (g.cycleT > 0) {
+      fireBtn.className = 'pad-btn fire-btn a';
+      fireBtn.textContent = g.cycleT.toFixed(1) + 's';
+    } else if (g.rack > 0) {
+      fireBtn.className = 'pad-btn fire-btn g';
+      fireBtn.textContent = 'FIRE';
+    } else {
+      fireBtn.className = 'pad-btn fire-btn r';
+      fireBtn.textContent = 'EMPTY';
+    }
+  }
+
+  // Fader
+  const fill = document.getElementById(`fader-fill-${i}`);
+  const cap = document.getElementById(`fader-cap-${i}`);
+  const fval = document.getElementById(`fader-val-${i}`);
+  if (fill) fill.style.height = `${g.power}%`;
+  if (cap) cap.style.bottom = `calc(${g.power}% - 6px)`;
+  if (fval) fval.textContent = `${g.power}%`;
+}
+
+function updateAllChannelStrips() {
+  G.guns.forEach((_, i) => updateChannelStrip(i));
+}
+
+function setupKnobDrag(el, idx, kind) {
+  if (!el) return;
+  el.addEventListener('mousedown', e => {
+    const startY = e.clientY;
+    const g = G.guns[idx];
+    const startVal = kind === 'elev' ? g.elev : (g.ammo === 'AP' ? 0 : 100);
+
+    function onMove(me) {
+      const delta = (startY - me.clientY) * 0.8;
+      if (kind === 'elev') {
+        setGunElev(idx, Math.round(startVal + delta));
+      } else {
+        setGunAmmo(idx, startVal + delta > 50 ? 'HE' : 'AP');
+      }
+    }
+    function onUp() {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    }
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  });
+}
+
+function setupFaderDrag(el, idx) {
+  if (!el) return;
+  el.addEventListener('mousedown', e => {
+    const track = el.querySelector('.fader-track');
+    const rect = track.getBoundingClientRect();
+
+    function updateFromClientY(cy) {
+      const pct = clamp(Math.round(((rect.bottom - cy) / rect.height) * 100), 30, 100);
+      setGunPower(idx, pct);
+    }
+    updateFromClientY(e.clientY);
+
+    function onMove(me) { updateFromClientY(me.clientY); }
+    function onUp() {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    }
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  });
+}
+
+function renderLaunchpadDOM() {
+  const container = document.getElementById('launchpadGrid');
+  container.innerHTML = '';
+
+  // 1. Top row 9 buttons (8 CC buttons + 1 empty corner)
+  const topLabels = ['FLG', 'SWF', 'VAL', 'RDR', 'D/C', 'SMK', 'REV', 'AHD'];
+  for (let c = 0; c < 8; c++) {
+    const btn = document.createElement('div');
+    btn.className = 'lp-pad lp-round';
+    btn.textContent = topLabels[c];
+    if (c === 1 && G.boatCount < 2) {
+      btn.style.opacity = '0.3';
+      btn.style.filter = 'grayscale(1)';
+      btn.title = 'Swift Escort (Select 2+ Boats in Fleet menu)';
+    } else if (c === 2 && G.boatCount < 3) {
+      btn.style.opacity = '0.3';
+      btn.style.filter = 'grayscale(1)';
+      btn.title = 'Valor Escort (Select 3 Boats in Fleet menu)';
+    } else if (c === 0 && G.page === 'boat' && G.sel === 0) {
+      btn.style.outline = '2px solid #38bdf8';
+    } else if (c === 1 && G.page === 'boat' && G.sel === 1) {
+      btn.style.outline = '2px solid #2dd4bf';
+    } else if (c === 2 && G.page === 'boat' && G.sel === 2) {
+      btn.style.outline = '2px solid #a3e635';
+    } else if (c === 3 && G.page === 'radar') {
+      btn.style.outline = '2px solid #f43f5e';
+      btn.style.background = '#881337';
+    }
+    btn.addEventListener('click', () => lpTopPress(c));
+    container.appendChild(btn);
+  }
+  // Corner filler
+  const corner = document.createElement('div');
+  corner.className = 'lp-pad lp-round lp-corner';
+  container.appendChild(corner);
+
+  // 2. 8 rows of (8 grid pads + 1 side button)
+  const sideLabels = ['SPD+', 'SPD-', 'EVAD', 'SMK', 'PUMP', 'HST', 'FLAK', 'DPTH'];
+
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      const pad = document.createElement('div');
+      pad.className = 'lp-pad';
+      pad.dataset.r = r; pad.dataset.c = c;
+
+      if (G.page === 'boat') {
+        const b = G.boats[G.sel];
+        const cell = b.grid[r][c];
+        if (cell) {
+          pad.textContent = cell.kind === 'turret' ? `T${cell.gun + 1}` :
+                            (cell.kind === 'hoist' ? `H${cell.gun + 1}` :
+                            (cell.kind === 'magazine' ? `M${cell.gun + 1}` :
+                            (KIND_LABEL[cell.kind] || '')));
+          if (cell.fire > 0) pad.style.background = '#b91c1c';
+          else if (cell.state === 'flood') pad.style.background = '#0284c7';
+          else if (cell.state === 'dmg') pad.style.background = '#b45309';
+          else if (cell.kind === 'hoist') pad.style.background = '#312e81';
+          else if (cell.kind === 'turret') pad.style.background = '#064e3b';
+          else pad.style.background = '#141b24';
+        } else {
+          pad.style.opacity = '0.2';
+        }
+      } else {
+        // Radar view
+        pad.textContent = r < 5 ? 'AIR' : 'SEA';
+        pad.style.background = r < 5 ? '#1e1b4b' : '#082f49';
+      }
+
+      pad.addEventListener('mousedown', () => lpGridDown(r, c));
+      container.appendChild(pad);
+    }
+
+    // Side round button
+    const sideBtn = document.createElement('div');
+    sideBtn.className = 'lp-pad lp-round';
+    sideBtn.textContent = sideLabels[r];
+    sideBtn.addEventListener('click', () => lpSidePress(r));
+    container.appendChild(sideBtn);
+  }
+
+  // Update right info panel
+  updateLaunchpadInfoPanel();
+}
+
+function updateLaunchpadInfoPanel() {
+  const info = document.getElementById('lpInfo');
+  if (!info) return;
+
+  if (G.page === 'boat') {
+    const b = G.boats[G.sel];
+    const firesCount = b.cells.filter(c => c.fire > 0).length;
+    const floodsCount = b.cells.filter(c => c.state === 'flood').length;
+    const dmgsCount = b.cells.filter(c => c.state === 'dmg').length;
+
+    info.innerHTML = `
+      <div class="pg" style="color:${b.def.color}">[P2 ENGINEER] ${b.def.name}</div>
+      <div class="row"><span>HULL INTEGRITY:</span> <b>${Math.round(b.hp)} / ${b.def.maxHp}</b></div>
+      <div class="row"><span>BILGE FLOODING:</span> <b style="color:${b.water > 30 ? '#38bdf8' : '#e2e8f0'}">${Math.round(b.water)}%</b></div>
+      <div class="row"><span>MAGAZINE STOCK:</span> <b>${b.stock} shells</b></div>
+      <div class="row"><span>CASUALTIES:</span> <b>${firesCount} Fires · ${floodsCount} Breaches · ${dmgsCount} Damaged</b></div>
+      <div style="font-size:8.5px; color:#64748b; margin-top:4px;">
+        Click <b>RED</b> to fight fires · Click <b>BLUE</b> to weld breaches · Click <b>H#</b> to speed-crank ammo hoist.
+      </div>
+    `;
+  } else {
+    // Radar telemetry
+    info.innerHTML = `
+      <div class="pg" style="color:#a78bfa">[P2 ENGINEER] TACTICAL RADAR & POINT DEFENSE</div>
+      <div class="row"><span>PD CHARGES:</span> <b style="color:#22c55e">${G.pd.charges} / ${G.pd.max} READY</b></div>
+      <div class="row"><span>INCOMING THREATS:</span> <b style="color:${G.threats.length > 0 ? '#ef4444' : '#e2e8f0'}">${G.threats.length} Detected</b></div>
+      <div class="side-legend" style="margin-top:4px;">
+        <span>Rows 1–5:</span> <span>Airspace (Rockets & Cruise Missiles)</span>
+        <span>Rows 6–8:</span> <span>Sea Depth (Torpedoes)</span>
+        <span>Columns:</span> <span>Range sectors (Fleet to Horizon)</span>
+      </div>
+      <div style="font-size:8.5px; color:#cbd5e1; margin-top:4px;">
+        Tap flashing blip to detonate <b>Flak Shell</b> or drop <b>Depth Charge</b>!
+      </div>
+    `;
+  }
+}
+
+function updateHUDTelemetry() {
+  // Fleet summary card
+  const fleetCard = document.getElementById('fleet-card');
+  if (fleetCard) {
+    fleetCard.innerHTML = `
+      <div class="hud-title"><span>FLEET DEFENSE</span><span style="color:#38bdf8;">FORMATION</span></div>
+      ${G.boats.map((b, i) => `
+        <div class="boat-row" style="cursor:pointer;" onclick="lpTopPress(${i})">
+          <div class="nm">
+            <span style="color:${b.def.color}">${b.def.short}</span>
+            <span>${b.sunk ? '<b style="color:#ef4444;">SUNK</b>' : (b.water > 30 ? '<b style="color:#38bdf8;">FLOOD</b>' : '<b style="color:#10b981;">OPERATIONAL</b>')}</span>
+          </div>
+          <div class="bars">
+            <div class="hud-stat-bar"><div class="hud-stat-fill fill-hp" style="width:${clamp((b.hp / b.def.maxHp) * 100, 0, 100)}%;"></div></div>
+            <div class="hud-stat-bar"><div class="hud-stat-fill fill-water" style="width:${clamp(b.water, 0, 100)}%;"></div></div>
+          </div>
+        </div>
+      `).join('')}
+    `;
+  }
+
+  // Point defense meter dots
+  const pdMeter = document.getElementById('pd-meter');
+  if (pdMeter) {
+    let pdHtml = '';
+    for (let i = 0; i < G.pd.max; i++) {
+      pdHtml += `<i class="${i < G.pd.charges ? 'on' : ''}"></i>`;
+    }
+    pdMeter.innerHTML = pdHtml;
+  }
+
+  // Enemy fleet bar
+  const totalMax = G.enemies.reduce((acc, e) => acc + e.maxHp, 0);
+  const totalCurr = G.enemies.reduce((acc, e) => acc + Math.max(0, e.hp), 0);
+  const ratio = totalMax > 0 ? (totalCurr / totalMax) * 100 : 0;
+  document.getElementById('e-hp-txt').textContent = `${Math.round(ratio)}%`;
+  document.getElementById('e-hp-fill').style.width = `${ratio}%`;
+
+  document.getElementById('score-txt').textContent = `SCORE: ${G.score}`;
+  document.getElementById('wind-txt').textContent = `${G.wind >= 0 ? '+' : ''}${Math.round(G.wind)} kts`;
+
+  const incomingTxt = document.getElementById('incoming-txt');
+  if (incomingTxt) {
+    if (G.threats.length === 0) {
+      incomingTxt.textContent = 'INCOMING: NONE';
+      incomingTxt.style.color = '#94a3b8';
+    } else {
+      incomingTxt.textContent = `INCOMING: ${G.threats.map(t => t.type.toUpperCase()).join(', ')}`;
+      incomingTxt.style.color = '#f87171';
+    }
+  }
+}
+
+function toast(msg) {
+  const layer = document.getElementById('toast-layer');
+  if (!layer) return;
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.textContent = msg;
+  layer.appendChild(t);
+  setTimeout(() => {
+    t.style.opacity = '0';
+    setTimeout(() => t.remove(), 200);
+  }, 2200);
+}
+
+/* =========================================================================
+   11. GAME STATE, MODALS & EVENT HANDLERS
+   ========================================================================= */
+function checkFleetSurvival() {
+  if (G.boats.every(b => b.sunk)) {
+    showModal('FLEET DESTROYED', 'All warships lost at sea.', 'Restart Battle', restartBattle);
+  }
+}
+
+function onWaveVictory() {
+  G.wave++;
+  G.score += 1200;
+  showModal(`WAVE ${G.wave - 1} CLEARED!`, 'Convoy neutralized. Restocking munitions and re-engaging.', 'Next Wave', () => {
+    hideModal();
+    // Replenish some stock
+    G.boats.forEach(b => {
+      b.stock = Math.min(b.def.magMax, b.stock + 12);
+    });
+    spawnWave();
+  });
+}
+
+function showModal(title, desc, btnTxt, onAction) {
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('modalDesc').innerHTML = `<div>${desc}</div>`;
+  const btn = document.getElementById('modalActionBtn');
+  btn.textContent = btnTxt;
+  btn.onclick = onAction;
+  document.getElementById('modal-screen').style.display = 'flex';
+}
+
+function hideModal() {
+  document.getElementById('modal-screen').style.display = 'none';
+}
+
+function restartBattle() {
+  hideModal();
+  makeFleet();
+  G.score = 0;
+  G.wave = 1;
+  G.threats = [];
+  G.shells = [];
+  G.pd.charges = G.pd.max;
+  buildChannelsGrid();
+  renderLaunchpadDOM();
+  spawnWave();
+}
+
+// Window & Keyboard bindings
+window.addEventListener('keydown', e => {
+  initAudio();
+  if (e.repeat) return;
+
+  // 1-8: Fire guns
+  if (e.code >= 'Digit1' && e.code <= 'Digit8') {
+    const idx = parseInt(e.code.replace('Digit', ''), 10) - 1;
+    if (e.shiftKey) {
+      callAmmo(G.guns[idx], true);
+    } else {
+      pressFire(idx);
+    }
+  }
+
+  // Spacebar: Salvo
+  if (e.code === 'Space') {
+    e.preventDefault();
+    pressSalvo('flag');
+  }
+
+  // Q/W/E: Engineer boat selection
+  if (e.code === 'KeyQ') lpTopPress(0);
+  if (e.code === 'KeyW') lpTopPress(1);
+  if (e.code === 'KeyE') lpTopPress(2);
+  // R: Radar point defense
+  if (e.code === 'KeyR') lpTopPress(3);
+
+  // Arrow keys: Fleet speed
+  if (e.code === 'ArrowUp') adjustFleetSpeed(1);
+  if (e.code === 'ArrowDown') adjustFleetSpeed(-1);
+
+  // P: Pause
+  if (e.code === 'KeyP') {
+    G.paused = !G.paused;
+    toast(G.paused ? 'GAME PAUSED' : 'GAME RESUMED');
+  }
+});
+
+// Canvas click: Point Defense Flak or Depth Charge manual targeting
+cv.addEventListener('mousedown', e => {
+  initAudio();
+  const rect = cv.getBoundingClientRect();
+  const clickX = ((e.clientX - rect.left) / rect.width) * W;
+  const clickY = ((e.clientY - rect.top) / rect.height) * H;
+
+  if (clickY < seaY()) {
+    // Air click: Flak
+    if (G.pd.charges > 0) {
+      G.pd.charges--;
+      sfx('flak');
+      createFlakBurst(clickX, clickY);
+      interceptThreatsInRadius(clickX, clickY, 110, ['rocket', 'missile']);
+    } else {
+      sfx('deny');
+    }
+  } else {
+    // Sea click: Depth charge
+    if (G.pd.charges > 0) {
+      G.pd.charges--;
+      sfx('depth');
+      createWaterExplosion(clickX, clickY);
+      interceptThreatsInRadius(clickX, clickY, 120, ['torpedo']);
+    } else {
+      sfx('deny');
+    }
+  }
+});
+
+// Header Buttons
+document.getElementById('fullSalvoBtn').addEventListener('click', () => pressSalvo('flag'));
+document.getElementById('assistBtn').addEventListener('click', () => {
+  G.assist = !G.assist;
+  document.getElementById('assistBtn').textContent = G.assist ? '🤖 Eng. Assist: ON' : '🤖 Eng. Assist: OFF';
+  toast(`ENGINEER ASSIST: ${G.assist ? 'ENABLED' : 'DISABLED'}`);
+});
+document.getElementById('audioToggleBtn').addEventListener('click', () => {
+  G.audioEnabled = !G.audioEnabled;
+  document.getElementById('audioToggleBtn').textContent = G.audioEnabled ? '🔊 Audio ON' : '🔇 Audio OFF';
+});
+document.getElementById('pauseBtn').addEventListener('click', () => {
+  G.paused = !G.paused;
+  document.getElementById('pauseBtn').textContent = G.paused ? '▶ Resume' : '⏸ Pause';
+});
+document.getElementById('resetBtn').addEventListener('click', restartBattle);
+document.getElementById('midiBtn').addEventListener('click', initMIDI);
+document.getElementById('gameModeSel').addEventListener('change', e => {
+  G.mode = e.target.value;
+  restartBattle();
+});
+document.getElementById('fleetConfigSel').addEventListener('change', e => {
+  G.boatCount = parseInt(e.target.value, 10);
+  restartBattle();
+  updateChannelsHeader();
+  toast(`FLEET CONFIG: ${G.boatCount === 1 ? '1 Boat (4 Turrets · CH 1–4)' : (G.boatCount === 2 ? '2 Boats (6 Turrets · CH 1–6)' : '3 Boats (Full Fleet · 8 Turrets)')}`);
+});
+
+function updateChannelsHeader() {
+  const legend = document.getElementById('xl-channels-legend');
+  if (!legend) return;
+  if (G.boatCount === 1) {
+    legend.innerHTML = `CH1–4 <b style="color:var(--c-flag)">FLAGSHIP (4 TURRETS)</b> · <span style="color:#f59e0b;font-size:9px;">CH5–8 INACTIVE (FADER 7 SAFEGUARD)</span>`;
+  } else if (G.boatCount === 2) {
+    legend.innerHTML = `CH1–4 <b style="color:var(--c-flag)">FLAGSHIP</b> · CH5–6 <b style="color:var(--c-swift)">SWIFT (6 CH)</b> · <span style="color:#f59e0b;font-size:9px;">CH7–8 INACTIVE (FADER 7 SAFE)</span>`;
+  } else {
+    legend.innerHTML = `CH1–4 <b style="color:var(--c-flag)">FLAGSHIP</b> · CH5–6 <b style="color:var(--c-swift)">SWIFT</b> · CH7–8 <b style="color:var(--c-valor)">VALOR</b>`;
+  }
+}
+
+document.getElementById('xlSoloBtn').addEventListener('click', () => {
+  if (G.boatCount >= 2) {
+    pressSalvo('escorts');
+  } else {
+    toast('1-Boat Mode: Solo button fired Flagship Aft Turrets!');
+    if (G.guns[2]) pressFire(2);
+    if (G.guns[3]) setTimeout(() => pressFire(3), 90);
+  }
+});
+document.getElementById('xlArmBtn').addEventListener('click', () => pressSalvo('flag'));
+
+function resizeCanvas() {
+  const vp = document.getElementById('viewport');
+  W = vp.clientWidth;
+  H = vp.clientHeight;
+  cv.width = W;
+  cv.height = H;
+}
+window.addEventListener('resize', resizeCanvas);
+
+/* =========================================================================
+   12. ANIMATION & GAME TICK LOOP
+   ========================================================================= */
+let lastFrameT = performance.now();
+
+function gameLoop(now) {
+  const dt = Math.min(0.1, (now - lastFrameT) * 0.001);
+  lastFrameT = now;
+
+  if (!G.paused) {
+    updateSimulation(dt);
+  }
+  drawScene();
+
+  // Periodically refresh LEDs and DOM states
+  G.ledT = (G.ledT || 0) + dt;
+  if (G.ledT >= 0.08) {
+    G.ledT = 0;
+    updateHardwareLEDs();
+  }
+
+  G.uiT = (G.uiT || 0) + dt;
+  if (G.uiT >= 0.15) {
+    G.uiT = 0;
+    updateAllChannelStrips();
+    renderLaunchpadDOM();
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+// Start application
+window.addEventListener('DOMContentLoaded', () => {
+  resizeCanvas();
+  G.boatCount = parseUrlFleetConfig();
+  const fleetSel = document.getElementById('fleetConfigSel');
+  if (fleetSel) fleetSel.value = String(G.boatCount);
+  updateChannelsHeader();
+  makeFleet();
+  buildChannelsGrid();
+  renderLaunchpadDOM();
+  spawnWave();
+  initMIDI();
+  requestAnimationFrame(gameLoop);
+});
+</script>
+</body>
+</html>

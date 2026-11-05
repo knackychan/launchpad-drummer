@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sector Defense · Launchband</title>
+  <link rel="stylesheet" href="../shared/launchband-menu.css">
+  <link rel="stylesheet" href="sector.css">
+</head>
+<body>
+  <header id="bar"><button id="openMenuBtn">Menu</button><span id="connection">Checking controller…</span></header>
+  <main>
+    <section class="field-shell" aria-label="Sector defense arena">
+      <div class="feed"><span><i></i> LIVE SECTOR FEED</span><span>GRID 08 × 08</span></div>
+      <div class="field">
+        <canvas id="arena" tabindex="0" aria-label="Defense grid. Press a lit Launchpad pad or click a target's cell to fire. Arrow keys aim; Enter fires."></canvas>
+        <div class="scanlines" aria-hidden="true"></div>
+        <div id="notice" role="status" aria-live="polite"></div>
+        <div id="end" hidden>
+          <span class="eyebrow">SIGNAL LOST</span><h1>Station lost</h1>
+          <p id="result"></p><button id="retry">Play again</button>
+          <small>Or press Session on your Launchpad</small>
+        </div>
+      </div>
+      <div class="feed bottom"><span>CENTRAL DEFENSE STATION</span><span id="state">STANDBY</span></div>
+    </section>
+    <aside aria-label="Station controls">
+      <div class="heading"><span class="eyebrow">LAUNCHBAND / ARCADE</span><h1>SECTOR<br><span>DEFENSE</span></h1><p>Hold the center.</p></div>
+      <div class="readout"><span>STATION SHIELD</span><strong id="shield">100<span>%</span></strong><meter id="shieldMeter" min="0" max="100" value="100" aria-label="Station shield"></meter></div>
+      <div class="stats"><div><span>WAVE</span><strong id="wave">01</strong></div><div><span>SCORE</span><strong id="score">000000</strong></div></div>
+      <div class="streak"><span id="combo">0 CHAIN</span><span id="multiplier">×1</span></div>
+      <div class="mirror-section"><div class="caption"><span>LAUNCHPAD MKII</span><span>8 × 8</span></div><div id="mirror" aria-label="Clickable Launchpad mirror"></div></div>
+      <button id="pulse" class="pulse" disabled><span>PULSE <small>VOLUME / SPACE</small></span><b id="charge">0%</b></button>
+      <progress id="chargeMeter" max="100" value="0" aria-label="Pulse charge"></progress>
+      <div class="legend"><span><i class="scout"></i>Scout <b>1 hit</b></span><span><i class="rock"></i>Asteroid <b>2 hits</b></span><span><i class="armored"></i>Armored <b>3 hits</b></span><span><i class="repair"></i>Repair <b>+15 shield</b></span></div>
+      <div class="actions"><button id="pause">Pause</button><button id="sound" aria-pressed="true">Sound on</button></div>
+      <p class="instructions">Press a target’s pad to fire.<br>Green pads repair your shield.<br><kbd>Session</kbd> start / pause<br><kbd>Pan</kbd> pause · <kbd>Esc</kbd> menu</p>
+    </aside>
+  </main>
+  <footer>PAD / CLICK TO FIRE <span>ARROWS + ENTER TO AIM & FIRE · SPACE TO PULSE</span></footer>
+  <script src="../shared/launchband-menu.js"></script>
+  <script src="rules.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>

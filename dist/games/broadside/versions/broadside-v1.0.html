@@ -1,0 +1,2060 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BROADSIDE — Naval Warfare (Launch Control XL + Launchpad)</title>
+<style>
+  :root {
+    --bg: #070b12;
+    --panel: #0d1420;
+    --panel-border: #1e2c40;
+    --text: #e2e8f0;
+    --dim: #7f8ea3;
+    --navy: #102a45;
+    --ocean-deep: #0a1828;
+    --sea-blue: #1c5274;
+    --sea-foam: #52c2d0;
+    --orange: #ff6b2b;
+    --amber: #f59e0b;
+    --green: #10b981;
+    --red: #ef4444;
+    --cyan: #06b6d4;
+    --gold: #fbbf24;
+  }
+  * { box-sizing: border-box; user-select: none; }
+  html, body {
+    margin: 0; padding: 0; height: 100%; width: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+    overflow: hidden;
+  }
+
+  /* TOP COMMAND HEADER */
+  #bar {
+    height: 48px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--panel-border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0 12px;
+    font-size: 11px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    z-index: 100;
+  }
+  #bar .brand {
+    font-weight: 800;
+    font-size: 13px;
+    letter-spacing: 0.15em;
+    color: var(--sea-foam);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  #bar .brand span { color: var(--orange); }
+  #bar .badge {
+    background: #1a2736;
+    color: #94a3b8;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 700;
+    border: 1px solid #27394e;
+  }
+  .v-sep { width: 1px; height: 22px; background: var(--panel-border); flex: none; }
+  
+  /* MIDI STATUS */
+  #midi-box {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: #09101a;
+    padding: 3px 8px;
+    border-radius: 4px;
+    border: 1px solid #1a2b3d;
+  }
+  .lamp {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: #334155; box-shadow: inset 0 0 2px #000;
+    flex: none;
+  }
+  .lamp.on { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .lamp.warn { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+  #midiTxt { font-family: monospace; font-size: 10px; color: #94a3b8; cursor: pointer; }
+  
+  /* CONTROLS IN HEADER */
+  .bar-btn {
+    background: #152232;
+    color: var(--text);
+    border: 1px solid var(--panel-border);
+    border-radius: 3px;
+    padding: 4px 8px;
+    font: inherit;
+    font-size: 10px;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-transform: uppercase;
+  }
+  .bar-btn:hover { border-color: var(--orange); color: #fff; background: #1c2e44; }
+  .bar-btn.active { background: var(--orange); border-color: var(--orange); color: #fff; font-weight: 700; }
+  
+  .bar-select {
+    background: #152232;
+    color: var(--text);
+    border: 1px solid var(--panel-border);
+    border-radius: 3px;
+    padding: 3px 6px;
+    font: inherit;
+    font-size: 10px;
+    text-transform: uppercase;
+  }
+  
+  /* MAIN LAYOUT */
+  #viewport {
+    position: absolute;
+    top: 48px; left: 0; right: 0; bottom: 270px;
+    background: #050d18;
+    overflow: hidden;
+  }
+  #sea-canvas {
+    width: 100%; height: 100%;
+    display: block;
+  }
+  
+  /* TACTICAL HUD OVERLAY */
+  #tactical-hud {
+    position: absolute;
+    top: 10px; left: 14px; right: 14px;
+    pointer-events: none;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+  }
+  .hud-card {
+    background: rgba(13, 20, 32, 0.85);
+    backdrop-filter: blur(4px);
+    border: 1px solid rgba(82, 194, 208, 0.25);
+    border-radius: 5px;
+    padding: 8px 12px;
+    color: #f1f5f9;
+    font-family: 'Segoe UI', monospace;
+    font-size: 11px;
+    min-width: 220px;
+  }
+  .hud-title {
+    font-weight: 800;
+    letter-spacing: 0.1em;
+    color: var(--sea-foam);
+    margin-bottom: 4px;
+    display: flex;
+    justify-content: space-between;
+  }
+  .hud-stat-bar {
+    height: 6px;
+    background: #1e293b;
+    border-radius: 3px;
+    overflow: hidden;
+    margin: 3px 0 6px 0;
+  }
+  .hud-stat-fill {
+    height: 100%;
+    transition: width 0.2s ease;
+  }
+  .fill-hp { background: linear-gradient(90deg, #10b981, #34d399); }
+  .fill-hp.low { background: linear-gradient(90deg, #ef4444, #f87171); }
+  .fill-water { background: linear-gradient(90deg, #0284c7, #38bdf8); }
+  .fill-ammo { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+
+  /* HARDWARE DECKS AT BOTTOM */
+  #hardware-console {
+    position: absolute;
+    bottom: 0; left: 0; right: 0; height: 270px;
+    background: #090e17;
+    border-top: 2px solid var(--panel-border);
+    display: flex;
+    z-index: 90;
+  }
+  
+  /* LAUNCH CONTROL XL CONTAINER */
+  #lc-xl-panel {
+    flex: 62;
+    background: #0b111a;
+    border-right: 2px solid var(--panel-border);
+    padding: 8px 12px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    position: relative;
+  }
+  .panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 10px;
+    font-weight: 700;
+    color: #64748b;
+    letter-spacing: 0.08em;
+    margin-bottom: 4px;
+  }
+  .panel-header b { color: var(--text); }
+  
+  /* CHANNELS CONTAINER */
+  .channels-grid {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 6px;
+    height: calc(100% - 24px);
+  }
+  .channel-strip {
+    background: #111a26;
+    border: 1px solid #1e2c3d;
+    border-radius: 5px;
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: space-between;
+    position: relative;
+  }
+  .channel-strip.p1 { border-top: 3px solid #0284c7; }
+  .channel-strip.p2 { border-top: 3px solid #dc2626; }
+  .channel-tag {
+    font-size: 9px;
+    font-weight: 800;
+    color: #94a3b8;
+    margin-bottom: 2px;
+  }
+  .channel-turret-name {
+    font-size: 8px;
+    color: #64748b;
+  }
+  
+  /* ROTARY KNOB WIDGET */
+  .knob-row {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    align-items: center;
+    width: 100%;
+  }
+  .knob-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    position: relative;
+    cursor: ns-resize;
+  }
+  .knob-label {
+    font-size: 7px;
+    color: #64748b;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .knob-ring {
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 35%, #2a384c, #131b26);
+    border: 1px solid #334458;
+    position: relative;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.6);
+  }
+  .knob-pointer {
+    position: absolute;
+    width: 2px; height: 9px;
+    background: #38bdf8;
+    top: 2px; left: 11px;
+    transform-origin: bottom center;
+    border-radius: 1px;
+    pointer-events: none;
+  }
+  .knob-val {
+    font-size: 8px;
+    font-family: monospace;
+    color: #cbd5e1;
+    margin-top: 1px;
+  }
+  
+  /* BUTTONS ROW */
+  .strip-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 100%;
+    align-items: center;
+    margin: 2px 0;
+  }
+  .pad-btn {
+    width: 28px; height: 16px;
+    background: #172333;
+    border: 1px solid #2d415b;
+    border-radius: 3px;
+    font-size: 7px;
+    font-weight: 800;
+    color: #94a3b8;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.08s;
+  }
+  .pad-btn:hover { background: #22344c; border-color: #38bdf8; color: #fff; }
+  .pad-btn:active, .pad-btn.pressed {
+    background: var(--orange);
+    color: #fff;
+    box-shadow: 0 0 10px var(--orange);
+    transform: scale(0.96);
+  }
+  .fire-btn {
+    height: 20px;
+    width: 32px;
+    font-size: 8px;
+    letter-spacing: 0.05em;
+  }
+  .fire-btn.ready {
+    border-color: var(--green);
+    color: var(--green);
+    background: #064e3b;
+    box-shadow: 0 0 6px rgba(16, 185, 129, 0.4);
+  }
+  .fire-btn.reloading {
+    border-color: #475569;
+    color: #64748b;
+    background: #0f172a;
+    cursor: not-allowed;
+  }
+  
+  /* VERTICAL FADER WIDGET */
+  .fader-wrap {
+    flex: 1;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    position: relative;
+    cursor: ns-resize;
+  }
+  .fader-track {
+    width: 6px;
+    height: 70px;
+    background: #0a0f16;
+    border: 1px solid #1e2c3d;
+    border-radius: 3px;
+    position: relative;
+  }
+  .fader-fill {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    background: linear-gradient(to top, #0284c7, #38bdf8);
+    border-radius: 2px;
+  }
+  .fader-cap {
+    position: absolute;
+    width: 22px; height: 14px;
+    left: -8px;
+    background: linear-gradient(180deg, #3d4f68 0%, #1e2838 50%, #151d29 100%);
+    border: 1px solid #556c8b;
+    border-radius: 2px;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .fader-cap::after {
+    content: '';
+    width: 14px; height: 2px;
+    background: #38bdf8;
+  }
+  .fader-val {
+    font-size: 8px;
+    font-family: monospace;
+    color: #94a3b8;
+    margin-top: 2px;
+  }
+
+  /* LAUNCHPAD PANEL (PvE SHIP BLUEPRINT) */
+  #lp-panel {
+    flex: 38;
+    background: #080d14;
+    padding: 8px 12px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+  .lp-grid-wrap {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .launchpad-grid {
+    display: grid;
+    grid-template-columns: repeat(8, 24px);
+    grid-template-rows: repeat(8, 24px);
+    gap: 3px;
+    background: #060a0f;
+    padding: 6px;
+    border-radius: 6px;
+    border: 2px solid #1a2533;
+    box-shadow: inset 0 0 10px rgba(0,0,0,0.8);
+  }
+  .lp-pad {
+    width: 24px; height: 24px;
+    border-radius: 3px;
+    background: #141b24;
+    border: 1px solid #233142;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 7px;
+    font-weight: 700;
+    transition: all 0.1s;
+    position: relative;
+    overflow: hidden;
+  }
+  .lp-pad:hover { border-color: #94a3b8; }
+  .lp-pad.nominal { background: #064e3b; border-color: #059669; color: #6ee7b7; }
+  .lp-pad.fire {
+    background: #b91c1c; border-color: #f87171; color: #fff;
+    animation: pulse-fire 0.7s infinite alternate;
+  }
+  .lp-pad.flood {
+    background: #0369a1; border-color: #38bdf8; color: #fff;
+    animation: pulse-flood 1s infinite alternate;
+  }
+  .lp-pad.repair {
+    background: #b45309; border-color: #f59e0b; color: #fff;
+  }
+  .lp-pad.ammo {
+    background: #4338ca; border-color: #818cf8; color: #fff;
+  }
+  @keyframes pulse-fire {
+    0% { box-shadow: 0 0 2px #ef4444; }
+    100% { box-shadow: 0 0 12px #ef4444; background: #dc2626; }
+  }
+  @keyframes pulse-flood {
+    0% { box-shadow: 0 0 2px #0284c7; }
+    100% { box-shadow: 0 0 10px #38bdf8; background: #0284c7; }
+  }
+  .lp-legend {
+    display: flex;
+    justify-content: space-around;
+    font-size: 8px;
+    color: #64748b;
+    margin-top: 4px;
+    text-transform: uppercase;
+  }
+  .lp-legend span { display: flex; align-items: center; gap: 3px; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; }
+
+  /* OVERLAY SCREENS (Game Over, Victory, Pause) */
+  #modal-screen {
+    position: absolute;
+    inset: 0;
+    background: rgba(5, 11, 20, 0.88);
+    backdrop-filter: blur(8px);
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+  }
+  .modal-card {
+    background: #0f172a;
+    border: 2px solid var(--orange);
+    border-radius: 8px;
+    padding: 24px 36px;
+    text-align: center;
+    max-width: 480px;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.9);
+  }
+  .modal-title {
+    font-size: 22px;
+    font-weight: 800;
+    letter-spacing: 0.1em;
+    color: var(--orange);
+    margin-bottom: 8px;
+  }
+  .modal-desc {
+    color: #94a3b8;
+    font-size: 13px;
+    line-height: 1.5;
+    margin-bottom: 18px;
+  }
+  .modal-btn {
+    background: var(--orange);
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    padding: 10px 20px;
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    text-transform: uppercase;
+  }
+  .modal-btn:hover { background: #ea580c; }
+</style>
+</head>
+<body>
+
+<!-- TOP COMMAND BAR -->
+<div id="bar">
+  <div class="brand">⚓ BROADSIDE <span>WARFARE</span></div>
+  <div class="badge">LAUNCH CONTROL XL × LAUNCHPAD</div>
+  <div class="v-sep"></div>
+
+  <!-- MIDI STATUS -->
+  <div id="midi-box">
+    <div class="lamp" id="lamp"></div>
+    <div id="midiTxt" title="Click to view MIDI connection details">MIDI: Initializing...</div>
+    <button class="bar-btn" id="midiBtn">Connect Hardware</button>
+  </div>
+  <div class="v-sep"></div>
+
+  <!-- MODE SELECTOR -->
+  <label style="color:var(--dim);">Game Mode:
+    <select class="bar-select" id="gameModeSel">
+      <option value="pve_waves">PvE: Naval Convoy Defense (Waves)</option>
+      <option value="pve_boss">PvE: Dreadnought Leviathan Boss</option>
+      <option value="pvp_duel">PvP: 1v1 Broadside Duel (P1 vs P2)</option>
+    </select>
+  </label>
+  <div class="v-sep"></div>
+
+  <!-- GLOBAL ACTIONS -->
+  <button class="bar-btn" id="fullSalvoBtn" title="Fire all loaded turrets simultaneously (Spacebar)">🔥 Full Salvo</button>
+  <button class="bar-btn" id="smokeBtn" title="Deploy emergency smoke screen">💨 Smoke Screen</button>
+  <button class="bar-btn" id="audioToggleBtn">🔊 Audio: Synth ON</button>
+  <button class="bar-btn" id="resetBtn">Restart Battle</button>
+
+  <div style="margin-left:auto; font-size:10px; color:#64748b;">
+    Keys: <b>1-4</b> Fire T1-4 | <b>5-8</b> Fire T5-8 | <b>SPACE</b> Salvo
+  </div>
+</div>
+
+<!-- OCEAN BATTLEFIELD VIEWPORT -->
+<div id="viewport">
+  <canvas id="sea-canvas"></canvas>
+
+  <!-- TACTICAL HUD OVERLAY -->
+  <div id="tactical-hud">
+    <!-- PLAYER 1 SHIP STATS -->
+    <div class="hud-card" id="p1-card">
+      <div class="hud-title">
+        <span>BLUE DREADNOUGHT (P1)</span>
+        <span id="p1-status-tag" style="color:#38bdf8;">COMBAT READY</span>
+      </div>
+      <div style="display:flex; justify-content:space-between; font-size:9px;">
+        <span>HULL INTEGRITY</span>
+        <span id="p1-hp-txt">100%</span>
+      </div>
+      <div class="hud-stat-bar"><div class="hud-stat-fill fill-hp" id="p1-hp-fill" style="width:100%;"></div></div>
+
+      <div style="display:flex; justify-content:space-between; font-size:9px;">
+        <span>FLOOD LEVEL (BILGE)</span>
+        <span id="p1-water-txt">0% (DRY)</span>
+      </div>
+      <div class="hud-stat-bar"><div class="hud-stat-fill fill-water" id="p1-water-fill" style="width:0%;"></div></div>
+
+      <div style="display:flex; justify-content:space-between; font-size:9px; color:#94a3b8;">
+        <span>SPEED: <b id="p1-spd-txt" style="color:#fff;">16 kts</b></span>
+        <span>WIND: <b id="wind-txt" style="color:#f59e0b;">+4 kts E</b></span>
+      </div>
+    </div>
+
+    <!-- OBJECTIVE / WAVE INFO -->
+    <div class="hud-card" style="text-align:center; min-width:180px;">
+      <div class="hud-title" style="justify-content:center;" id="match-title">WAVE 1 / 5</div>
+      <div style="font-size:14px; font-weight:800; color:#f59e0b; margin:2px 0;" id="score-txt">SCORE: 0000</div>
+      <div style="font-size:9px; color:#94a3b8;" id="wave-enemies-txt">ENEMIES REMAINING: 3</div>
+    </div>
+
+    <!-- PLAYER 2 / ENEMY FLEET STATS -->
+    <div class="hud-card" id="p2-card">
+      <div class="hud-title">
+        <span id="enemy-fleet-label">CRIMSON ARMADA (P2)</span>
+        <span id="p2-status-tag" style="color:#f87171;">HOSTILE</span>
+      </div>
+      <div style="display:flex; justify-content:space-between; font-size:9px;">
+        <span id="p2-hp-label">FLEET HEALTH</span>
+        <span id="p2-hp-txt">100%</span>
+      </div>
+      <div class="hud-stat-bar"><div class="hud-stat-fill fill-hp" id="p2-hp-fill" style="width:100%; background:linear-gradient(90deg,#ef4444,#f87171);"></div></div>
+
+      <div style="display:flex; justify-content:space-between; font-size:9px; color:#94a3b8;">
+        <span>DISTANCE: <b id="range-txt" style="color:#fff;">4,200 m</b></span>
+        <span>THREAT LEVEL: <b style="color:#ef4444;">ELEVATED</b></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- HARDWARE CONTROL CONSOLE -->
+<div id="hardware-console">
+  <!-- LAUNCH CONTROL XL (GUNNERY DESK) -->
+  <div id="lc-xl-panel">
+    <div class="panel-header">
+      <span><b>NOVATION LAUNCH CONTROL XL</b> — 8-CHANNEL GUNNERY CONSOLE</span>
+      <span>P1 TURRETS 1–4 (CH 1–4) &nbsp;|&nbsp; <span id="xl-p2-header-tag">P2 / AUX TURRETS 5–8 (CH 5–8)</span></span>
+    </div>
+
+    <div class="channels-grid" id="channelsGrid">
+      <!-- 8 CHANNEL STRIPS WILL BE INJECTED DYNAMICALLY -->
+    </div>
+  </div>
+
+  <!-- LAUNCHPAD MK2 (TACTICAL DAMAGE CONTROL & BLUEPRINT) -->
+  <div id="lp-panel">
+    <div class="panel-header">
+      <span><b>NOVATION LAUNCHPAD</b> — DAMAGE CONTROL &amp; MUNITIONS</span>
+      <span style="color:#38bdf8;">INTERNAL BLUEPRINT</span>
+    </div>
+
+    <div class="lp-grid-wrap">
+      <div class="launchpad-grid" id="launchpadGrid">
+        <!-- 64 COMPARTMENT PADS (8x8) -->
+      </div>
+    </div>
+
+    <div class="lp-legend">
+      <span><span class="dot" style="background:#10b981;"></span> Nominal</span>
+      <span><span class="dot" style="background:#ef4444;"></span> Fire (Click: Fix)</span>
+      <span><span class="dot" style="background:#0284c7;"></span> Flood (Click: Pump)</span>
+      <span><span class="dot" style="background:#818cf8;"></span> Munitions Hoist</span>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL POPUP (VICTORY / DEFEAT) -->
+<div id="modal-screen">
+  <div class="modal-card">
+    <div class="modal-title" id="modalTitle">VICTORY AT SEA</div>
+    <div class="modal-desc" id="modalDesc">All hostile naval combatants neutralized. Fleet survival confirmed.</div>
+    <button class="modal-btn" id="modalActionBtn">Continue Next Wave</button>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+/* =========================================================================
+   1. GLOBAL GAME STATE & CONSTANTS
+   ========================================================================= */
+const cv = document.getElementById('sea-canvas');
+const ctx = cv.getContext('2d');
+
+const G = {
+  mode: 'pve_waves',      // 'pve_waves', 'pve_boss', 'pvp_duel'
+  time: 0,
+  score: 0,
+  wave: 1,
+  wind: 12,              // px/s horizontal wind force
+  paused: false,
+  audioEnabled: true,
+  cameraX: 0,
+  smokeTimer: 0,
+  
+  // Player 1 Battleship
+  p1: {
+    x: 160, y: 0,
+    hp: 100, maxHp: 100,
+    water: 0,             // flooding percentage 0..100
+    fires: 0,
+    speed: 12,
+    sinking: false,
+    turrets: [
+      { id: 0, name: 'Fore-A', xOff: -110, yOff: -18, angle: 28, power: 85, ammo: 'AP', spread: 15, ready: true, reloadT: 0, maxReload: 2.4, color: '#38bdf8' },
+      { id: 1, name: 'Fore-B', xOff: -70,  yOff: -26, angle: 32, power: 88, ammo: 'AP', spread: 15, ready: true, reloadT: 0, maxReload: 2.6, color: '#38bdf8' },
+      { id: 2, name: 'Aft-X',  xOff: 70,   yOff: -26, angle: 34, power: 90, ammo: 'HE', spread: 15, ready: true, reloadT: 0, maxReload: 2.8, color: '#38bdf8' },
+      { id: 3, name: 'Aft-Y',  xOff: 110,  yOff: -18, angle: 30, power: 82, ammo: 'HE', spread: 15, ready: true, reloadT: 0, maxReload: 2.5, color: '#38bdf8' },
+    ]
+  },
+
+  // Player 2 or Aux/Secondary Fleet
+  p2: {
+    x: 880, y: 0,
+    hp: 100, maxHp: 100,
+    water: 0,
+    fires: 0,
+    speed: 12,
+    sinking: false,
+    turrets: [
+      { id: 4, name: 'Fore-A', xOff: 110, yOff: -18, angle: 28, power: 85, ammo: 'AP', spread: 15, ready: true, reloadT: 0, maxReload: 2.4, color: '#ef4444' },
+      { id: 5, name: 'Fore-B', xOff: 70,  yOff: -26, angle: 32, power: 88, ammo: 'AP', spread: 15, ready: true, reloadT: 0, maxReload: 2.6, color: '#ef4444' },
+      { id: 6, name: 'Aft-X',  xOff: -70, yOff: -26, angle: 34, power: 90, ammo: 'HE', spread: 15, ready: true, reloadT: 0, maxReload: 2.8, color: '#ef4444' },
+      { id: 7, name: 'Aft-Y',  xOff: -110, yOff: -18, angle: 30, power: 82, ammo: 'HE', spread: 15, ready: true, reloadT: 0, maxReload: 2.5, color: '#ef4444' },
+    ]
+  },
+
+  // Projectiles, particles, splashes
+  shells: [],
+  particles: [],
+  splashes: [],
+  enemies: [],
+
+  // Launchpad 8x8 Compartments Blueprint
+  // row 0..7 (top to bottom), col 0..7 (bow to stern)
+  shipGrid: Array(8).fill(null).map((_, r) =>
+    Array(8).fill(null).map((_, c) => ({
+      r, c,
+      name: getCompartmentName(r, c),
+      state: 'nominal', // 'nominal', 'fire', 'flood', 'repair', 'ammo'
+      health: 100,
+      timer: 0
+    }))
+  )
+};
+
+function getCompartmentName(r, c) {
+  if (r === 0) return c < 4 ? 'Bridge / Conning' : 'Fire Director / Radar';
+  if (r === 1) return `Main Turret #${Math.floor(c/2)+1}`;
+  if (r === 2) return `Ammo Hoist #${Math.floor(c/2)+1}`;
+  if (r === 3) return c < 4 ? 'Fwd Citadel Armor' : 'Aft Citadel Armor';
+  if (r === 4) return c < 4 ? 'Powder Magazine A' : 'Powder Magazine B';
+  if (r === 5) return c < 4 ? 'Boiler Room #1' : 'Steam Turbine Hall';
+  if (r === 6) return c < 4 ? 'Dynamo Generator' : 'Electrical Switchboard';
+  return `Bilge Pump #${c + 1}`;
+}
+
+/* =========================================================================
+   2. PROCEDURAL WEB AUDIO SYNTHESIZER
+   ========================================================================= */
+let audioCtx = null;
+
+function initAudio() {
+  if (!audioCtx) {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (AudioContext) audioCtx = new AudioContext();
+  }
+  if (audioCtx && audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+}
+
+function playCannonShot(isHeavy = true) {
+  if (!G.audioEnabled || !audioCtx) return;
+  const now = audioCtx.currentTime;
+
+  // 1. Sub-bass thump (sine sweep 120Hz -> 25Hz)
+  const osc = audioCtx.createOscillator();
+  const oscGain = audioCtx.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(isHeavy ? 140 : 180, now);
+  osc.frequency.exponentialRampToValueAtTime(25, now + 0.45);
+
+  oscGain.gain.setValueAtTime(1.0, now);
+  oscGain.gain.exponentialRampToValueAtTime(0.001, now + 0.55);
+
+  osc.connect(oscGain);
+  oscGain.connect(audioCtx.destination);
+  osc.start(now);
+  osc.stop(now + 0.6);
+
+  // 2. High-energy explosion burst (filtered noise)
+  const bufferSize = audioCtx.sampleRate * 0.4;
+  const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) {
+    data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (audioCtx.sampleRate * 0.08));
+  }
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = buffer;
+
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(isHeavy ? 1200 : 2200, now);
+  filter.frequency.exponentialRampToValueAtTime(80, now + 0.35);
+
+  const noiseGain = audioCtx.createGain();
+  noiseGain.gain.setValueAtTime(0.8, now);
+  noiseGain.gain.exponentialRampToValueAtTime(0.01, now + 0.38);
+
+  noise.connect(filter);
+  filter.connect(noiseGain);
+  noiseGain.connect(audioCtx.destination);
+  noise.start(now);
+}
+
+function playImpact(kind = 'hit') {
+  if (!G.audioEnabled || !audioCtx) return;
+  const now = audioCtx.currentTime;
+
+  if (kind === 'citadel') {
+    // Heavy metal tearing & internal detonation
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(90, now);
+    osc.frequency.linearRampToValueAtTime(30, now + 0.5);
+    g.gain.setValueAtTime(0.9, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+    osc.connect(g);
+    g.connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.65);
+  } else if (kind === 'splash') {
+    // Water geyser whoosh
+    const bufferSize = audioCtx.sampleRate * 0.35;
+    const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.sin(i / 100);
+    }
+    const noise = audioCtx.createBufferSource();
+    noise.buffer = buffer;
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(600, now);
+    filter.frequency.exponentialRampToValueAtTime(150, now + 0.35);
+
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.4, now);
+    g.gain.linearRampToValueAtTime(0.001, now + 0.35);
+
+    noise.connect(filter);
+    filter.connect(g);
+    g.connect(audioCtx.destination);
+    noise.start(now);
+  } else if (kind === 'alarm') {
+    // Dual klaxon beep
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(750, now);
+    osc.frequency.setValueAtTime(600, now + 0.12);
+    g.gain.setValueAtTime(0.3, now);
+    g.gain.linearRampToValueAtTime(0.01, now + 0.25);
+    osc.connect(g);
+    g.connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.28);
+  }
+}
+
+/* =========================================================================
+   3. WEB MIDI CONTROLLER INTERFACE (LAUNCH CONTROL XL + LAUNCHPAD)
+   ========================================================================= */
+const MIDI = {
+  access: null,
+  lcIn: null, lcOut: null,
+  lpIn: null, lpOut: null,
+  lastLeds: new Map()
+};
+
+function updateMidiStatus(statusText, lampClass) {
+  const lamp = document.getElementById('lamp');
+  const txt = document.getElementById('midiTxt');
+  if (lamp) lamp.className = 'lamp ' + lampClass;
+  if (txt) txt.textContent = statusText;
+}
+
+function initMIDI() {
+  if (!navigator.requestMIDIAccess) {
+    updateMidiStatus('MIDI: Not supported in this browser', 'warn');
+    return;
+  }
+  updateMidiStatus('MIDI: Requesting access...', 'warn');
+  navigator.requestMIDIAccess({ sysex: true }).then(access => {
+    MIDI.access = access;
+    access.onstatechange = onMidiDeviceChange;
+    scanMidiDevices();
+  }, err => {
+    updateMidiStatus('MIDI: Access denied (' + err.name + ')', 'warn');
+  });
+}
+
+function scanMidiDevices() {
+  if (!MIDI.access) return;
+  MIDI.lcIn = null; MIDI.lcOut = null;
+  MIDI.lpIn = null; MIDI.lpOut = null;
+
+  for (const input of MIDI.access.inputs.values()) {
+    const name = (input.name || '').toLowerCase();
+    if (name.includes('launch control xl')) {
+      MIDI.lcIn = input;
+    } else if (name.includes('launchpad')) {
+      MIDI.lpIn = input;
+    }
+  }
+
+  for (const output of MIDI.access.outputs.values()) {
+    const name = (output.name || '').toLowerCase();
+    if (name.includes('launch control xl')) {
+      MIDI.lcOut = output;
+    } else if (name.includes('launchpad')) {
+      MIDI.lpOut = output;
+    }
+  }
+
+  // Bind message listeners
+  if (MIDI.lcIn) {
+    MIDI.lcIn.onmidimessage = handleLaunchControlMidi;
+  }
+  if (MIDI.lpIn) {
+    MIDI.lpIn.onmidimessage = handleLaunchpadMidi;
+  }
+
+  // Update Status Text
+  const parts = [];
+  if (MIDI.lcIn) parts.push('LC XL [Connected]');
+  if (MIDI.lpIn) parts.push('Launchpad [Connected]');
+
+  if (parts.length > 0) {
+    updateMidiStatus('MIDI: ' + parts.join(' + '), 'on');
+  } else {
+    updateMidiStatus('MIDI: Ready (Mouse & Keyboard Active)', '');
+  }
+}
+
+function onMidiDeviceChange(e) {
+  scanMidiDevices();
+}
+
+/**
+ * Handle Launch Control XL Messages:
+ * - Faders (CC 77..84): Power (Propellant Velocity)
+ * - Knob Row 1 (CC 13..20): Elevation Angle
+ * - Knob Row 2 (CC 29..36): Munition Ammo Selector (AP/HE/TORP)
+ * - Knob Row 3 (CC 49..56): Salvo Spread & Gyro Stabilizer
+ * - Buttons Row 2 (Notes 57..64 or CC 57..64): FIRE!
+ * - Buttons Row 1 (Notes 41..48 or CC 41..48): Turret Lock / Hoist
+ */
+function handleLaunchControlMidi(e) {
+  initAudio();
+  const [status, data1, data2] = e.data;
+  const msgType = status & 0xf0;
+
+  // CC Messages (Knobs, Faders, or CC Buttons)
+  if (msgType === 0xb0) {
+    const cc = data1;
+    const val = data2;
+
+    // Faders 1..8 (CC 77..84)
+    if (cc >= 77 && cc <= 84) {
+      const idx = cc - 77;
+      setTurretFader(idx, val);
+    }
+    // Knob Row 1 (CC 13..20): Elevation (5 to 80 deg)
+    else if (cc >= 13 && cc <= 20) {
+      const idx = cc - 13;
+      const angle = Math.round(5 + (val / 127) * 75);
+      setTurretAngle(idx, angle);
+    }
+    // Knob Row 2 (CC 29..36): Ammo Selector
+    else if (cc >= 29 && cc <= 36) {
+      const idx = cc - 29;
+      const ammo = val < 45 ? 'AP' : (val < 90 ? 'HE' : 'TORP');
+      setTurretAmmo(idx, ammo);
+    }
+    // Knob Row 3 (CC 49..56): Spread (5 to 40)
+    else if (cc >= 49 && cc <= 56) {
+      const idx = cc - 49;
+      const spread = Math.round(5 + (val / 127) * 35);
+      setTurretSpread(idx, spread);
+    }
+    // Track Control Buttons (CC Mode: 57..64)
+    else if (cc >= 57 && cc <= 64 && val > 0) {
+      fireTurret(cc - 57);
+    }
+    // Track Focus Buttons (CC Mode: 41..48)
+    else if (cc >= 41 && cc <= 48 && val > 0) {
+      toggleTurretLock(cc - 41);
+    }
+  }
+  // Note Messages (Buttons in Note Mode)
+  else if (msgType === 0x90 && data2 > 0) {
+    const note = data1;
+    // Track Control (Fire buttons: 57..64)
+    if (note >= 57 && note <= 64) {
+      fireTurret(note - 57);
+    }
+    // Track Focus (41..48)
+    else if (note >= 41 && note <= 48) {
+      toggleTurretLock(note - 41);
+    }
+  }
+}
+
+/**
+ * Handle Launchpad MK2 Messages:
+ * 8x8 Grid maps to internal ship compartments (rows 1..8, cols 1..8)
+ * Notes: 11..18, 21..28, ..., 81..88
+ */
+function handleLaunchpadMidi(e) {
+  initAudio();
+  const [status, data1, data2] = e.data;
+  const msgType = status & 0xf0;
+
+  if (msgType === 0x90 && data2 > 0) {
+    const note = data1;
+    const col = (note % 10) - 1;           // 0..7
+    const row = 8 - Math.floor(note / 10); // 0..7 inverted to match deck layout
+    if (col >= 0 && col < 8 && row >= 0 && row < 8) {
+      interactCompartment(row, col);
+    }
+  }
+}
+
+/**
+ * Send Bi-Directional LED Color Feedback to Hardware Controllers
+ */
+function updateHardwareLEDs() {
+  // Launch Control XL Feedback: update Track Control buttons based on reload ready state
+  if (MIDI.lcOut) {
+    for (let i = 0; i < 8; i++) {
+      const turret = (i < 4) ? G.p1.turrets[i] : G.p2.turrets[i - 4];
+      const note = 57 + i;
+      // Color values: 60 = Green (Ready), 15 = Red (Reloading / Damaged), 62 = Amber
+      const colorVal = turret.ready ? 60 : 15;
+      try {
+        MIDI.lcOut.send([0x90, note, colorVal]);
+      } catch (err) {}
+    }
+  }
+
+  // Launchpad MK2 Feedback: send 8x8 RGB grid
+  if (MIDI.lpOut) {
+    const sysexHeader = [0xF0, 0x00, 0x20, 0x29, 0x02, 0x18, 0x0B];
+    const data = [];
+    for (let r = 0; r < 8; r++) {
+      for (let c = 0; c < 8; c++) {
+        const comp = G.shipGrid[r][c];
+        const note = (8 - r) * 10 + (c + 1);
+        let rgb = [5, 15, 10]; // default dim
+        if (comp.state === 'nominal') rgb = [2, 35, 12];
+        else if (comp.state === 'fire') rgb = [60, 4, 4];
+        else if (comp.state === 'flood') rgb = [4, 25, 60];
+        else if (comp.state === 'repair') rgb = [60, 35, 0];
+        else if (comp.state === 'ammo') rgb = [30, 20, 60];
+        data.push(note, rgb[0], rgb[1], rgb[2]);
+      }
+    }
+    try {
+      MIDI.lpOut.send([...sysexHeader, ...data, 0xF7]);
+    } catch (err) {}
+  }
+}
+
+/* =========================================================================
+   4. GUNNERY & TURRET CONTROL FUNCTIONS
+   ========================================================================= */
+function getTurretById(idx) {
+  return idx < 4 ? G.p1.turrets[idx] : G.p2.turrets[idx - 4];
+}
+
+function setTurretFader(idx, midiVal) {
+  const turret = getTurretById(idx);
+  if (!turret) return;
+  turret.power = Math.round(30 + (midiVal / 127) * 70); // 30% to 100% velocity
+  updateChannelUI(idx);
+}
+
+function setTurretAngle(idx, angle) {
+  const turret = getTurretById(idx);
+  if (!turret) return;
+  turret.angle = Math.max(5, Math.min(85, angle));
+  updateChannelUI(idx);
+}
+
+function setTurretAmmo(idx, ammoType) {
+  const turret = getTurretById(idx);
+  if (!turret) return;
+  turret.ammo = ammoType;
+  updateChannelUI(idx);
+}
+
+function setTurretSpread(idx, spread) {
+  const turret = getTurretById(idx);
+  if (!turret) return;
+  turret.spread = spread;
+  updateChannelUI(idx);
+}
+
+function toggleTurretLock(idx) {
+  const turret = getTurretById(idx);
+  if (!turret) return;
+  // Boost reload hoist if currently reloading
+  if (!turret.ready && turret.reloadT > 0.4) {
+    turret.reloadT = Math.max(0, turret.reloadT - 1.0);
+    playImpact('alarm');
+  }
+}
+
+function fireTurret(idx) {
+  const isP1 = idx < 4;
+  const ship = isP1 ? G.p1 : G.p2;
+  const turret = isP1 ? ship.turrets[idx] : ship.turrets[idx - 4];
+  if (!turret || !turret.ready || ship.sinking) return;
+
+  initAudio();
+  turret.ready = false;
+  turret.reloadT = turret.maxReload;
+
+  // Sound & Muzzle flash
+  playCannonShot(turret.ammo === 'AP');
+
+  // Spawn projectile(s)
+  const dir = isP1 ? 1 : -1;
+  const rad = (turret.angle * Math.PI) / 180;
+  const speed = turret.power * 2.2; // canvas velocity scale
+
+  const startX = ship.x + turret.xOff * dir;
+  const startY = ship.y + turret.yOff;
+
+  // Gun recoil kickback
+  turret.recoil = 8;
+
+  // Muzzle smoke particle
+  for (let i = 0; i < 12; i++) {
+    G.particles.push({
+      x: startX + Math.cos(rad) * 22 * dir,
+      y: startY - Math.sin(rad) * 22,
+      vx: (Math.cos(rad) * dir * speed * 0.15) + (Math.random() * 4 - 2),
+      vy: (-Math.sin(rad) * speed * 0.15) + (Math.random() * 4 - 2),
+      life: 0.6 + Math.random() * 0.4,
+      maxLife: 1.0,
+      size: 4 + Math.random() * 8,
+      color: Math.random() > 0.5 ? '#f59e0b' : '#64748b'
+    });
+  }
+
+  // Dispersion spread
+  const dispersion = (Math.random() * 2 - 1) * (turret.spread * 0.005);
+  const vx = Math.cos(rad + dispersion) * speed * dir;
+  const vy = -Math.sin(rad + dispersion) * speed;
+
+  G.shells.push({
+    x: startX,
+    y: startY,
+    vx: vx,
+    vy: vy,
+    owner: isP1 ? 'p1' : 'p2',
+    ammo: turret.ammo,
+    dmg: turret.ammo === 'AP' ? 24 : 16,
+    life: 8.0
+  });
+
+  updateChannelUI(idx);
+}
+
+function fireFullSalvo(forPlayer = 'p1') {
+  initAudio();
+  const ship = forPlayer === 'p1' ? G.p1 : G.p2;
+  const offset = forPlayer === 'p1' ? 0 : 4;
+  for (let i = 0; i < 4; i++) {
+    setTimeout(() => {
+      fireTurret(offset + i);
+    }, i * 90);
+  }
+}
+
+/* =========================================================================
+   5. LAUNCHPAD DAMAGE CONTROL & REPROVISIONING
+   ========================================================================= */
+function interactCompartment(r, c) {
+  initAudio();
+  const comp = G.shipGrid[r][c];
+  if (!comp) return;
+
+  if (comp.state === 'fire') {
+    // Extinguish fire
+    comp.state = 'repair';
+    comp.timer = 1.2;
+    playImpact('splash');
+  } else if (comp.state === 'flood') {
+    // Activate bilge pump & weld breach
+    comp.state = 'repair';
+    comp.timer = 1.5;
+    G.p1.water = Math.max(0, G.p1.water - 8);
+    playImpact('splash');
+  } else if (comp.state === 'ammo' || r === 2) {
+    // Reprovision munition hoists: rapid reload to corresponding turret
+    const tIdx = Math.floor(c / 2);
+    if (G.p1.turrets[tIdx]) {
+      G.p1.turrets[tIdx].reloadT = 0;
+      G.p1.turrets[tIdx].ready = true;
+      comp.state = 'ammo';
+      comp.timer = 0.8;
+      playImpact('alarm');
+    }
+  } else {
+    // Routine maintenance
+    comp.state = 'repair';
+    comp.timer = 0.6;
+  }
+  renderLaunchpadGrid();
+}
+
+/* =========================================================================
+   6. COMBAT PHYSICS & ENEMY AI LOOP
+   ========================================================================= */
+function spawnEnemyWave() {
+  G.enemies = [];
+  const count = G.mode === 'pve_boss' ? 1 : 2 + G.wave;
+  const startX = 850;
+
+  if (G.mode === 'pve_boss') {
+    G.enemies.push({
+      type: 'boss',
+      name: 'SMS KAISER LEVIATHAN',
+      x: 900, y: 0,
+      hp: 350, maxHp: 350,
+      speed: 8,
+      w: 260, h: 50,
+      fireTimer: 2.0,
+      salvoCount: 0
+    });
+  } else {
+    for (let i = 0; i < count; i++) {
+      const isCruiser = i % 2 === 1;
+      G.enemies.push({
+        type: isCruiser ? 'cruiser' : 'gunboat',
+        name: isCruiser ? 'Armored Cruiser' : 'Torpedo Gunboat',
+        x: startX + i * 160 + Math.random() * 40,
+        y: 0,
+        hp: isCruiser ? 90 : 45,
+        maxHp: isCruiser ? 90 : 45,
+        speed: isCruiser ? 10 : 16,
+        w: isCruiser ? 140 : 80,
+        h: isCruiser ? 32 : 22,
+        fireTimer: 1.5 + Math.random() * 2.0
+      });
+    }
+  }
+  document.getElementById('wave-enemies-txt').textContent = `ENEMIES REMAINING: ${G.enemies.length}`;
+}
+
+function updateCombat(dt) {
+  G.time += dt;
+
+  // Dynamic ocean water level
+  const seaBaseY = cv.height * 0.68;
+  G.p1.y = seaBaseY + Math.sin(G.time * 1.5) * 4 + (G.p1.water / 100) * 14;
+  G.p2.y = seaBaseY + Math.cos(G.time * 1.4) * 4 + (G.p2.water / 100) * 14;
+
+  // Turret reload timers
+  [...G.p1.turrets, ...G.p2.turrets].forEach(t => {
+    if (t.recoil > 0) t.recoil = Math.max(0, t.recoil - dt * 25);
+    if (!t.ready) {
+      t.reloadT -= dt;
+      if (t.reloadT <= 0) {
+        t.ready = true;
+        t.reloadT = 0;
+        updateHardwareLEDs();
+      }
+      updateChannelUI(t.id);
+    }
+  });
+
+  // Launchpad Compartment state decays & hazards
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      const comp = G.shipGrid[r][c];
+      if (comp.timer > 0) {
+        comp.timer -= dt;
+        if (comp.timer <= 0) {
+          comp.state = 'nominal';
+          renderLaunchpadGrid();
+        }
+      }
+      // Fire deals progressive hull damage
+      if (comp.state === 'fire') {
+        G.p1.hp = Math.max(0, G.p1.hp - dt * 0.4);
+      }
+      // Flooding adds water
+      if (comp.state === 'flood') {
+        G.p1.water = Math.min(100, G.p1.water + dt * 0.6);
+      }
+    }
+  }
+
+  // Update Shells (Ballistics trajectory math)
+  for (let i = G.shells.length - 1; i >= 0; i--) {
+    const s = G.shells[i];
+    s.x += s.vx * dt + (G.wind * 0.3) * dt;
+    s.vy += 85 * dt; // gravity
+    s.y += s.vy * dt;
+    s.life -= dt;
+
+    // Shell tracer trail
+    if (Math.random() > 0.3) {
+      G.particles.push({
+        x: s.x, y: s.y,
+        vx: -s.vx * 0.05, vy: -s.vy * 0.05,
+        life: 0.25, maxLife: 0.25,
+        size: 2,
+        color: s.ammo === 'HE' ? '#ff6b2b' : '#38bdf8'
+      });
+    }
+
+    // Check hit water
+    const waterY = getWaterHeight(s.x, seaBaseY);
+    if (s.y >= waterY) {
+      createWaterSplash(s.x, waterY);
+      playImpact('splash');
+      G.shells.splice(i, 1);
+      continue;
+    }
+
+    // Check hit Player 1
+    if (s.owner !== 'p1' && checkShipHit(G.p1, s)) {
+      applyShipDamage(G.p1, s);
+      G.shells.splice(i, 1);
+      continue;
+    }
+
+    // Check hit Player 2 (in PvP)
+    if (G.mode === 'pvp_duel' && s.owner === 'p1' && checkShipHit(G.p2, s)) {
+      applyShipDamage(G.p2, s);
+      G.shells.splice(i, 1);
+      continue;
+    }
+
+    // Check hit PvE Enemies
+    if (G.mode !== 'pvp_duel' && s.owner === 'p1') {
+      let hitEnemy = false;
+      for (let eIdx = G.enemies.length - 1; eIdx >= 0; eIdx--) {
+        const enemy = G.enemies[eIdx];
+        if (checkEnemyHit(enemy, s, seaBaseY)) {
+          enemy.hp -= s.dmg;
+          G.score += 150;
+          createExplosion(s.x, s.y, s.ammo === 'HE');
+          playImpact(s.dmg > 20 ? 'citadel' : 'hit');
+
+          if (enemy.hp <= 0) {
+            createExplosion(enemy.x, seaBaseY, true, 30);
+            G.enemies.splice(eIdx, 1);
+            G.score += 500;
+            document.getElementById('wave-enemies-txt').textContent = `ENEMIES REMAINING: ${G.enemies.length}`;
+            if (G.enemies.length === 0) {
+              onWaveCleared();
+            }
+          }
+          hitEnemy = true;
+          break;
+        }
+      }
+      if (hitEnemy) {
+        G.shells.splice(i, 1);
+        continue;
+      }
+    }
+
+    // Expired shell
+    if (s.life <= 0 || s.x < -100 || s.x > cv.width + 100) {
+      G.shells.splice(i, 1);
+    }
+  }
+
+  // Update Particles
+  for (let i = G.particles.length - 1; i >= 0; i--) {
+    const p = G.particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.life -= dt;
+    if (p.life <= 0) G.particles.splice(i, 1);
+  }
+
+  // Update Splashes
+  for (let i = G.splashes.length - 1; i >= 0; i--) {
+    const sp = G.splashes[i];
+    sp.t += dt;
+    if (sp.t >= sp.duration) G.splashes.splice(i, 1);
+  }
+
+  // PvE Enemy AI Gunnery
+  if (G.mode !== 'pvp_duel') {
+    G.enemies.forEach(e => {
+      e.fireTimer -= dt;
+      if (e.fireTimer <= 0) {
+        e.fireTimer = 2.2 + Math.random() * 2.5;
+        // Enemy fires at P1
+        const rad = (25 + Math.random() * 20) * Math.PI / 180;
+        const dist = Math.abs(e.x - G.p1.x);
+        const power = Math.sqrt((dist * 85) / Math.sin(2 * rad)) * (0.9 + Math.random() * 0.2);
+        G.shells.push({
+          x: e.x - 20,
+          y: seaBaseY - 15,
+          vx: -Math.cos(rad) * power,
+          vy: -Math.sin(rad) * power,
+          owner: 'enemy',
+          ammo: Math.random() > 0.5 ? 'HE' : 'AP',
+          dmg: 18,
+          life: 8.0
+        });
+        playCannonShot(false);
+      }
+    });
+  }
+
+  // Update HUD values
+  updateHUD();
+}
+
+function getWaterHeight(x, baseY) {
+  return baseY + Math.sin(x * 0.015 + G.time * 2.5) * 6 + Math.cos(x * 0.035 - G.time * 1.8) * 3;
+}
+
+function checkShipHit(ship, shell) {
+  const dx = Math.abs(shell.x - ship.x);
+  const dy = shell.y - ship.y;
+  return dx < 140 && dy > -35 && dy < 15;
+}
+
+function checkEnemyHit(enemy, shell, seaBaseY) {
+  const dx = Math.abs(shell.x - enemy.x);
+  const dy = shell.y - (seaBaseY - enemy.h / 2);
+  return dx < enemy.w / 2 && Math.abs(dy) < enemy.h;
+}
+
+function applyShipDamage(ship, shell) {
+  const isP1 = ship === G.p1;
+  const isAP = shell.ammo === 'AP';
+  const dmg = isAP ? 22 : 15;
+  ship.hp = Math.max(0, ship.hp - dmg);
+
+  createExplosion(shell.x, shell.y, !isAP, 18);
+  playImpact(isAP ? 'citadel' : 'hit');
+
+  // Trigger Launchpad compartment damage on P1
+  if (isP1) {
+    const randR = Math.floor(Math.random() * 8);
+    const randC = Math.floor(Math.random() * 8);
+    if (isAP) {
+      // AP punches into lower keel & citadel: flooding!
+      G.shipGrid[randR < 4 ? 4 : 7][randC].state = 'flood';
+      G.p1.water = Math.min(100, G.p1.water + 12);
+    } else {
+      // HE starts fires on deck and superstructure!
+      G.shipGrid[randR < 3 ? randR : 1][randC].state = 'fire';
+      G.p1.fires++;
+    }
+    renderLaunchpadGrid();
+    updateHardwareLEDs();
+  }
+
+  if (ship.hp <= 0 && !ship.sinking) {
+    ship.sinking = true;
+    onGameOver(isP1 ? 'DEFEAT: YOUR SHIP SANK' : 'VICTORY: ENEMY FLEET DESTROYED');
+  }
+}
+
+function createWaterSplash(x, y) {
+  G.splashes.push({ x, y, t: 0, duration: 0.8 });
+  for (let i = 0; i < 15; i++) {
+    G.particles.push({
+      x: x + (Math.random() * 10 - 5),
+      y: y,
+      vx: (Math.random() * 4 - 2),
+      vy: -(Math.random() * 5 + 4),
+      life: 0.5 + Math.random() * 0.3,
+      maxLife: 0.8,
+      size: 3 + Math.random() * 3,
+      color: '#e0f2fe'
+    });
+  }
+}
+
+function createExplosion(x, y, isHE = false, count = 16) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const spd = Math.random() * 6 + 2;
+    G.particles.push({
+      x: x, y: y,
+      vx: Math.cos(angle) * spd,
+      vy: Math.sin(angle) * spd - 2,
+      life: 0.4 + Math.random() * 0.5,
+      maxLife: 0.9,
+      size: 4 + Math.random() * 8,
+      color: isHE ? (Math.random() > 0.4 ? '#ff5b1f' : '#f59e0b') : '#94a3b8'
+    });
+  }
+}
+
+function onWaveCleared() {
+  G.wave++;
+  G.score += 1000;
+  showModal(`WAVE ${G.wave - 1} CLEARED!`, `Prepare for next echelon of hostile vessels.`, 'Engage Next Wave', () => {
+    hideModal();
+    spawnEnemyWave();
+  });
+}
+
+function onGameOver(msg) {
+  showModal(msg, `Final Battle Score: ${G.score}`, 'Restart Battle', () => {
+    hideModal();
+    restartBattle();
+  });
+}
+
+function restartBattle() {
+  G.p1.hp = 100; G.p1.water = 0; G.p1.sinking = false;
+  G.p2.hp = 100; G.p2.water = 0; G.p2.sinking = false;
+  G.score = 0; G.wave = 1;
+  G.shells = []; G.particles = [];
+  // Reset compartments
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      G.shipGrid[r][c].state = 'nominal';
+    }
+  }
+  renderLaunchpadGrid();
+  spawnEnemyWave();
+  updateHardwareLEDs();
+}
+
+/* =========================================================================
+   7. CANVAS RENDERING ENGINE (SHIPS, WAVES, PARTICLES)
+   ========================================================================= */
+function drawScene() {
+  // Clear screen
+  ctx.fillStyle = '#050c18';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  const seaBaseY = cv.height * 0.68;
+
+  // Sky backdrop & atmospheric gradient
+  const skyGrad = ctx.createLinearGradient(0, 0, 0, seaBaseY);
+  skyGrad.addColorStop(0, '#040912');
+  skyGrad.addColorStop(0.7, '#08172b');
+  skyGrad.addColorStop(1, '#112b48');
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(0, 0, cv.width, seaBaseY + 20);
+
+  // Distant horizon mountain silhouettes
+  ctx.fillStyle = '#0a1d33';
+  ctx.beginPath();
+  ctx.moveTo(0, seaBaseY);
+  for (let x = 0; x <= cv.width; x += 40) {
+    const my = seaBaseY - 25 - Math.sin(x * 0.005) * 20 - Math.cos(x * 0.012) * 12;
+    ctx.lineTo(x, my);
+  }
+  ctx.lineTo(cv.width, seaBaseY);
+  ctx.fill();
+
+  // Render Ships
+  drawBattleship(G.p1, true);
+
+  if (G.mode === 'pvp_duel') {
+    drawBattleship(G.p2, false);
+  } else {
+    // Draw PvE enemies
+    G.enemies.forEach(e => drawEnemyShip(e, seaBaseY));
+  }
+
+  // Render Shells
+  G.shells.forEach(s => {
+    ctx.fillStyle = s.ammo === 'HE' ? '#ff6b2b' : '#38bdf8';
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // Render Particles
+  G.particles.forEach(p => {
+    const alpha = p.life / p.maxLife;
+    ctx.fillStyle = p.color;
+    ctx.globalAlpha = Math.max(0, alpha);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * (1 - alpha * 0.3), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1.0;
+  });
+
+  // Render Splashes
+  G.splashes.forEach(sp => {
+    const progress = sp.t / sp.duration;
+    ctx.strokeStyle = '#e0f2fe';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.ellipse(sp.x, sp.y, 16 * progress, 35 * (1 - progress), 0, 0, Math.PI * 2);
+    ctx.stroke();
+  });
+
+  // Render Ocean Waves (Foreground multi-layered sine waves)
+  drawOcean(seaBaseY);
+}
+
+function drawBattleship(ship, isP1) {
+  ctx.save();
+  ctx.translate(ship.x, ship.y);
+  if (!isP1) ctx.scale(-1, 1); // mirror for opponent
+
+  // Pitch/tilt based on waves & speed
+  const tilt = Math.sin(G.time * 2 + (isP1 ? 0 : 2)) * 0.02;
+  ctx.rotate(tilt);
+
+  // Hull base
+  const hullGrad = ctx.createLinearGradient(0, -30, 0, 15);
+  hullGrad.addColorStop(0, isP1 ? '#1e293b' : '#3b1c1c');
+  hullGrad.addColorStop(1, isP1 ? '#0f172a' : '#1c0a0a');
+
+  ctx.fillStyle = hullGrad;
+  ctx.strokeStyle = isP1 ? '#38bdf8' : '#ef4444';
+  ctx.lineWidth = 1.5;
+
+  ctx.beginPath();
+  ctx.moveTo(-140, 10);
+  ctx.lineTo(130, 10);
+  ctx.lineTo(150, -15);
+  ctx.lineTo(120, -18);
+  ctx.lineTo(-120, -18);
+  ctx.lineTo(-145, -5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  // Waterline armor belt strip
+  ctx.fillStyle = '#dc2626';
+  ctx.fillRect(-138, 2, 275, 5);
+
+  // Superstructure / Deck houses
+  ctx.fillStyle = '#334155';
+  ctx.fillRect(-45, -38, 90, 20); // main deck house
+  ctx.fillRect(-20, -55, 40, 18); // conning bridge
+  ctx.fillRect(-8, -75, 16, 20);  // radar mast
+
+  // Funnels emitting steam & smoke
+  ctx.fillStyle = '#1e293b';
+  ctx.fillRect(-15, -45, 12, 18);
+  ctx.fillRect(5, -45, 12, 18);
+
+  // Spawn smoke particles from funnels
+  if (Math.random() > 0.4) {
+    G.particles.push({
+      x: ship.x + (isP1 ? -10 : 10),
+      y: ship.y - 48,
+      vx: (isP1 ? -1 : 1) * 1.5 + (G.wind * 0.05),
+      vy: -1.2,
+      life: 0.8, maxLife: 0.8,
+      size: 4 + Math.random() * 4,
+      color: '#475569'
+    });
+  }
+
+  // Draw 4 Turrets
+  ship.turrets.forEach(t => {
+    ctx.save();
+    ctx.translate(t.xOff, t.yOff);
+
+    // Turret Barbette mount
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(-14, -4, 28, 8);
+
+    // Turret Housing
+    ctx.fillStyle = '#475569';
+    ctx.beginPath();
+    ctx.roundRect(-16, -16, 32, 14, [4, 4, 1, 1]);
+    ctx.fill();
+
+    // Turret Gun Barrels (rotates by angle + recoil)
+    const rad = (-t.angle * Math.PI) / 180;
+    ctx.save();
+    ctx.translate(6, -9);
+    ctx.rotate(rad);
+
+    ctx.fillStyle = '#94a3b8';
+    // Twin barrels
+    const recoilOffset = t.recoil || 0;
+    ctx.fillRect(-recoilOffset, -3, 30, 2.5);
+    ctx.fillRect(-recoilOffset, 1, 30, 2.5);
+    ctx.restore();
+
+    ctx.restore();
+  });
+
+  ctx.restore();
+}
+
+function drawEnemyShip(e, seaBaseY) {
+  ctx.save();
+  ctx.translate(e.x, seaBaseY + Math.sin(G.time * 2 + e.x) * 3);
+
+  ctx.fillStyle = '#3f1818';
+  ctx.strokeStyle = '#ef4444';
+  ctx.lineWidth = 1;
+
+  ctx.beginPath();
+  ctx.moveTo(-e.w/2, 6);
+  ctx.lineTo(e.w/2, 6);
+  ctx.lineTo(e.w/2 - 10, -e.h/2);
+  ctx.lineTo(-e.w/2 + 10, -e.h/2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  // Superstructure
+  ctx.fillStyle = '#662222';
+  ctx.fillRect(-e.w/4, -e.h, e.w/2, e.h/2);
+
+  // Health bar above enemy
+  const barW = e.w * 0.8;
+  const hpRatio = Math.max(0, e.hp / e.maxHp);
+  ctx.fillStyle = '#1e293b';
+  ctx.fillRect(-barW/2, -e.h - 14, barW, 4);
+  ctx.fillStyle = '#ef4444';
+  ctx.fillRect(-barW/2, -e.h - 14, barW * hpRatio, 4);
+
+  ctx.restore();
+}
+
+function drawOcean(baseY) {
+  const oceanGrad = ctx.createLinearGradient(0, baseY, 0, cv.height);
+  oceanGrad.addColorStop(0, 'rgba(16, 52, 85, 0.92)');
+  oceanGrad.addColorStop(0.5, 'rgba(10, 30, 50, 0.96)');
+  oceanGrad.addColorStop(1, '#050c18');
+
+  ctx.fillStyle = oceanGrad;
+  ctx.beginPath();
+  ctx.moveTo(0, cv.height);
+  ctx.lineTo(0, baseY);
+
+  for (let x = 0; x <= cv.width; x += 15) {
+    const y = getWaterHeight(x, baseY);
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(cv.width, cv.height);
+  ctx.closePath();
+  ctx.fill();
+
+  // White foam crests
+  ctx.strokeStyle = 'rgba(82, 194, 208, 0.7)';
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  for (let x = 0; x <= cv.width; x += 15) {
+    const y = getWaterHeight(x, baseY);
+    if (x === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+/* =========================================================================
+   8. UI RENDERING: LAUNCH CONTROL XL CHANNELS & LAUNCHPAD 8x8 GRID
+   ========================================================================= */
+function buildChannelStrips() {
+  const container = document.getElementById('channelsGrid');
+  container.innerHTML = '';
+
+  for (let i = 0; i < 8; i++) {
+    const isP1 = i < 4;
+    const turretIdx = isP1 ? i : i - 4;
+    const turret = isP1 ? G.p1.turrets[turretIdx] : G.p2.turrets[turretIdx];
+
+    const strip = document.createElement('div');
+    strip.className = `channel-strip ${isP1 ? 'p1' : 'p2'}`;
+    strip.id = `strip-${i}`;
+
+    strip.innerHTML = `
+      <div class="channel-tag">CH ${i + 1}</div>
+      <div class="channel-turret-name">${isP1 ? 'P1' : 'P2'} T${turretIdx + 1} ${turret.name}</div>
+
+      <!-- KNOB ROW 1: ELEVATION ANGLE -->
+      <div class="knob-row">
+        <div class="knob-wrap" data-channel="${i}" data-knob="elev" title="Row 1: Elevation Angle (CC ${13 + i})">
+          <div class="knob-label">Elev</div>
+          <div class="knob-ring" id="knob-elev-ring-${i}">
+            <div class="knob-pointer" id="knob-elev-ptr-${i}" style="transform: rotate(0deg);"></div>
+          </div>
+          <div class="knob-val" id="knob-elev-val-${i}">${turret.angle}°</div>
+        </div>
+      </div>
+
+      <!-- KNOB ROW 2: AMMO SELECTOR -->
+      <div class="knob-row">
+        <div class="knob-wrap" data-channel="${i}" data-knob="ammo" title="Row 2: Ammo AP/HE (CC ${29 + i})">
+          <div class="knob-label">Ammo</div>
+          <div class="knob-ring" id="knob-ammo-ring-${i}">
+            <div class="knob-pointer" id="knob-ammo-ptr-${i}" style="transform: rotate(0deg);"></div>
+          </div>
+          <div class="knob-val" id="knob-ammo-val-${i}">${turret.ammo}</div>
+        </div>
+      </div>
+
+      <!-- BUTTONS ROW -->
+      <div class="strip-buttons">
+        <button class="pad-btn fire-btn ready" id="fire-btn-${i}" title="Bottom Button: FIRE! (Note ${57 + i})">FIRE</button>
+      </div>
+
+      <!-- FADER: POWER / VELOCITY -->
+      <div class="fader-wrap" data-channel="${i}" title="Fader: Powder Charge / Velocity (CC ${77 + i})">
+        <div class="fader-track">
+          <div class="fader-fill" id="fader-fill-${i}" style="height:${turret.power}%;"></div>
+          <div class="fader-cap" id="fader-cap-${i}" style="bottom:calc(${turret.power}% - 7px);"></div>
+        </div>
+        <div class="fader-val" id="fader-val-${i}">${turret.power}%</div>
+      </div>
+    `;
+
+    container.appendChild(strip);
+
+    // Bind Fire button
+    strip.querySelector(`#fire-btn-${i}`).addEventListener('click', () => {
+      fireTurret(i);
+    });
+
+    // Bind Interactive Mouse Drag for Knobs & Faders
+    setupKnobInteraction(strip.querySelector(`[data-knob="elev"]`), i, 'elev');
+    setupKnobInteraction(strip.querySelector(`[data-knob="ammo"]`), i, 'ammo');
+    setupFaderInteraction(strip.querySelector('.fader-wrap'), i);
+  }
+}
+
+function updateChannelUI(idx) {
+  const turret = getTurretById(idx);
+  if (!turret) return;
+
+  // Update Angle Knob
+  const ptr = document.getElementById(`knob-elev-ptr-${idx}`);
+  const valTxt = document.getElementById(`knob-elev-val-${idx}`);
+  if (ptr) {
+    const rot = -135 + ((turret.angle - 5) / 75) * 270;
+    ptr.style.transform = `rotate(${rot}deg)`;
+  }
+  if (valTxt) valTxt.textContent = `${turret.angle}°`;
+
+  // Update Ammo Knob
+  const ammoTxt = document.getElementById(`knob-ammo-val-${idx}`);
+  const ammoPtr = document.getElementById(`knob-ammo-ptr-${idx}`);
+  if (ammoTxt) ammoTxt.textContent = turret.ammo;
+  if (ammoPtr) {
+    const rot = turret.ammo === 'AP' ? -90 : (turret.ammo === 'HE' ? 0 : 90);
+    ammoPtr.style.transform = `rotate(${rot}deg)`;
+  }
+
+  // Update Fader
+  const fill = document.getElementById(`fader-fill-${idx}`);
+  const cap = document.getElementById(`fader-cap-${idx}`);
+  const faderTxt = document.getElementById(`fader-val-${idx}`);
+  if (fill) fill.style.height = `${turret.power}%`;
+  if (cap) cap.style.bottom = `calc(${turret.power}% - 7px)`;
+  if (faderTxt) faderTxt.textContent = `${turret.power}%`;
+
+  // Update Fire Button state
+  const btn = document.getElementById(`fire-btn-${idx}`);
+  if (btn) {
+    if (turret.ready) {
+      btn.className = 'pad-btn fire-btn ready';
+      btn.textContent = 'FIRE';
+    } else {
+      btn.className = 'pad-btn fire-btn reloading';
+      btn.textContent = turret.reloadT.toFixed(1) + 's';
+    }
+  }
+}
+
+function setupKnobInteraction(el, idx, kind) {
+  if (!el) return;
+  let startY = 0;
+  let startVal = 0;
+
+  el.addEventListener('mousedown', e => {
+    startY = e.clientY;
+    const turret = getTurretById(idx);
+    startVal = kind === 'elev' ? turret.angle : (turret.ammo === 'AP' ? 0 : (turret.ammo === 'HE' ? 50 : 100));
+
+    function onMouseMove(moveEvent) {
+      const delta = (startY - moveEvent.clientY) * 0.8;
+      if (kind === 'elev') {
+        const newVal = Math.max(5, Math.min(85, Math.round(startVal + delta)));
+        setTurretAngle(idx, newVal);
+      } else {
+        const raw = Math.max(0, Math.min(100, startVal + delta));
+        const newAmmo = raw < 35 ? 'AP' : (raw < 70 ? 'HE' : 'TORP');
+        setTurretAmmo(idx, newAmmo);
+      }
+    }
+
+    function onMouseUp() {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  });
+}
+
+function setupFaderInteraction(el, idx) {
+  if (!el) return;
+  el.addEventListener('mousedown', e => {
+    const rect = el.querySelector('.fader-track').getBoundingClientRect();
+
+    function updateFromY(clientY) {
+      const offset = rect.bottom - clientY;
+      const pct = Math.max(0, Math.min(100, Math.round((offset / rect.height) * 100)));
+      setTurretFader(idx, Math.round((pct / 100) * 127));
+    }
+
+    updateFromY(e.clientY);
+
+    function onMouseMove(moveEvent) {
+      updateFromY(moveEvent.clientY);
+    }
+    function onMouseUp() {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  });
+}
+
+function renderLaunchpadGrid() {
+  const container = document.getElementById('launchpadGrid');
+  container.innerHTML = '';
+
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      const comp = G.shipGrid[r][c];
+      const pad = document.createElement('div');
+      pad.className = `lp-pad ${comp.state}`;
+      pad.title = `[R${r+1}:C${c+1}] ${comp.name} (${comp.state})`;
+      pad.textContent = r === 0 ? 'BRG' : (r === 1 ? `T${Math.floor(c/2)+1}` : (r === 7 ? 'PMP' : ''));
+
+      pad.addEventListener('click', () => {
+        interactCompartment(r, c);
+      });
+
+      container.appendChild(pad);
+    }
+  }
+}
+
+function updateHUD() {
+  document.getElementById('p1-hp-txt').textContent = `${Math.round(G.p1.hp)}%`;
+  document.getElementById('p1-hp-fill').style.width = `${G.p1.hp}%`;
+  document.getElementById('p1-water-txt').textContent = `${Math.round(G.p1.water)}% (${G.p1.water > 50 ? 'CRITICAL' : (G.p1.water > 20 ? 'FLOOD' : 'DRY')})`;
+  document.getElementById('p1-water-fill').style.width = `${G.p1.water}%`;
+
+  if (G.mode === 'pvp_duel') {
+    document.getElementById('enemy-fleet-label').textContent = 'CRIMSON BATTLESHIP (P2)';
+    document.getElementById('p2-hp-txt').textContent = `${Math.round(G.p2.hp)}%`;
+    document.getElementById('p2-hp-fill').style.width = `${G.p2.hp}%`;
+  } else if (G.enemies.length > 0) {
+    const totalMax = G.enemies.reduce((acc, e) => acc + e.maxHp, 0);
+    const totalCurr = G.enemies.reduce((acc, e) => acc + Math.max(0, e.hp), 0);
+    const ratio = totalMax > 0 ? (totalCurr / totalMax) * 100 : 0;
+    document.getElementById('enemy-fleet-label').textContent = G.mode === 'pve_boss' ? 'LEVIATHAN DREADNOUGHT' : 'HOSTILE CONVOY';
+    document.getElementById('p2-hp-txt').textContent = `${Math.round(ratio)}%`;
+    document.getElementById('p2-hp-fill').style.width = `${ratio}%`;
+  } else {
+    document.getElementById('p2-hp-txt').textContent = `0%`;
+    document.getElementById('p2-hp-fill').style.width = `0%`;
+  }
+
+  document.getElementById('score-txt').textContent = `SCORE: ${G.score}`;
+  document.getElementById('wind-txt').textContent = `${G.wind > 0 ? '+' : ''}${Math.round(G.wind)} kts ${G.wind >= 0 ? 'E' : 'W'}`;
+}
+
+/* =========================================================================
+   9. MODALS & POPUPS
+   ========================================================================= */
+function showModal(title, desc, btnTxt, onAction) {
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('modalDesc').textContent = desc;
+  const btn = document.getElementById('modalActionBtn');
+  btn.textContent = btnTxt;
+  btn.onclick = onAction;
+  document.getElementById('modal-screen').style.display = 'flex';
+}
+
+function hideModal() {
+  document.getElementById('modal-screen').style.display = 'none';
+}
+
+/* =========================================================================
+   10. KEYBOARD & WINDOW EVENTS
+   ========================================================================= */
+window.addEventListener('keydown', e => {
+  initAudio();
+  if (e.repeat) return;
+
+  // Number keys 1..4 Fire P1 Turrets
+  if (e.code === 'Digit1') fireTurret(0);
+  if (e.code === 'Digit2') fireTurret(1);
+  if (e.code === 'Digit3') fireTurret(2);
+  if (e.code === 'Digit4') fireTurret(3);
+
+  // Number keys 5..8 Fire P2 / Aux Turrets
+  if (e.code === 'Digit5') fireTurret(4);
+  if (e.code === 'Digit6') fireTurret(5);
+  if (e.code === 'Digit7') fireTurret(6);
+  if (e.code === 'Digit8') fireTurret(7);
+
+  // Spacebar = Full Salvo
+  if (e.code === 'Space') {
+    e.preventDefault();
+    fireFullSalvo('p1');
+  }
+});
+
+function resizeCanvas() {
+  const vp = document.getElementById('viewport');
+  cv.width = vp.clientWidth;
+  cv.height = vp.clientHeight;
+}
+window.addEventListener('resize', resizeCanvas);
+
+// Header Buttons
+document.getElementById('fullSalvoBtn').addEventListener('click', () => fireFullSalvo('p1'));
+document.getElementById('smokeBtn').addEventListener('click', () => {
+  playImpact('alarm');
+  for (let i = 0; i < 40; i++) {
+    G.particles.push({
+      x: G.p1.x + Math.random() * 80 - 40,
+      y: G.p1.y - 20 + Math.random() * 20,
+      vx: (Math.random() * 6 - 3),
+      vy: -(Math.random() * 3 + 1),
+      life: 2.0 + Math.random() * 1.5,
+      maxLife: 3.5,
+      size: 15 + Math.random() * 25,
+      color: '#cbd5e1'
+    });
+  }
+});
+document.getElementById('audioToggleBtn').addEventListener('click', () => {
+  G.audioEnabled = !G.audioEnabled;
+  document.getElementById('audioToggleBtn').textContent = G.audioEnabled ? '🔊 Audio: Synth ON' : '🔇 Audio: Muted';
+});
+document.getElementById('resetBtn').addEventListener('click', restartBattle);
+document.getElementById('gameModeSel').addEventListener('change', e => {
+  G.mode = e.target.value;
+  document.getElementById('xl-p2-header-tag').textContent = G.mode === 'pvp_duel' ? 'P2 TURRETS 1–4 (CH 5–8)' : 'AUX / SECONDARIES (CH 5–8)';
+  restartBattle();
+});
+document.getElementById('midiBtn').addEventListener('click', initMIDI);
+
+/* =========================================================================
+   11. ANIMATION & GAME TICK LOOP
+   ========================================================================= */
+let lastT = performance.now();
+
+function gameLoop(now) {
+  const dt = Math.min(0.1, (now - lastT) / 1000);
+  lastT = now;
+
+  updateCombat(dt);
+  drawScene();
+
+  requestAnimationFrame(gameLoop);
+}
+
+// Initialization on load
+window.addEventListener('DOMContentLoaded', () => {
+  resizeCanvas();
+  buildChannelStrips();
+  renderLaunchpadGrid();
+  spawnEnemyWave();
+  initMIDI();
+  requestAnimationFrame(gameLoop);
+});
+</script>
+</body>
+</html>
