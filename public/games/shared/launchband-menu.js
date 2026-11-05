@@ -13,6 +13,22 @@
   // Game Registry
   const ALL_GAMES = [
     {
+      id: 'dustline',
+      title: 'DUSTLINE',
+      sub: 'twin-engine racer',
+      requiredHardware: ['Launch Control XL'],
+      path: '../dustline/index.html',
+      hostPath: '/games/dustline/index.html'
+    },
+    {
+      id: 'sector',
+      title: 'Sector Defense',
+      sub: 'Defend a central station on the 8×8 grid',
+      requiredHardware: ['Launchpad MKII (8×8 Grid)'],
+      path: '../sector/index.html',
+      hostPath: '/games/sector/index.html'
+    },
+    {
       id: 'broadside',
       title: 'Broadside: Naval Warfare',
       sub: 'Asymmetric 2-Player Co-op Flotilla Combat',

@@ -121,6 +121,7 @@ pub fn run() {
             launchpad::send_led_frame,
             launchpad::send_led_leds,
             launchpad::reset_launchpad,
+            lcxl::send_lcxl_leds,
             commands::get_audio_status,
             commands::audio_devices,
             commands::asio_available,
