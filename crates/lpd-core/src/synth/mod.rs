@@ -564,4 +564,5 @@ impl Instrument for Synth {
 }
 pub mod export;
 pub mod factory;
+pub mod game;
 pub mod patch;

@@ -41,6 +41,7 @@
   import { acceptLoad, createGeneration, eventFirst, fetchReadyState, INITIAL_LOAD, isTerminal } from './lib/startup.ts';
   import { PREVIEW_MIDI, pushLog, roleStatus } from './lib/midi.ts';
   import { readGameStore, setGameStore } from './lib/gameStore.ts';
+  import { EngineLink } from './lib/engineBridge.ts';
   import { solvePlayLayout } from './lib/layout.ts';
   import { feedLive, hitAmount, hitGroup, runActivity } from './lib/activity.ts';
   import { audioLabel, dropoutRecent, IDLE_SAVE, padEditKey } from './lib/status.ts';
@@ -612,10 +613,28 @@
   function toProto(message: object) {
     protoFrame?.contentWindow?.postMessage(message, '*'); // the frame's origin is opaque (sandbox)
   }
+  // LIVE SYNTH (ship engine spec 5.2): Dustline asks for the app's native engine voice. The bridge
+  // takes messages only from the active frame showing Dustline, drops malformed ones, caps their rate
+  // and replies with the voice's state; the voice stops when the game is left or the window hides.
+  const engineLink = new EngineLink({
+    native: tauri,
+    start: (patch) => call('game_engine_start', { patch }),
+    frame: (on, bend, wheel, gain) => { void call('game_engine_frame', { on, bend, wheel, gain }).catch(() => {}); },
+    stop: () => { void call('game_engine_stop').catch(() => {}); },
+    reply: (state, message) => toProto({ lpd: 'engine-synth-status', state, message }),
+  });
+  $effect(() => {
+    if (!(mode === 'games' && game === 'dustline')) engineLink.stop(true);
+  });
+  $effect(() => {
+    if (!windowVisible) engineLink.stop(false);
+  });
   function flushProtoLeds() {
     if (tauri) void invoke('send_led_leds', { leds: [...protoLeds] }).catch(() => {});
   }
   function protoLoaded() {
+    // No engineLink stop here: Dustline asks for its voice at boot, before this load event fires; a reloaded
+    // game's own start replaces the voice, and leaving the game stops it (the effect above).
     resetProtoLeds();
     toProto({ lpd: 'status', state: deviceState });
     toProto({ lpd: 'lcxl-status', state: lcxlStatus });
@@ -624,6 +643,10 @@
   function onProtoMessage(e: MessageEvent) {
     if (!protoActive() || !protoFrame || e.source !== protoFrame.contentWindow) return;
     const data = e.data as { lpd?: string; leds?: unknown; messages?: unknown; key?: unknown; value?: unknown };
+    if (data?.lpd === 'engine-synth') {
+      void engineLink.receive(data, protoFrame.dataset.game === 'dustline' && game === 'dustline');
+      return;
+    }
     if (data?.lpd === 'req_status') {
       toProto({ lpd: 'status', state: deviceState });
       toProto({ lpd: 'lcxl-status', state: lcxlStatus });

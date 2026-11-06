@@ -2,7 +2,7 @@ use crate::audio::{self, AsioInfo, AudioController, AudioDevice, AudioStatus};
 use crate::config::{AppConfig, AudioPrefs};
 use crate::devices::MidiDevice;
 use crate::patches::{PatchList, PatchRef};
-use crate::router::LearnTarget;
+use crate::router::{GameEngineStatus, LearnTarget};
 use crate::saver::SaveStatus;
 use crate::startup::{LoadStatus, Startup};
 use crate::state::PatchRequest;
@@ -245,6 +245,42 @@ pub(crate) fn keys_pitch(value: f32, state: State<'_, AppState>) {
 #[tauri::command]
 pub(crate) fn keys_mod(value: f32, state: State<'_, AppState>) {
     state.keys_mod(value);
+}
+
+/// LIVE SYNTH (ship engine spec 5.2): build Dustline's engine voice from `patch` (the game's
+/// `.lbpatch` JSON) or the user's `DUSTLINE KESTREL.lbpatch`, off the command thread.
+#[tauri::command]
+pub(crate) async fn game_engine_start(
+    patch: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<GameEngineStatus, String> {
+    let dir = patches_dir(&app).ok();
+    worker(&state, move |s| s.game_engine_start(&patch, dir.as_deref())).await
+}
+
+/// One frame of the game engine voice (one per engine control step, about 40 Hz: 30 Hz at a 60 Hz
+/// display); values are clamped, non-finite frames dropped.
+#[tauri::command]
+pub(crate) fn game_engine_frame(
+    on: bool,
+    bend: f32,
+    wheel: f32,
+    gain: f32,
+    state: State<'_, AppState>,
+) -> bool {
+    state.game_engine_frame(on, bend, wheel, gain)
+}
+
+#[tauri::command]
+pub(crate) fn game_engine_stop(state: State<'_, AppState>) {
+    state.game_engine_stop();
+}
+
+/// Running state and frames received since the start (the native smoke test reads it).
+#[tauri::command]
+pub(crate) fn game_engine_status(state: State<'_, AppState>) -> GameEngineStatus {
+    state.game_engine_status()
 }
 
 #[tauri::command]

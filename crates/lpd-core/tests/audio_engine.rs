@@ -536,3 +536,95 @@ fn keys_pitch_is_the_normalized_wheel() {
     let ratio = crossings(1.0) / crossings(0.0);
     assert!((ratio - 2f32.powf(2.0 / 12.0)).abs() < 0.01, "{ratio}");
 }
+
+fn game_voice() -> Box<lpd_core::synth::game::GameEngineVoice> {
+    let mut p = lpd_core::synth::params::SynthParams::default();
+    p.sub.on = true;
+    lpd_core::synth::game::GameEngineVoice::new(SR, &p)
+}
+
+fn game_frame(engine: &mut Engine) {
+    engine.handle(Command::GameSynthFrame {
+        on: true,
+        bend: 0.0,
+        wheel: 0.5,
+        gain: 1.0,
+    });
+}
+
+#[test]
+fn the_game_voice_plays_on_the_master_bus_and_obeys_the_master_gain() {
+    let (mut engine, _) = Engine::new(SR);
+    for group in 0..8 {
+        engine.handle(Command::SetGroup {
+            group,
+            params: GroupParams {
+                mute: true,
+                ..Default::default()
+            },
+        });
+    }
+    engine.handle(Command::GameSynthLoad(game_voice()));
+    assert_eq!(
+        peak(&render(&mut engine, 2400)),
+        0.0,
+        "silent until the first frame"
+    );
+    game_frame(&mut engine);
+    assert!(
+        peak(&render(&mut engine, 4800)) > 0.01,
+        "on the master even with every channel muted"
+    );
+    engine.handle(Command::SetMasterGain(0.0));
+    game_frame(&mut engine);
+    assert_eq!(peak(&render(&mut engine, 2400)), 0.0);
+}
+
+#[test]
+fn a_cleared_or_replaced_game_voice_returns_through_the_trash() {
+    let (mut engine, _) = Engine::new(SR);
+    let mut trash = engine.take_trash().unwrap();
+    engine.handle(Command::GameSynthLoad(game_voice()));
+    engine.handle(Command::GameSynthLoad(game_voice()));
+    assert!(
+        matches!(trash.pop(), Ok(Trash::Game(_))),
+        "the replaced voice came back"
+    );
+    game_frame(&mut engine);
+    render(&mut engine, 4800);
+    engine.handle(Command::GameSynthClear);
+    assert!(engine.game_voice().is_some());
+    let fade = render(&mut engine, 2400 + 1024);
+    assert!(engine.game_voice().is_none(), "gone after the 50 ms fade");
+    assert!(matches!(trash.pop(), Ok(Trash::Game(_))));
+    assert_eq!(peak(&fade[2 * (2400 + 64)..]), 0.0);
+    // Frames without a voice are ignored.
+    game_frame(&mut engine);
+    assert_eq!(peak(&render(&mut engine, 2400)), 0.0);
+}
+
+#[test]
+fn a_game_voice_start_and_stop_leaves_the_keys_synth_untouched() {
+    let run = |game: bool| {
+        let (mut engine, _) = Engine::new(SR);
+        engine.handle(Command::KeysNoteOn {
+            note: 60,
+            velocity: 110,
+        });
+        if game {
+            engine.handle(Command::GameSynthLoad(game_voice()));
+            game_frame(&mut engine);
+        }
+        render(&mut engine, 4800);
+        if game {
+            engine.handle(Command::GameSynthClear);
+        }
+        render(&mut engine, 4800);
+        render(&mut engine, 4800)
+    };
+    assert_eq!(
+        run(true),
+        run(false),
+        "the same keys output once the game voice has left"
+    );
+}

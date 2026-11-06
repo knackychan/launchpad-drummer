@@ -10,7 +10,8 @@ use lpd_core::instrument::Instrument;
 use lpd_core::kit::learn::{self, Binding, LearnKind, ParamValue, Target};
 use lpd_core::kit::{self, Set};
 use lpd_core::seq::VEL_ACCENT;
-use lpd_core::synth::params::{ParamId, Route};
+use lpd_core::synth::game::GameEngineVoice;
+use lpd_core::synth::params::{ParamId, Route, SynthParams};
 use rtrb::{Consumer, Producer};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -119,6 +120,30 @@ pub struct Rejected {
     pub samples: HashMap<String, Arc<Sample>>,
 }
 
+/// The game patch LIVE SYNTH plays (ship engine spec 5.2). The router keeps it because a restarted
+/// output stream needs a new voice for its sample rate, and `replace_audio` resends only the mixer,
+/// keys, patch and wheels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GameSpec {
+    pub params: SynthParams,
+    /// "user": the user's `DUSTLINE KESTREL.lbpatch`; "game": the patch the game sent.
+    pub source: &'static str,
+    pub name: String,
+    /// Bumped by every start; a voice rebuilt for an older start is dropped.
+    pub generation: u64,
+}
+
+/// What `game_engine_status` reports (the native smoke test reads `frames`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameEngineStatus {
+    pub running: bool,
+    pub frames: u64,
+    pub source: String,
+    pub patch: String,
+    pub rate: u32,
+}
+
 pub struct Router {
     set: Set,
     samples: HashMap<String, Arc<Sample>>,
@@ -147,6 +172,10 @@ pub struct Router {
     seq: Arc<Mutex<SeqState>>,
     /// Replaced keys instruments coming back from the audio thread; dropped off it (see `drain_trash`).
     trash: Option<Consumer<Trash>>,
+    /// LIVE SYNTH: the started game patch, the start counter and the frames since the start.
+    game: Option<GameSpec>,
+    game_generation: u64,
+    game_frames: u64,
 }
 
 impl Router {
@@ -176,6 +205,9 @@ impl Router {
             last_cc: Vec::new(),
             seq: Arc::default(),
             trash: None,
+            game: None,
+            game_generation: 0,
+            game_frames: 0,
         };
         router.send_keys();
         router.send_patch();
@@ -347,6 +379,80 @@ impl Router {
         self.send_keys();
         self.send_patch();
         self.send_wheels();
+    }
+
+    /// LIVE SYNTH start: keep the patch for stream restarts and hand the voice (built off the audio
+    /// thread for the current rate) to the engine. Returns the start's generation.
+    pub fn game_engine_start(
+        &mut self,
+        params: SynthParams,
+        source: &'static str,
+        name: String,
+        voice: Box<GameEngineVoice>,
+    ) -> u64 {
+        self.game_generation += 1;
+        self.game = Some(GameSpec {
+            params,
+            source,
+            name,
+            generation: self.game_generation,
+        });
+        self.game_frames = 0;
+        // A full queue hands the box back; it is dropped here, on the router thread.
+        let _ = self.audio_tx.push(Command::GameSynthLoad(voice));
+        self.game_generation
+    }
+
+    /// One 40 Hz game frame. Nothing is sent (false) before a start or with a non-finite value; the
+    /// rest is clamped.
+    pub fn game_engine_frame(&mut self, on: bool, bend: f32, wheel: f32, gain: f32) -> bool {
+        if self.game.is_none() || !(bend.is_finite() && wheel.is_finite() && gain.is_finite()) {
+            return false;
+        }
+        self.game_frames += 1;
+        let _ = self.audio_tx.push(Command::GameSynthFrame {
+            on,
+            bend: bend.clamp(-1.0, 1.0),
+            wheel: wheel.clamp(0.0, 1.0),
+            gain: gain.clamp(0.0, 1.0),
+        });
+        true
+    }
+
+    /// Fade the game voice out and forget its patch.
+    pub fn game_engine_stop(&mut self) {
+        if self.game.take().is_some() {
+            let _ = self.audio_tx.push(Command::GameSynthClear);
+        }
+    }
+
+    /// The started game patch, if any.
+    pub fn game_spec(&self) -> Option<&GameSpec> {
+        self.game.as_ref()
+    }
+
+    /// After a stream restart: a voice rebuilt for the new rate goes to the engine only while the
+    /// start it was built for is still the running one.
+    pub fn game_engine_rebuild(&mut self, generation: u64, voice: Box<GameEngineVoice>) -> bool {
+        if self.game.as_ref().map(|g| g.generation) != Some(generation) {
+            return false;
+        }
+        let _ = self.audio_tx.push(Command::GameSynthLoad(voice));
+        true
+    }
+
+    pub fn game_engine_status(&self, rate: u32) -> GameEngineStatus {
+        GameEngineStatus {
+            running: self.game.is_some(),
+            frames: self.game_frames,
+            source: self.game.as_ref().map_or("", |g| g.source).into(),
+            patch: self
+                .game
+                .as_ref()
+                .map(|g| g.name.clone())
+                .unwrap_or_default(),
+            rate,
+        }
     }
 
     /// The consumer of instruments the audio thread replaced (from the new stream's engine).
@@ -1620,6 +1726,92 @@ mod tests {
             v.push(c);
         }
         v
+    }
+
+    fn game_voice() -> Box<GameEngineVoice> {
+        GameEngineVoice::new(48_000, &SynthParams::default())
+    }
+
+    #[test]
+    fn the_game_engine_voice_is_started_fed_and_stopped_through_the_engine_queue() {
+        let (mut router, mut rx) = router_with_pad(0.0, 0.0);
+        drain(&mut rx);
+        assert!(
+            !router.game_engine_frame(true, 0.0, 0.5, 0.5),
+            "no frame before a start"
+        );
+        let generation = router.game_engine_start(
+            SynthParams::default(),
+            "game",
+            "KESTREL ENGINE".into(),
+            game_voice(),
+        );
+        assert_eq!(generation, 1);
+        assert!(router.game_engine_frame(true, 2.0, -1.0, 0.5));
+        assert!(!router.game_engine_frame(true, f32::NAN, 0.5, 0.5));
+        assert_eq!(router.game_engine_status(48_000).frames, 1);
+        router.game_engine_stop();
+        let sent = drain(&mut rx);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [
+                    Command::GameSynthLoad(_),
+                    Command::GameSynthFrame { on: true, bend, wheel, gain },
+                    Command::GameSynthClear
+                ] if *bend == 1.0 && *wheel == 0.0 && *gain == 0.5
+            ),
+            "{sent:?}"
+        );
+        assert_eq!(
+            router.game_engine_status(44_100),
+            GameEngineStatus {
+                running: false,
+                frames: 1,
+                source: String::new(),
+                patch: String::new(),
+                rate: 44_100,
+            }
+        );
+        router.game_engine_stop();
+        assert!(drain(&mut rx).is_empty(), "a second stop sends nothing");
+    }
+
+    #[test]
+    fn a_restarted_stream_keeps_the_game_patch_and_takes_a_voice_rebuilt_for_the_same_start_only() {
+        let (mut router, _old_rx) = router_with_pad(0.0, 0.0);
+        let first = router.game_engine_start(
+            SynthParams::default(),
+            "user",
+            "DUSTLINE KESTREL".into(),
+            game_voice(),
+        );
+        let (new_tx, mut new_rx) = RingBuffer::new(1024);
+        let (_evt_tx, new_events) = RingBuffer::new(16);
+        router.replace_audio(new_tx, new_events);
+        assert_eq!(
+            router
+                .game_spec()
+                .map(|g| (g.generation, g.source, g.name.as_str())),
+            Some((first, "user", "DUSTLINE KESTREL"))
+        );
+        assert!(
+            !drain(&mut new_rx)
+                .iter()
+                .any(|c| matches!(c, Command::GameSynthLoad(_))),
+            "replace_audio sends no voice itself"
+        );
+        assert!(!router.game_engine_rebuild(first + 1, game_voice()));
+        assert!(router.game_engine_rebuild(first, game_voice()));
+        assert!(matches!(
+            drain(&mut new_rx).as_slice(),
+            [Command::GameSynthLoad(_)]
+        ));
+        router.game_engine_stop();
+        assert!(
+            !router.game_engine_rebuild(first, game_voice()),
+            "a stopped start takes no rebuild"
+        );
     }
 
     #[test]

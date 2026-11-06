@@ -2,6 +2,7 @@ use super::taps::{self, TapSender};
 use super::{Levels, LowPass, PlayParams, Sample, Taps, Voice};
 use crate::instrument::{Instrument, KeysSound};
 use crate::synth::{
+    game::{GameEngineVoice, GameFrame},
     params::{ParamId, Route, SynthParams},
     Synth,
 };
@@ -101,6 +102,18 @@ pub enum Command {
     },
     /// Swap the instrument. The old one goes back through the trash queue (never dropped here).
     SetInstrument(Box<dyn Instrument>),
+    /// Dustline's live ship engine voice, built off the audio thread. A voice it replaces goes back through the trash.
+    GameSynthLoad(Box<GameEngineVoice>),
+    /// One game frame (one per engine control step); bend and wheel glide to it over 40 ms, the gain
+    /// over 25 ms.
+    GameSynthFrame {
+        on: bool,
+        bend: f32,
+        wheel: f32,
+        gain: f32,
+    },
+    /// Fade the game voice out over 50 ms; it then goes back through the trash.
+    GameSynthClear,
 }
 
 /// Boxes the audio thread hands back, to be dropped off it.
@@ -108,6 +121,7 @@ pub enum Command {
 pub enum Trash {
     Instrument(Box<dyn Instrument>),
     Params(Box<SynthParams>),
+    Game(Box<GameEngineVoice>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +158,9 @@ pub struct Engine {
     keys_group: Option<usize>,
     keys_l: Vec<f32>,
     keys_r: Vec<f32>,
+    game: Option<Box<GameEngineVoice>>,
+    game_l: Vec<f32>,
+    game_r: Vec<f32>,
     trash: rtrb::Producer<Trash>,
     trash_rx: Option<Consumer<Trash>>,
 }
@@ -190,6 +207,9 @@ impl Engine {
             keys_group: None,
             keys_l: vec![0.0; MAX_BLOCK],
             keys_r: vec![0.0; MAX_BLOCK],
+            game: None,
+            game_l: vec![0.0; MAX_BLOCK],
+            game_r: vec![0.0; MAX_BLOCK],
             trash,
             trash_rx: Some(trash_rx),
         };
@@ -275,6 +295,31 @@ impl Engine {
                     std::mem::forget(old);
                 }
             }
+            Command::GameSynthLoad(voice) => {
+                if let Some(old) = self.game.replace(voice) {
+                    self.trash_game(old);
+                }
+            }
+            Command::GameSynthFrame {
+                on,
+                bend,
+                wheel,
+                gain,
+            } => {
+                if let Some(game) = self.game.as_deref_mut() {
+                    game.frame(GameFrame {
+                        on,
+                        bend,
+                        wheel,
+                        gain,
+                    });
+                }
+            }
+            Command::GameSynthClear => {
+                if let Some(game) = self.game.as_deref_mut() {
+                    game.stop();
+                }
+            }
             Command::StopAudition => {
                 let frames = self.frames_for(STOP_FADE_MS);
                 for v in &mut self.auditions {
@@ -312,6 +357,18 @@ impl Engine {
                 self.audition_attack[slot] = 0;
             }
         }
+    }
+
+    /// A game voice leaves the audio thread through the trash; with nobody collecting, it is leaked, never freed here.
+    fn trash_game(&mut self, voice: Box<GameEngineVoice>) {
+        if let Err(rtrb::PushError::Full(old)) = self.trash.push(Trash::Game(voice)) {
+            std::mem::forget(old);
+        }
+    }
+
+    /// The game voice is playing (tests and status).
+    pub fn game_voice(&self) -> Option<&GameEngineVoice> {
+        self.game.as_deref()
     }
 
     fn trigger(&mut self, pad: u16, sample: Arc<Sample>, params: PlayParams) {
@@ -460,6 +517,21 @@ impl Engine {
             for i in 0..n {
                 out[2 * i] += self.keys_l[i] * self.keys_gain;
                 out[2 * i + 1] += self.keys_r[i] * self.keys_gain;
+            }
+        }
+        if let Some(game) = self.game.as_deref_mut() {
+            // The game voice joins the master bus too, before master gain and the clipper; the game sets its level.
+            self.game_l[..n].fill(0.0);
+            self.game_r[..n].fill(0.0);
+            game.render_add(&mut self.game_l[..n], &mut self.game_r[..n]);
+            for i in 0..n {
+                out[2 * i] += self.game_l[i];
+                out[2 * i + 1] += self.game_r[i];
+            }
+            if game.finished() {
+                if let Some(old) = self.game.take() {
+                    self.trash_game(old);
+                }
             }
         }
         for s in out.iter_mut() {

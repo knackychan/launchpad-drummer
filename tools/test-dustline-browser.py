@@ -95,12 +95,24 @@ def main():
                     }''')
                     wait(frame, '!!window.__dustlineTestSim')
                 assert frame.evaluate('window.origin') == 'null'
-                assert frame.evaluate('Dustline.version') == '0.12.0'
+                assert frame.evaluate('Dustline.version') == '0.13.0'
                 frame.locator('#startBtn').click()
-                wait(frame, 'Dustline.audio.decodedCount===28 && Dustline.audio.state==="running"')
+                wait(frame, 'Dustline.audio.decodedCount===29 && Dustline.audio.state==="running"')
+                # the ship's 24 assets are decoded and attached, and the tone runs (ship engine spec 2.2 and 4.5)
+                wait(frame, 'Dustline.audio.ship.total===24 && Dustline.audio.ship.decoded===24 && Dustline.audio.engine.tone===true')
                 assert frame.evaluate('document.activeElement.id') == 'game', 'Start focuses the racing frame'
                 page.keyboard.press('p');wait(frame, 'Dustline.paused')
                 page.keyboard.press('p');wait(frame, '!Dustline.paused')
+                if args.cdp:
+                    # LIVE SYNTH (ship engine spec 5.3 and 7): the native voice reports ready, LIVE is chosen, frames reach Rust
+                    wait(frame, 'Dustline.audio.live==="ready" && !document.getElementById("pauseEngine").options[1].disabled')
+                    frame.evaluate("const s=document.getElementById('pauseEngine');s.value='live';s.dispatchEvent(new Event('change'))")
+                    wait(frame, 'Dustline.audio.engineMode==="live"')
+                    page.wait_for_timeout(500)
+                    live = page.evaluate("__TAURI__.core.invoke('game_engine_status')")
+                    assert live['running'] and live['frames'] > 0 and live['source'] in ('game', 'user'), live
+                    frame.evaluate("const s=document.getElementById('pauseEngine');s.value='baked';s.dispatchEvent(new Event('change'))")
+                    wait(frame, 'Dustline.audio.engineMode==="baked"')
 
                 frame.evaluate('localStorage.setItem("bridge-check", "persisted")')
                 wait(page, 'localStorage.getItem("lpd.game.dustline.bridge-check")==="persisted"')
@@ -198,7 +210,7 @@ def main():
                 frame = game()
                 assert frame.evaluate('localStorage.getItem("bridge-check")') == 'persisted'
                 assert not errors, errors
-                print(json.dumps({'mode': label, 'checks': 'sandbox boot, Web Audio, keyboard focus/pause, host storage and remount, source rejection, parent and in-frame fullscreen, game plate bounds' + (', synthetic Tauri fader boost/brake, knob alignment, Focus 1 vent and Control 1 repairs, native LED command delivery/validation and game-switch cleanup' if args.cdp else ''), 'frame': box, 'actualDevicesBeforeInjection':actual_devices, 'errors': errors}))
+                print(json.dumps({'mode': label, 'checks': 'sandbox boot, Web Audio, ship assets and tone, keyboard focus/pause, host storage and remount, source rejection, parent and in-frame fullscreen, game plate bounds' + (', LIVE SYNTH ready and frames in Rust, synthetic Tauri fader boost/brake, knob alignment, Focus 1 vent and Control 1 repairs, native LED command delivery/validation and game-switch cleanup' if args.cdp else ''), 'frame': box, 'actualDevicesBeforeInjection':actual_devices, 'errors': errors}))
             finally:
                 page.evaluate('([key,value])=>{if(value===null)localStorage.removeItem(key);else localStorage.setItem(key,value)}', [key, previous])
                 page.evaluate('([key,value])=>{if(value===null)localStorage.removeItem(key);else localStorage.setItem(key,value)}', [midi_key, previous_midi])

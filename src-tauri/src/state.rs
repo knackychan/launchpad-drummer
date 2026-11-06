@@ -14,7 +14,7 @@ use crate::devices::{self, MidiDevice, MidiMsg};
 use crate::lights::LightPainter;
 use crate::logfile;
 use crate::patches::{self, PatchList, PatchRef};
-use crate::router::{LearnTarget, Router, UiEvent};
+use crate::router::{GameEngineStatus, LearnTarget, Router, UiEvent};
 use crate::saver::{SaveState, SaveStatus, Saver};
 use crate::sequencer::{Fired, Params, SeqState};
 use crate::startup::{self, LoadPhase, LoadStatus, LoadStep, LoadTracker, Startup};
@@ -27,8 +27,9 @@ use lpd_core::kit::learn;
 use lpd_core::kit::{self, History, Pad, Set};
 use lpd_core::synth::{
     factory::factory,
+    game::GameEngineVoice,
     params::{ParamId, Route, ROUTES},
-    patch::{clean_name, Patch, PatchSource},
+    patch::{clean_name, file_name, Patch, PatchSource},
 };
 use rtrb::{Consumer, Producer};
 use std::collections::{HashMap, HashSet};
@@ -36,6 +37,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Instant;
+
+/// LIVE SYNTH (ship engine spec 5.2): a user patch saved on PLAY under this name replaces the game's.
+pub const GAME_PATCH_NAME: &str = "DUSTLINE KESTREL";
+/// The largest patch text the game may send.
+pub const GAME_PATCH_MAX: usize = 16384;
 
 #[derive(serde::Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -903,6 +909,8 @@ impl AppState {
         // new status, not overwritten by it.
         self.set_audio_status(status);
         self.set_audio_stats(stats);
+        // After the status: the voice is rebuilt for the new stream's rate.
+        self.restart_game_engine();
         // Pad lights followed voices of the old stream.
         lock(&self.painter).invalidate();
         self.reload_soundfont();
@@ -930,6 +938,61 @@ impl AppState {
     /// The router takes the instrument-trash queue of the new engine.
     pub fn install_trash(&self, trash: Option<Consumer<lpd_core::audio::Trash>>) {
         lock(&self.router).set_trash(trash);
+    }
+
+    /// LIVE SYNTH start (ship engine spec 5.2). The user's `DUSTLINE KESTREL.lbpatch` in `dir` wins
+    /// over the patch the game sent, so a tweak saved on PLAY is heard without a rebuild. The voice is
+    /// built here, with no lock held and off the audio thread, for the current output rate. Slow:
+    /// call it off the UI thread.
+    pub fn game_engine_start(
+        &self,
+        game_patch: &str,
+        dir: Option<&Path>,
+    ) -> Result<GameEngineStatus, String> {
+        if game_patch.len() > GAME_PATCH_MAX {
+            return Err(format!(
+                "Engine patch too large ({} bytes, at most {GAME_PATCH_MAX})",
+                game_patch.len()
+            ));
+        }
+        let user = dir.and_then(|d| patches::read(d, &file_name(GAME_PATCH_NAME)).ok());
+        let (patch, source) = match user {
+            Some(p) => (p, "user"),
+            None => (
+                Patch::from_json(game_patch)
+                    .map_err(|e| format!("Engine patch not loaded — {e}"))?,
+                "game",
+            ),
+        };
+        let rate = self.sample_rate();
+        let voice = GameEngineVoice::new(rate, &patch.params);
+        let mut r = lock(&self.router);
+        r.game_engine_start(patch.params, source, patch.name, voice);
+        Ok(r.game_engine_status(rate))
+    }
+
+    /// One 40 Hz frame from the game (false: no voice started, or a non-finite value).
+    pub fn game_engine_frame(&self, on: bool, bend: f32, wheel: f32, gain: f32) -> bool {
+        lock(&self.router).game_engine_frame(on, bend, wheel, gain)
+    }
+
+    pub fn game_engine_stop(&self) {
+        lock(&self.router).game_engine_stop();
+    }
+
+    pub fn game_engine_status(&self) -> GameEngineStatus {
+        let rate = self.sample_rate();
+        lock(&self.router).game_engine_status(rate)
+    }
+
+    /// A new output stream: the started game patch gets a voice for the new rate, built with no lock
+    /// held. A start or stop in between wins (the generation no longer matches).
+    fn restart_game_engine(&self) {
+        let Some(spec) = lock(&self.router).game_spec().cloned() else {
+            return;
+        };
+        let voice = GameEngineVoice::new(self.sample_rate(), &spec.params);
+        lock(&self.router).game_engine_rebuild(spec.generation, voice);
     }
 
     pub fn set_keys_notifier(&self, notifier: KeysNotifier) {
@@ -2326,6 +2389,57 @@ mod tests {
         let set = state.get_current_set();
         assert_eq!(set.keys.patch_source, PatchSource::Init);
         assert_eq!(set.keys.patch.params.filter.cutoff, 300.0);
+    }
+
+    #[test]
+    fn the_game_engine_prefers_the_users_dustline_kestrel_patch() {
+        let (state, mut rx) = app();
+        let dir = tempfile::tempdir().unwrap();
+        let mut game = factory("moogBass").unwrap();
+        game.name = "KESTREL ENGINE".into();
+        let json = game.to_json();
+        let status = state.game_engine_start(&json, Some(dir.path())).unwrap();
+        assert_eq!(
+            (
+                status.running,
+                status.source.as_str(),
+                status.patch.as_str()
+            ),
+            (true, "game", "KESTREL ENGINE")
+        );
+        let mut user = game.clone();
+        user.name = GAME_PATCH_NAME.into();
+        user.params.filter.cutoff = 777.0;
+        patches::write(dir.path(), &user, false).unwrap();
+        let status = state.game_engine_start(&json, Some(dir.path())).unwrap();
+        assert_eq!(
+            (status.source.as_str(), status.patch.as_str()),
+            ("user", "DUSTLINE KESTREL")
+        );
+        assert!(std::iter::from_fn(|| rx.pop().ok()).any(
+            |c| matches!(c, Command::GameSynthLoad(ref v) if v.params().filter.cutoff == 777.0)
+        ));
+        assert!(state.game_engine_frame(true, 0.1, 0.5, 0.5));
+        assert_eq!(state.game_engine_status().frames, 1);
+        state.game_engine_stop();
+        assert!(!state.game_engine_status().running);
+        // The user's keys patch is never touched.
+        assert_eq!(state.get_current_set().keys.patch, Set::new().keys.patch);
+    }
+
+    #[test]
+    fn a_game_engine_patch_that_is_too_large_or_not_a_patch_is_refused() {
+        let (state, _rx) = app();
+        let big = "x".repeat(GAME_PATCH_MAX + 1);
+        assert!(state
+            .game_engine_start(&big, None)
+            .unwrap_err()
+            .starts_with("Engine patch too large"));
+        assert!(state
+            .game_engine_start("not json", None)
+            .unwrap_err()
+            .starts_with("Engine patch not loaded"));
+        assert!(!state.game_engine_status().running);
     }
 
     #[test]

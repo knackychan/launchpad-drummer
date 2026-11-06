@@ -237,3 +237,41 @@ fn a_full_trash_queue_leaks_instead_of_freeing() {
         }
     });
 }
+
+#[test]
+fn game_voice_paths_never_allocate_or_free() {
+    use lpd_core::synth::{game::GameEngineVoice, params::SynthParams};
+    let (mut engine, _) = Engine::new(48_000);
+    let mut trash = engine.take_trash().unwrap();
+    // Built before the guard, as the host does.
+    let first = GameEngineVoice::new(48_000, &SynthParams::default());
+    let second = GameEngineVoice::new(48_000, &SynthParams::default());
+    let mut out = [0.0; 2048];
+    assert_no_alloc(|| {
+        engine.handle(Command::GameSynthLoad(first));
+        engine.handle(Command::GameSynthLoad(second));
+        for k in 0..40 {
+            engine.handle(Command::GameSynthFrame {
+                on: k < 30,
+                bend: k as f32 / 40.0,
+                wheel: 0.5,
+                gain: 0.8,
+            });
+            engine.render(&mut out);
+        }
+        engine.handle(Command::GameSynthFrame {
+            on: true,
+            bend: f32::NAN,
+            wheel: 9.0,
+            gain: -1.0,
+        });
+        engine.render(&mut out);
+        engine.handle(Command::GameSynthClear);
+        for _ in 0..4 {
+            engine.render(&mut out);
+        }
+    });
+    // Both voices came back, to be dropped here, off the audio thread.
+    assert!(matches!(trash.pop(), Ok(Trash::Game(_))));
+    assert!(matches!(trash.pop(), Ok(Trash::Game(_))));
+}
