@@ -4653,6 +4653,8 @@ const DustlineHostBridge = (() => {
     /* ---- one-shots in the centre (boost ignition, release, launch) and the misfire crackle ---- */
     const shotIn=T.gain(1);shotIn.connect(propMix);
     const iCs=T.buf(B.white,1,5.5),iHp=T.bq('highpass',2300,.7),iCg=shot(T.gain(0));T.chain(iCs,iHp,iCg,engineMix);
+    // boost release: 0.12's synth thump (with the puff and two afterfire pops), not a sample
+    const rS=T.osc('sine',80),rSg=shot(T.gain(0));T.chain(rS,rSg,engineMix);
 
     /* ---- air: speed wind, buffeting, intake suction, wake, airbrake, lift flutter, steam ---- */
     const wa=T.buf(B.pink,1,.9),wbpA=T.bq('bandpass',700,.55),wam=T.am('lfoMid',.3,.22),wl=T.gain(0),wpa=T.pan(-.7);T.chain(wa,wbpA,wam.node,wl,wpa,engineMix);
@@ -4720,8 +4722,15 @@ const DustlineHostBridge = (() => {
       playShot(SHIP.oneShots.ignite,shotIn,t,LV.burn*SHOT*k,1,len);
       duckBus(t,.22*k,.12);
     }
+    // 0.12's release, unchanged: the user preferred it to the release sample (SHIP.oneShots.release stays in the profile, unplayed).
     function release(t,k){
-      playShot(SHIP.oneShots.release,shotIn,t,LV.burn*SHOT*clamp(fin(k,1),.2,1.2),1);
+      k=clamp(fin(k,1),.2,1.2)*LV.burn;
+      rS.frequency.cancelScheduledValues(t);rS.frequency.setValueAtTime(96,t);rS.frequency.setTargetAtTime(38,t,.09);
+      rSg.gain.cancelScheduledValues(t);rSg.gain.setValueAtTime(0,t);rSg.gain.linearRampToValueAtTime(.34*k,t+.012);rSg.gain.setTargetAtTime(0,t+.04,.09);
+      pbp.frequency.cancelScheduledValues(t);pbp.frequency.setValueAtTime(1300,t);pbp.frequency.setTargetAtTime(280,t,.16);
+      pg.gain.cancelScheduledValues(t);pg.gain.setValueAtTime(0,t);pg.gain.linearRampToValueAtTime(.2*k,t+.02);pg.gain.setTargetAtTime(0,t+.07,.13);
+      // two soft afterfire pops
+      for(const dt of[.07+rnd()*.03,.17+rnd()*.05]){iCg.gain.setValueAtTime(0,t+dt);iCg.gain.linearRampToValueAtTime(.09*k,t+dt+.004);iCg.gain.setTargetAtTime(0,t+dt+.01,.016);}
     }
     // Shift pops (spec 3.1): each engine plays its own variant, the first picked by the seeded generator, at its own pitch and pan.
     function pops(ids,t){
