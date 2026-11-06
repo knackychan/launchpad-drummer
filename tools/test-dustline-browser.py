@@ -152,9 +152,10 @@ def main():
                       return sim.startAlignment('vent','coolant');
                     }''')
                     target=frame.evaluate('Dustline.state.event.target')
-                    page.evaluate("async target=>{for(const v of [0,target])await __TAURI__.event.emit('lcxl-midi',{data:[176,13,v]});}", target)
+                    # Left cooling is BOTTOM 1 (CC 49, LED index 16) since the 2026-11-05 knob layout; TOP 1 (CC 13) is the stabilizer.
+                    page.evaluate("async target=>{for(const v of [0,target])await __TAURI__.event.emit('lcxl-midi',{data:[176,49,v]});}", target)
                     wait(frame, 'Dustline.state.event && Dustline.state.event.aligned')
-                    wait_leds(lambda batches:any(m[0]==240 and m[6]==120 and m[7]==0 and m[9]==60 for b in batches for m in b))
+                    wait_leds(lambda batches:any(m[0]==240 and m[6]==120 and m[7]==0 and m[40]==16 and m[41]==60 for b in batches for m in b))
                     wait(frame, 'Dustline.state.eventResult && Dustline.state.eventResult.grade==="PERFECT"')
                     for kind, system, note in [('vent', 'coolant', 41), ('repair', 'stabilizer', 73), ('repair', 'hull', 73)]:
                         assert frame.evaluate('''([kind,system])=>{
@@ -163,11 +164,11 @@ def main():
                             recovery:0,offCourse:0,lastImpactAt:0,hazardActive:null,event:null,eventResult:null,knobs:{}});
                           s.heading=sim.sampleTrack(s.distance).heading;for(const o of s.opponents)o.distance=s.distance+1500;
                           if(kind==='repair'){s.pendingDamage=system;sim._penaltyTime=8;}
-                          return sim.startAlignment(kind,system);
+                          return sim.startTiming(kind,system);
                         }''', [kind, system])
-                        await_button = "async n=>{await __TAURI__.event.emit('lcxl-midi',{data:[128,n,0]});await __TAURI__.event.emit('lcxl-midi',{data:[144,n,127]});}"
-                        page.evaluate(await_button, note)
-                        wait(frame, 'Dustline.state.event && Dustline.state.event.fromAlignment')
+                        # Vent (Track Focus 1) and Repair (Track Control 1) answer their own timed cue (a press no longer turns a
+                        # knob cue into a timed one); a repair takes two hits.
+                        wait(frame, 'Dustline.state.event && Dustline.state.event.mode!=="align" && Dustline.state.event.kind===' + json.dumps(kind))
                         for _ in range(2 if kind == 'repair' else 1):
                             page.evaluate("n=>__TAURI__.event.emit('lcxl-midi',{data:[128,n,0]})", note)
                             frame.evaluate('''()=>{const s=__dustlineTestSim.state;s.time+=2;s.event.elapsed=s.event.target;s.eventResult=null;}''')
